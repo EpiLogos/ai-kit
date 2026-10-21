@@ -1004,205 +1004,226 @@ impl Service {
             None,
             Some(deadline),
             |runtime, _application| {
-                let scoped_display = runtime.scoped_project_display(explicit_scope.as_deref());
-                if explicit_scope.is_some() && scoped_display.is_none() {
-                    return Err(aikit_core::AikitError::new(
-                        "knowledge.scope_invalid",
-                        "Explicit Project scope is invalid or cannot be resolved",
-                    ));
-                }
-                let discovered_project = scoped_display.as_deref().and_then(|display| {
-                    runtime
-                        .work_repos
-                        .as_ref()?
-                        .projects()
-                        .iter()
-                        .find(|project| format!("Work/{}", project.name) == display)
-                });
-                // The root NOW provider includes every Work project, but a
-                // Project-scoped reply may only query its own NOW files plus
-                // common Control records. Selecting globs before ripgrep also
-                // prevents sibling read failures from surfacing as absences.
-                let mut scoped_provider_absences = Vec::new();
-                let scoped_now_field = match (
-                    scoped_display.as_deref(),
-                    runtime.now_field.as_ref(),
-                    runtime.central.as_ref(),
-                ) {
-                    (Some(_), Some(provider), Some(owner)) => {
-                        let scope = provider
-                            .scope()
-                            .for_project(discovered_project.map(|p| p.name.as_str()));
-                        // The native owner's admission is per-Project: a scoped
-                        // reply reads through the owner bound to THAT Project's
-                        // map (common Control records ride the root lineage), so
-                        // the invoking session's own binding never fences another
-                        // Project's records out of an explicitly scoped reply.
-                        let owner: Arc<CentralFileMapProvider<SystemRunner>> =
-                            match discovered_project {
-                                Some(project) => {
-                                    match CentralFileMapProvider::connect(
-                                        SearchDeadline::bound(
-                                            Some(deadline),
-                                            native_source_runner(),
-                                        ),
-                                        aikit_adapters::central_file_map::executable(),
-                                        &scope.central_root,
-                                        Some(project.name.as_str()),
-                                    ) {
-                                        Ok(rebound) => Arc::new(rebound),
-                                        Err(error) => {
-                                            scoped_provider_absences.push(format!(
-                                                "NOW-field scoped owner unavailable: {error}"
-                                            ));
-                                            Arc::clone(owner)
-                                        }
-                                    }
-                                }
-                                None => Arc::clone(owner),
-                            };
-                        match NowFieldSourcePoolProvider::connect(
-                            SearchDeadline::bound(
-                                Some(deadline),
-                                aikit_adapters::now_field::default_runner(&scope.central_root),
-                            ),
-                            aikit_adapters::ripgrep::executable(),
-                            scope,
-                        ) {
-                            Ok(provider) => Some(provider.with_native_owner(owner)),
-                            Err(error) => {
-                                scoped_provider_absences
-                                    .push(format!("NOW-field scoped search unavailable: {error}"));
-                                None
-                            }
-                        }
-                    }
-                    _ => None,
-                };
-                let now_field = if scoped_display.is_some() {
-                    scoped_now_field.as_ref()
-                } else {
-                    runtime.now_field.as_ref()
-                };
-                // A Work-repos search can fail before producing any hits. Search
-                // only the resolved Project at the provider boundary so another
-                // repo's ripgrep failure cannot appear in this reply's absences.
-                // The root World deliberately retains the broad native provider.
-                let scoped_work_repos = discovered_project.and_then(|project| {
-                    let owner = runtime.work_repos.as_ref()?;
-                    match owner.for_project(&project.project_id) {
-                        Ok(provider) => Some(provider),
-                        Err(error) => {
-                            scoped_provider_absences
-                                .push(format!("Work source scope unavailable: {error}"));
-                            None
-                        }
-                    }
-                });
-                let work_repos: Option<&(dyn SourcePoolProvider + Sync)> =
-                    if scoped_display.is_some() {
-                        scoped_work_repos
-                            .as_ref()
-                            .map(|provider| provider as &(dyn SourcePoolProvider + Sync))
-                    } else {
-                        runtime
-                            .work_repos
-                            .as_ref()
-                            .map(|provider| provider as &(dyn SourcePoolProvider + Sync))
-                    };
-                let mut result = runtime
-                    .application_with_project_scope(
-                        self.knowledge_context(),
-                        scoped_display.as_deref(),
-                        now_field,
-                        work_repos,
-                    )
-                    .resolve(expression, candidate_limit);
-                result.absences.extend(scoped_provider_absences);
-                result.absences.extend(runtime.absences.clone());
-                result.absences.extend(
-                    runtime
-                        .project_absences
-                        .iter()
-                        .filter(|absence| {
-                            scoped_display
-                                .as_deref()
-                                .is_none_or(|project| project == absence.project)
-                        })
-                        .map(|absence| absence.message.clone()),
-                );
-                // Pending authored relations are scoped: a query sees its own
-                // scope's rollup; other projects' pendings stay with
-                // `knowledge status`.
-                if let Some(pending) = scoped_display.as_deref().and_then(|display| {
-                    runtime
-                        .authored_pending
-                        .iter()
-                        .find(|pending| pending.project == display)
-                }) {
-                    result.absences.push(pending.rollup_line());
-                }
-                // Code-index degradations are scoped the same way: a reply carries
-                // only its own scope's line, never another project's — the leak
-                // this fix closes. Every project's degradation stays in
-                // `knowledge status`.
-                if let Some(display) = scoped_display.as_deref() {
-                    for degradation in &runtime.code_degradations {
-                        if degradation.project == display {
-                            result.absences.push(degradation.message.clone());
-                        }
-                    }
-                }
-                // A scoped query keeps another project's compiled authored edges
-                // — and its compiled folder subjects — out of its results;
-                // unattributable material passes through. Work-repo hits carry
-                // their exact project in the owner-decoded address, so
-                // the same discipline applies to them.
-                if let Some(display) = &scoped_display {
-                    let attributed_to_other_project =
-                        |attribution: &BTreeMap<String, String>, resource: &str| {
-                            attribution
-                                .get(resource)
-                                .is_some_and(|project| project != display)
-                        };
-                    result.hits.retain(|hit| {
-                        let resource = hit.resource.as_str();
-                        // A Source ref may surface through SourcePool or a
-                        // ProjectMap endpoint. The address wrapper does not
-                        // change which Project owns it.
-                        if !runtime.source_belongs_to_scope(resource, display) {
-                            return false;
-                        }
-                        if attributed_to_other_project(&runtime.authored_edge_projects, resource)
-                            || attributed_to_other_project(
-                                &runtime.folder_subject_projects,
-                                resource,
-                            )
-                            || attributed_to_other_project(
-                                &runtime.matrix_object_projects,
-                                resource,
-                            )
-                        {
-                            return false;
-                        }
-                        match &hit.address {
-                            aikit_core::KnowledgeAddress::Code(reference) => runtime
-                                .code_source_scopes
-                                .get(reference.source.as_str())
-                                .is_some_and(|project| project == display),
-                            _ => true,
-                        }
-                    });
-                }
-                Ok(result)
+                self.resolve_in_runtime(
+                    runtime,
+                    expression,
+                    candidate_limit,
+                    explicit_scope.as_deref(),
+                    deadline,
+                )
             },
         )?;
-        self.apply_learned_accessibility(&resolve_subjects(expression), &mut result)?;
+        self.finish_resolved(expression, limit, &mut result)?;
+        Ok(result)
+    }
+
+    /// The tail of a resolve: learned accessibility, the page the caller asked
+    /// for, and the address bindings the hits teach.
+    fn finish_resolved(
+        &self,
+        expression: &ResolveExpression,
+        limit: usize,
+        result: &mut KnowledgeSearchResult,
+    ) -> Result<()> {
+        self.apply_learned_accessibility(&resolve_subjects(expression), result)?;
         result.hits.truncate(limit);
         if let Err(error) = self.knowledge_store().remember_search_hits(&result.hits) {
             result.absences.push(format!(
                 "Knowledge address cache unavailable; live search results remain valid: {error}"
             ));
+        }
+        Ok(())
+    }
+
+    /// One resolve against an already materialised runtime. `deadline` bounds
+    /// only the owners this resolve connects to itself (a Project-scoped NOW
+    /// pool and Work repo); the runtime's own providers carry whatever bound
+    /// it was materialised with.
+    fn resolve_in_runtime(
+        &self,
+        runtime: &KnowledgeRuntime,
+        expression: &ResolveExpression,
+        candidate_limit: usize,
+        explicit_scope: Option<&str>,
+        deadline: SearchDeadline,
+    ) -> Result<KnowledgeSearchResult> {
+        let scoped_display = runtime.scoped_project_display(explicit_scope);
+        if explicit_scope.is_some() && scoped_display.is_none() {
+            return Err(aikit_core::AikitError::new(
+                "knowledge.scope_invalid",
+                "Explicit Project scope is invalid or cannot be resolved",
+            ));
+        }
+        let discovered_project = scoped_display.as_deref().and_then(|display| {
+            runtime
+                .work_repos
+                .as_ref()?
+                .projects()
+                .iter()
+                .find(|project| format!("Work/{}", project.name) == display)
+        });
+        // The root NOW provider includes every Work project, but a
+        // Project-scoped reply may only query its own NOW files plus
+        // common Control records. Selecting globs before ripgrep also
+        // prevents sibling read failures from surfacing as absences.
+        let mut scoped_provider_absences = Vec::new();
+        let scoped_now_field = match (
+            scoped_display.as_deref(),
+            runtime.now_field.as_ref(),
+            runtime.central.as_ref(),
+        ) {
+            (Some(_), Some(provider), Some(owner)) => {
+                let scope = provider
+                    .scope()
+                    .for_project(discovered_project.map(|p| p.name.as_str()));
+                // The native owner's admission is per-Project: a scoped
+                // reply reads through the owner bound to THAT Project's
+                // map (common Control records ride the root lineage), so
+                // the invoking session's own binding never fences another
+                // Project's records out of an explicitly scoped reply.
+                let owner: Arc<CentralFileMapProvider<SystemRunner>> = match discovered_project {
+                    Some(project) => {
+                        match CentralFileMapProvider::connect(
+                            SearchDeadline::bound(Some(deadline), native_source_runner()),
+                            aikit_adapters::central_file_map::executable(),
+                            &scope.central_root,
+                            Some(project.name.as_str()),
+                        ) {
+                            Ok(rebound) => Arc::new(rebound),
+                            Err(error) => {
+                                scoped_provider_absences
+                                    .push(format!("NOW-field scoped owner unavailable: {error}"));
+                                Arc::clone(owner)
+                            }
+                        }
+                    }
+                    None => Arc::clone(owner),
+                };
+                match NowFieldSourcePoolProvider::connect(
+                    SearchDeadline::bound(
+                        Some(deadline),
+                        aikit_adapters::now_field::default_runner(&scope.central_root),
+                    ),
+                    aikit_adapters::ripgrep::executable(),
+                    scope,
+                ) {
+                    Ok(provider) => Some(provider.with_native_owner(owner)),
+                    Err(error) => {
+                        scoped_provider_absences
+                            .push(format!("NOW-field scoped search unavailable: {error}"));
+                        None
+                    }
+                }
+            }
+            _ => None,
+        };
+        let now_field = if scoped_display.is_some() {
+            scoped_now_field.as_ref()
+        } else {
+            runtime.now_field.as_ref()
+        };
+        // A Work-repos search can fail before producing any hits. Search
+        // only the resolved Project at the provider boundary so another
+        // repo's ripgrep failure cannot appear in this reply's absences.
+        // The root World deliberately retains the broad native provider.
+        let scoped_work_repos = discovered_project.and_then(|project| {
+            let owner = runtime.work_repos.as_ref()?;
+            match owner.for_project(&project.project_id) {
+                Ok(provider) => Some(provider),
+                Err(error) => {
+                    scoped_provider_absences
+                        .push(format!("Work source scope unavailable: {error}"));
+                    None
+                }
+            }
+        });
+        let work_repos: Option<&(dyn SourcePoolProvider + Sync)> = if scoped_display.is_some() {
+            scoped_work_repos
+                .as_ref()
+                .map(|provider| provider as &(dyn SourcePoolProvider + Sync))
+        } else {
+            runtime
+                .work_repos
+                .as_ref()
+                .map(|provider| provider as &(dyn SourcePoolProvider + Sync))
+        };
+        let mut result = runtime
+            .application_with_project_scope(
+                self.knowledge_context(),
+                scoped_display.as_deref(),
+                now_field,
+                work_repos,
+            )
+            .resolve(expression, candidate_limit);
+        result.absences.extend(scoped_provider_absences);
+        result.absences.extend(runtime.absences.clone());
+        result.absences.extend(
+            runtime
+                .project_absences
+                .iter()
+                .filter(|absence| {
+                    scoped_display
+                        .as_deref()
+                        .is_none_or(|project| project == absence.project)
+                })
+                .map(|absence| absence.message.clone()),
+        );
+        // Pending authored relations are scoped: a query sees its own
+        // scope's rollup; other projects' pendings stay with
+        // `knowledge status`.
+        if let Some(pending) = scoped_display.as_deref().and_then(|display| {
+            runtime
+                .authored_pending
+                .iter()
+                .find(|pending| pending.project == display)
+        }) {
+            result.absences.push(pending.rollup_line());
+        }
+        // Code-index degradations are scoped the same way: a reply carries
+        // only its own scope's line, never another project's — the leak
+        // this fix closes. Every project's degradation stays in
+        // `knowledge status`.
+        if let Some(display) = scoped_display.as_deref() {
+            for degradation in &runtime.code_degradations {
+                if degradation.project == display {
+                    result.absences.push(degradation.message.clone());
+                }
+            }
+        }
+        // A scoped query keeps another project's compiled authored edges
+        // — and its compiled folder subjects — out of its results;
+        // unattributable material passes through. Work-repo hits carry
+        // their exact project in the owner-decoded address, so
+        // the same discipline applies to them.
+        if let Some(display) = &scoped_display {
+            let attributed_to_other_project =
+                |attribution: &BTreeMap<String, String>, resource: &str| {
+                    attribution
+                        .get(resource)
+                        .is_some_and(|project| project != display)
+                };
+            result.hits.retain(|hit| {
+                let resource = hit.resource.as_str();
+                // A Source ref may surface through SourcePool or a
+                // ProjectMap endpoint. The address wrapper does not
+                // change which Project owns it.
+                if !runtime.source_belongs_to_scope(resource, display) {
+                    return false;
+                }
+                if attributed_to_other_project(&runtime.authored_edge_projects, resource)
+                    || attributed_to_other_project(&runtime.folder_subject_projects, resource)
+                    || attributed_to_other_project(&runtime.matrix_object_projects, resource)
+                {
+                    return false;
+                }
+                match &hit.address {
+                    aikit_core::KnowledgeAddress::Code(reference) => runtime
+                        .code_source_scopes
+                        .get(reference.source.as_str())
+                        .is_some_and(|project| project == display),
+                    _ => true,
+                }
+            });
         }
         Ok(result)
     }
@@ -1601,11 +1622,22 @@ impl Service {
                 "graph limits require 1..=20000 nodes and 1..=100000 edges",
             ));
         }
-        let found =
-            self.knowledge_search(query, max_nodes.saturating_add(max_edges).saturating_add(1))?;
         let expression =
             parse_or_search_expression_in_scope(query, self.knowledge_scope_project().as_deref())?;
+        let hit_limit = max_nodes.saturating_add(max_edges).saturating_add(1);
+        // The search and the projection stand on one materialised runtime: the
+        // owner's world map is read once for the whole request.
         self.with_knowledge(|runtime, _| {
+            let explicit_scope = expression_scope_project(&expression).map(str::to_owned);
+            let mut found = self.resolve_in_runtime(
+                runtime,
+                &expression,
+                hit_limit.max(256),
+                explicit_scope.as_deref(),
+                SearchDeadline::starting_now(),
+            )?;
+            self.finish_resolved(&expression, hit_limit, &mut found)?;
+            found.query = query.into();
             let mut objects: Vec<_> = runtime
                 .wiki_index()
                 .map(|index| {

@@ -733,10 +733,12 @@ fn real_gitnexus_code_and_project_map_hits_obey_current_and_explicit_scope() {
         "Work/larch/ProjectCentral/now/returns/sibling.md"
     ));
 
-    // An empty subject reaches the real GitNexus query command after both
-    // repositories indexed, and GitNexus refuses it. The failure itself must
-    // stay scoped: silently dropping cedar's own error would be false health.
-    let own_failure = service.knowledge_search("", 256).unwrap();
+    // A subject of two hyphens reaches the real GitNexus query command after
+    // both repositories indexed, and GitNexus refuses it as a usage error (an
+    // empty subject is never sent: there is nothing to ask the index). The
+    // failure itself must stay scoped: silently dropping cedar's own error
+    // would be false health.
+    let own_failure = service.knowledge_search("--", 256).unwrap();
     assert!(
         code_query_failed_for(&own_failure, &world.join("Work/cedar")),
         "cedar's real GitNexus query failure was lost: {:?}",
@@ -747,7 +749,7 @@ fn real_gitnexus_code_and_project_map_hits_obey_current_and_explicit_scope() {
         "cedar search disclosed larch's real GitNexus query failure"
     );
     let direct_failure = service
-        .knowledge_resolve(&parse_or_search_expression("").unwrap(), 256)
+        .knowledge_resolve(&parse_or_search_expression("--").unwrap(), 256)
         .unwrap();
     assert!(code_query_failed_for(
         &direct_failure,
@@ -757,7 +759,7 @@ fn real_gitnexus_code_and_project_map_hits_obey_current_and_explicit_scope() {
         &direct_failure,
         &world.join("Work/larch")
     ));
-    let cross_failure = service.knowledge_search(": larch", 256).unwrap();
+    let cross_failure = service.knowledge_search(": larch --", 256).unwrap();
     assert!(code_query_failed_for(
         &cross_failure,
         &world.join("Work/larch")
@@ -850,7 +852,7 @@ fn real_gitnexus_code_and_project_map_hits_obey_current_and_explicit_scope() {
         &global_direct,
         "Work/larch/ProjectCentral/now/returns/sibling.md"
     ));
-    let root_failure = root_service.knowledge_search("", 256).unwrap();
+    let root_failure = root_service.knowledge_search("--", 256).unwrap();
     assert!(code_query_failed_for(
         &root_failure,
         &world.join("Work/cedar")

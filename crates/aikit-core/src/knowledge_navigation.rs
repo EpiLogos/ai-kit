@@ -569,6 +569,12 @@ fn pool_outcome(
     } else {
         SourceSearchMode::Fulltext
     };
+    // A hybrid search ranks by the query's text; with none there is nothing
+    // to rank, and the full-text arm it fuses rejects an empty match. The
+    // pool is not asked.
+    if mode == SourceSearchMode::Hybrid && source_query.trim().is_empty() {
+        return outcome;
+    }
     match binding
         .provider
         .search(source_query, mode, tag_filter, limit)
@@ -704,6 +710,11 @@ fn code_outcome(
         hits: Vec::new(),
         absences: Vec::new(),
     };
+    // A code index answers a text query; with none, there is nothing to ask
+    // it and starting its search process would only fail.
+    if query.trim().is_empty() {
+        return outcome;
+    }
     let status = code.status();
     if status.available && status.indexed && status.capabilities.search {
         match code.search(query, limit) {
@@ -2633,6 +2644,20 @@ mod tests {
         }
     }
 
+    #[test]
+    fn a_code_index_is_not_asked_for_an_empty_query() {
+        let code = FakeCodeIndex {
+            count: 3,
+            score: 0.9,
+        };
+        for empty in ["", "   "] {
+            let outcome = code_outcome(&code, empty, 10);
+            assert!(outcome.hits.is_empty(), "{empty:?}");
+            assert!(outcome.absences.is_empty(), "{empty:?}");
+        }
+        assert_eq!(code_outcome(&code, "auth", 10).hits.len(), 3);
+    }
+
     /// A documentation query must not be answered only by derived code
     /// symbols that happen to share its words. Before this case, `resolve`
     /// sorted purely by score, and GitNexus's own default score (0.5 when its
@@ -3518,6 +3543,57 @@ mod admission_page_tests {
         KnowledgeApplication::new(FamiliarityContext::default())
             .with_source_pool(pool, &[])
             .search("anything", limit)
+    }
+
+    /// A hybrid-capable pool that counts how it is asked.
+    struct HybridPool {
+        searches: AtomicUsize,
+    }
+
+    impl SourcePoolProvider for HybridPool {
+        fn capabilities(&self) -> SourceProviderCapabilities {
+            SourceProviderCapabilities {
+                hybrid: true,
+                ..CountingPool {
+                    count: 0,
+                    refused: 0,
+                    asked: AtomicUsize::new(0),
+                }
+                .capabilities()
+            }
+        }
+        fn rebuild(&mut self, _: &[SourceMaterial]) -> Result<()> {
+            Ok(())
+        }
+        fn search(
+            &self,
+            _: &str,
+            mode: SourceSearchMode,
+            _: &[String],
+            _: usize,
+        ) -> Result<Vec<SourceHit>> {
+            assert_eq!(mode, SourceSearchMode::Hybrid);
+            self.searches.fetch_add(1, Ordering::Relaxed);
+            Ok(Vec::new())
+        }
+    }
+
+    #[test]
+    fn a_hybrid_pool_is_not_asked_for_an_empty_query() {
+        let pool = HybridPool {
+            searches: AtomicUsize::new(0),
+        };
+        for empty in ["", "   "] {
+            let result = KnowledgeApplication::new(FamiliarityContext::default())
+                .with_source_pool(&pool, &[])
+                .search(empty, 10);
+            assert!(result.hits.is_empty(), "{empty:?}");
+        }
+        assert_eq!(pool.searches.load(Ordering::Relaxed), 0);
+        KnowledgeApplication::new(FamiliarityContext::default())
+            .with_source_pool(&pool, &[])
+            .search("auth", 10);
+        assert_eq!(pool.searches.load(Ordering::Relaxed), 1);
     }
 
     #[test]
