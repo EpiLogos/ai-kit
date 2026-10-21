@@ -1277,24 +1277,83 @@ impl<R: CommandRunner> WorkReposSourcePoolProvider<R> {
                 .total_cmp(&left.0)
                 .then_with(|| left.1.cmp(&right.1))
         });
-        let mut hits = Vec::new();
-        for (score, relative, evidence) in scored.into_iter().take(limit) {
-            let source = Self::source_ref(project, &relative)?;
+        let selected: Vec<(f64, PathBuf, FileEvidence)> = scored.into_iter().take(limit).collect();
+        // The surfaced files are verified together: one match pass and, when
+        // the first pass was truncated, one count pass per term, each over all
+        // of the files, instead of a process per file. Each file is still
+        // bracketed by its own current reads, taken before and after the
+        // passes that check it.
+        let mut basis = Vec::with_capacity(selected.len());
+        for (_, relative, _) in &selected {
+            let source = Self::source_ref(project, relative)?;
             let before = self.material(&source)?;
-            let absolute = project.root.join(&relative);
-            let selected = SearchRequest {
-                roots: vec![absolute.clone()],
+            basis.push((source, before, project.root.join(relative)));
+        }
+        let absolutes: Vec<PathBuf> = basis
+            .iter()
+            .map(|(_, _, absolute)| absolute.clone())
+            .collect();
+        let mut checked_matches: BTreeMap<PathBuf, Vec<crate::ripgrep::RipgrepMatch>> =
+            BTreeMap::new();
+        let mut checked_counts: BTreeMap<PathBuf, (BTreeSet<usize>, usize)> = BTreeMap::new();
+        if !absolutes.is_empty() {
+            let together = SearchRequest {
+                roots: absolutes.clone(),
+                // Every file keeps its own per-file cap; the repository-wide
+                // budget is judged per file below, as a search of each file
+                // alone would have.
+                limit: usize::MAX,
                 ..request.clone()
             };
             // The global query carries relevance, not a whole-file revision.
             // Bracket a finite real selected-file query with current reads and
             // require its native lines and prior evidence to agree exactly.
             self.require_project(project)?;
-            let checked = self.searcher.search(&selected)?;
+            let checked = self.searcher.search(&together)?;
             self.require_project(project)?;
+            for matched in checked.matches {
+                checked_matches
+                    .entry(matched.path.clone())
+                    .or_default()
+                    .push(matched);
+            }
+            if outcome.truncated {
+                for (index, term) in terms.iter().enumerate() {
+                    let per_term = SearchRequest {
+                        pattern: term.clone(),
+                        regex: false,
+                        max_count_per_file: None,
+                        ..together.clone()
+                    };
+                    self.require_project(project)?;
+                    let counts = self.searcher.count(&per_term)?;
+                    self.require_project(project)?;
+                    for (path, count) in counts {
+                        if !absolutes.contains(&path) {
+                            return Err(AikitError::new(
+                                "work_repos.source_search_basis_conflict",
+                                "Native selected-file count returned another Source",
+                            )
+                            .with("source", basis[0].0.to_string()));
+                        }
+                        if count > 0 {
+                            let entry = checked_counts.entry(path).or_default();
+                            entry.0.insert(index);
+                            entry.1 += count as usize;
+                        }
+                    }
+                }
+            }
+        }
+        let mut hits = Vec::new();
+        for ((score, relative, evidence), (source, before, absolute)) in
+            selected.into_iter().zip(basis)
+        {
+            let file_matches = checked_matches.remove(&absolute).unwrap_or_default();
+            let checked_truncated = file_matches.len() > PER_REPO_MATCH_BUDGET;
             let mut checked_terms = BTreeSet::new();
             let mut checked_lines = Vec::new();
-            for matched in &checked.matches {
+            for matched in &file_matches {
                 let index = matched
                     .line_number
                     .checked_sub(1)
@@ -1321,32 +1380,9 @@ impl<R: CommandRunner> WorkReposSourcePoolProvider<R> {
             }
             let mut checked_count = checked_lines.len();
             if outcome.truncated {
-                checked_count = 0;
-                checked_terms.clear();
-                for (index, term) in terms.iter().enumerate() {
-                    let per_term = SearchRequest {
-                        pattern: term.clone(),
-                        regex: false,
-                        max_count_per_file: None,
-                        ..selected.clone()
-                    };
-                    self.require_project(project)?;
-                    let counts = self.searcher.count(&per_term)?;
-                    self.require_project(project)?;
-                    for (path, count) in counts {
-                        if path != absolute {
-                            return Err(AikitError::new(
-                                "work_repos.source_search_basis_conflict",
-                                "Native selected-file count returned another Source",
-                            )
-                            .with("source", source.to_string()));
-                        }
-                        if count > 0 {
-                            checked_terms.insert(index);
-                            checked_count += count as usize;
-                        }
-                    }
-                }
+                let (terms_counted, counted) = checked_counts.remove(&absolute).unwrap_or_default();
+                checked_terms = terms_counted;
+                checked_count = counted;
             }
             let after = self.material(&source)?;
             let same_lines = if outcome.truncated {
@@ -1355,7 +1391,7 @@ impl<R: CommandRunner> WorkReposSourcePoolProvider<R> {
                 checked_lines == evidence.matched_lines
             };
             if before != after
-                || checked.truncated
+                || checked_truncated
                 || checked_lines.is_empty()
                 || !same_lines
                 || checked_terms != evidence.terms
@@ -1897,6 +1933,39 @@ mod tests {
                 .unwrap()
                 .as_str(),
             "the only file carrying the rare term ranks first: {hits:?}"
+        );
+    }
+
+    #[test]
+    fn surfaced_files_are_verified_in_one_pass_not_one_process_each() {
+        let temp = native_scratch();
+        let root = temp.path();
+        for index in 0..12 {
+            write(&root.join(format!("docs/note{index}.md")), "alpha beta\n");
+        }
+        let runner = RecordingRunner::new(
+            crate::runner::SystemRunner::new()
+                .with_env_removed("RIPGREP_CONFIG_PATH")
+                .with_timeout(std::time::Duration::from_secs(30)),
+        );
+        let provider = WorkReposSourcePoolProvider::connect(
+            &runner,
+            crate::ripgrep::executable(),
+            vec![project(root)],
+        );
+        assert!(
+            provider.status().available,
+            "real ripgrep is required for this native query test"
+        );
+        let before = runner.calls().len();
+        let hits = provider
+            .search("alpha beta", SourceSearchMode::Fulltext, &[], 20)
+            .unwrap();
+        assert_eq!(hits.len(), 12, "{hits:?}");
+        let searches = runner.calls().len() - before;
+        assert!(
+            searches <= 2,
+            "one project pass and one verification pass, not a process per file: {searches}"
         );
     }
 

@@ -96,18 +96,29 @@ impl KnowledgeApplicationStore {
     }
 
     pub fn remember_search_hits(&self, hits: &[KnowledgeSearchHit]) -> Result<()> {
+        // A search that found nothing new leaves the cache as it is: the file
+        // is rewritten only when a binding was added or replaced.
+        if hits.is_empty() {
+            return Ok(());
+        }
         let mut state = self.load()?;
+        let mut changed = false;
         for hit in hits {
             match state.addresses.get(&hit.resource) {
                 Some(current) if !prefer_address(&hit.address, current) => {}
+                Some(current) if *current == hit.address => {}
                 _ => {
                     state
                         .addresses
                         .insert(hit.resource.clone(), hit.address.clone());
+                    changed = true;
                 }
             }
         }
-        self.save(&state)
+        if changed {
+            self.save(&state)?;
+        }
+        Ok(())
     }
 
     pub fn address(&self, resource: &ResourceRef) -> Result<Option<KnowledgeAddress>> {
@@ -252,6 +263,37 @@ mod tests {
 
     fn r(raw: &str) -> ResourceRef {
         ResourceRef::parse(raw).unwrap()
+    }
+
+    #[test]
+    fn remembering_nothing_new_leaves_the_history_file_alone() {
+        let temp = TempDir::new().unwrap();
+        let store = KnowledgeApplicationStore::new(AikitHome::at(temp.path()));
+        store.remember_search_hits(&[]).unwrap();
+        assert!(!store.path().exists(), "no hits writes no file");
+
+        let resource = r("wiki:node:auth");
+        let hit = KnowledgeSearchHit {
+            address: KnowledgeAddress::Wiki(resource.clone()),
+            resource,
+            kind: ResourceKind::KnowledgeNode,
+            label: "Auth".into(),
+            score: 1.0,
+            snippet: String::new(),
+            provider: ProviderRef::parse("provider/wiki/test").unwrap(),
+            authority: SourceAuthority::Authored,
+            ranking: None,
+            corroborated_by: Vec::new(),
+        };
+        store
+            .remember_search_hits(std::slice::from_ref(&hit))
+            .unwrap();
+        // A trailing marker survives only if the file is not rewritten.
+        let mut text = fs::read_to_string(store.path()).unwrap();
+        text.push_str("\n\n");
+        fs::write(store.path(), &text).unwrap();
+        store.remember_search_hits(&[hit]).unwrap();
+        assert_eq!(fs::read_to_string(store.path()).unwrap(), text);
     }
 
     #[test]
