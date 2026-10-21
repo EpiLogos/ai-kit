@@ -935,6 +935,7 @@ fn flow_route(command: &FlowSub) -> &'static str {
         FlowSub::Preflight(_) => "cmd_flow_preflight",
         FlowSub::Contemplate(_) => "cmd_flow_contemplate",
         FlowSub::ChangedSince(_) => "cmd_flow_changed_since",
+        FlowSub::Thoughts(_) => "cmd_flow_thoughts",
     }
 }
 
@@ -3534,6 +3535,20 @@ pub enum FlowSub {
     /// W1.5 owner read: what changed relative to one recorded thought —
     /// changed sources, affected knowledge, unresolved — each with provenance.
     ChangedSince(FlowChangedSinceArgs),
+    /// A Flow's kept thoughts, newest first: each the FlowThoughtRecord a
+    /// successful contemplation returned (the `thought` that
+    /// `changed-since --thought` takes).
+    Thoughts(FlowThoughtsArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct FlowThoughtsArgs {
+    /// ResourceRef of the Flow node.
+    #[arg(value_name = "FLOW_REF")]
+    pub flow_ref: String,
+    /// At most this many thoughts (default 20).
+    #[arg(long, value_name = "N")]
+    pub limit: Option<usize>,
 }
 
 #[derive(Debug, Args)]

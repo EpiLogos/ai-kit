@@ -791,3 +791,92 @@ fn now_subject_execution_is_record_gated_and_the_learning_stays_a_proposal() {
         Some(FLOW_CONTEMPLATE_USE_RECORDED)
     );
 }
+
+#[test]
+fn each_successful_thought_is_kept_and_read_back_for_changed_since() {
+    let temp = TempDir::new().unwrap();
+    let mut service = open_service(&temp);
+    let flow = resource(FLOW_REF);
+    assert!(service
+        .flow_thoughts(&flow, 20)
+        .unwrap()
+        .thoughts
+        .is_empty());
+
+    // Without a host executor nothing is thought, so nothing is kept.
+    let unavailable = service
+        .flow_contemplate(&flow, &basis("agent-session/none"), None)
+        .unwrap();
+    assert!(unavailable.thought_kept.is_none());
+    assert!(service
+        .flow_thoughts(&flow, 20)
+        .unwrap()
+        .thoughts
+        .is_empty());
+
+    let mut executor = OneCallExecutor::default();
+    let first = service
+        .flow_contemplate(&flow, &basis("agent-session/first"), Some(&mut executor))
+        .unwrap();
+    let FlowCognition::Cognition { thought, .. } = &first.cognition else {
+        panic!("a successful contemplation: {:?}", first.cognition);
+    };
+    assert!(first.thought_kept.is_some(), "{first:?}");
+    assert!(first.thought_keep_error.is_none());
+    let kept = service.flow_thoughts(&flow, 20).unwrap();
+    assert_eq!(kept.version, "aikit.flow-thoughts/v1");
+    assert_eq!(kept.thoughts.len(), 1);
+    assert_eq!(
+        &kept.thoughts[0].thought,
+        thought.as_ref(),
+        "kept exactly as returned"
+    );
+    assert!(kept.unreadable.is_empty());
+
+    std::thread::sleep(std::time::Duration::from_millis(3));
+    let mut again = OneCallExecutor::default();
+    service
+        .flow_contemplate(&flow, &basis("agent-session/second"), Some(&mut again))
+        .unwrap();
+    let kept = service.flow_thoughts(&flow, 20).unwrap();
+    assert_eq!(kept.thoughts.len(), 2);
+    assert!(
+        kept.thoughts[0].recorded_at_unix_ms >= kept.thoughts[1].recorded_at_unix_ms,
+        "newest first"
+    );
+    assert_eq!(service.flow_thoughts(&flow, 1).unwrap().thoughts.len(), 1);
+
+    // The kept thought is the one changed-since reads.
+    let changed = service
+        .flow_changed_since(
+            &kept.thoughts[0].thought,
+            Some(horizon(FLOW_REVISION, 8, vec![])),
+        )
+        .unwrap();
+    assert_eq!(changed.thought, kept.thoughts[0].thought.invocation_ref);
+
+    // Through the real binary, from the same home.
+    let output = std::process::Command::new(assert_cmd::cargo::cargo_bin("aikit"))
+        .args(["flow", "thoughts", FLOW_REF, "--json"])
+        .env("AIKIT_HOME", temp.path().join("aikit-home"))
+        .current_dir(temp.path().join("project"))
+        .output()
+        .unwrap();
+    let envelope: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert!(output.status.success(), "{envelope}");
+    assert_eq!(envelope["data"]["thoughts"].as_array().unwrap().len(), 2);
+    assert_eq!(
+        envelope["data"]["thoughts"][0]["thought"]["flow_ref"],
+        FLOW_REF
+    );
+
+    // A torn file is named, not dropped.
+    let directory = std::path::Path::new(first.thought_kept.as_ref().unwrap())
+        .parent()
+        .unwrap()
+        .to_path_buf();
+    std::fs::write(directory.join("0000000000000000-torn.json"), "{not json").unwrap();
+    let kept = service.flow_thoughts(&flow, 20).unwrap();
+    assert_eq!(kept.thoughts.len(), 2);
+    assert_eq!(kept.unreadable.len(), 1);
+}
