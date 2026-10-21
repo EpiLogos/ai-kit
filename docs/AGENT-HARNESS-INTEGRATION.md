@@ -109,7 +109,8 @@ reviewed and named explicitly with another `--trust-skill` promotion.
 To update safely, run `aikit source set-revision <source> <exact-commit>`, then
 `source sync`, inspect the candidate shown by `source show`, and promote it
 explicitly. `source rollback` returns to the prior promoted snapshot without
-fetching or rebuilding it.
+fetching or rebuilding it. `source list` reads every registered source, each
+exactly as `source show` prints it.
 
 Lifecycle facts the flow depends on:
 
