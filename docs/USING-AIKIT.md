@@ -195,6 +195,7 @@ aikit gateway discover
 aikit gateway status
 aikit gateway ecology
 aikit gateway snapshot
+aikit gateway replay --stream actuation-stream/<id> [--after N] [--limit N]
 ```
 
 `serve` with no flags binds the default socket and restores state from the
@@ -216,7 +217,13 @@ sessions, Streams and Surfaces this gateway currently constitutes, with fork
 lineage and context revisions, and the invocation vocabulary
 (`communique`, `session-contribution`, `delegation`, `session-fork`,
 `co-actuation`). Presence never implies authority — invocation is a separate
-AIKit capability grant. The `aikit-gateway` binary remains the minimal
+AIKit capability grant. `replay` reads one of those Streams' frames from the
+gateway's own journal — the inbound messages, the harness's replies and turn
+records it appended for a conversation — after a sequence and within a limit
+(1 to 4096, `has_more` naming whether more follow): the same replay a
+subscribing surface receives, read only. A harness's own internal event ring
+(Hermes's TUI gateway, say) is that harness's state, which coexistence never
+reads. The `aikit-gateway` binary remains the minimal
 stdio/serve body for Workcell materialisation; the CLI group is the same
 protocol with the product's JSON envelope.
 

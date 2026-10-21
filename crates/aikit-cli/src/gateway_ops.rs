@@ -185,6 +185,7 @@ pub fn takes_carrier(command: &GatewaySub) -> bool {
             | GatewaySub::Status(_)
             | GatewaySub::Ecology(_)
             | GatewaySub::Snapshot(_)
+            | GatewaySub::Replay(_)
             | GatewaySub::Who(_)
             | GatewaySub::Send(_)
             | GatewaySub::Inbox(_)
@@ -209,6 +210,7 @@ pub fn override_carriers(command: &mut crate::cli::GatewayCmd, carrier: GatewayQ
         | G::Snapshot(a)
         | G::Forward(a) => *a = carrier,
         G::Who(a) => a.carrier = carrier,
+        G::Replay(a) => a.carrier = carrier,
         G::Send(a) => a.carrier = carrier,
         G::Inbox(a) => a.carrier = carrier,
         G::Conversation(a) => a.carrier = carrier,
