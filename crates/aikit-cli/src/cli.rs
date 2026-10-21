@@ -1198,6 +1198,7 @@ fn continuity_route(command: &ContinuityCmd) -> &'static str {
     match &command.command {
         ContinuitySub::Commands(_) => "cmd_continuity_commands",
         ContinuitySub::Pressure(_) => "cmd_continuity_pressure",
+        ContinuitySub::Turn(_) => "cmd_continuity_turn",
         ContinuitySub::Closeout(c) => match &c.command {
             ContinuityCloseoutSub::Verify(_) => "cmd_continuity_closeout_verify",
         },
@@ -5155,6 +5156,10 @@ pub enum ContinuitySub {
     Commands(ContinuityCommandsArgs),
     /// Show the context-pressure brackets in effect and this session's reading.
     Pressure(ContinuityPressureArgs),
+    /// The last turn's blocks as this scope received them: per hook event,
+    /// each block's standing lines, the ordinary lines kept and withheld, and
+    /// whether pressure suppressed it.
+    Turn(ContinuityTurnArgs),
     /// Verify that a close-out left the objects it claims to have left.
     Closeout(ContinuityCloseoutArgs),
 }
@@ -5165,6 +5170,14 @@ pub struct ContinuityCommandsArgs {}
 #[derive(Debug, Args)]
 pub struct ContinuityPressureArgs {
     /// Read the pressure for this session id rather than for the current
+    /// working directory's scope.
+    #[arg(long, value_name = "SESSION")]
+    pub session: Option<String>,
+}
+
+#[derive(Debug, Args)]
+pub struct ContinuityTurnArgs {
+    /// Read the turn kept for this session id rather than for the current
     /// working directory's scope.
     #[arg(long, value_name = "SESSION")]
     pub session: Option<String>,

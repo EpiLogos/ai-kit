@@ -263,3 +263,112 @@ fn the_turn_count_outlives_the_process_that_recorded_it() {
         "the turn count did not survive a new service"
     );
 }
+
+#[test]
+fn the_last_turns_bound_is_kept_per_scope_and_read_back() {
+    let tmp = tempfile::tempdir().unwrap();
+    let project = tmp.path().join("project");
+    std::fs::create_dir_all(&project).unwrap();
+    domain(&project, "alpha", true);
+    domain(&project, "beta", false);
+    let service = service(tmp.path(), &project, COMPOSED);
+
+    assert!(aikit_cli::pressure::read_turn(service.home(), "kept-scope")
+        .unwrap()
+        .is_none());
+    turn_at(&service, "kept-scope", 3);
+    let turn = aikit_cli::pressure::read_turn(service.home(), "kept-scope")
+        .unwrap()
+        .expect("the turn's bound is kept");
+    assert_eq!(turn.version, "aikit.turn-bound/v1");
+    let bound = &turn.events["UserPromptSubmit"];
+    assert_eq!(bound.pressure.as_ref().unwrap()["pressure"], "critical");
+    assert!(bound
+        .blocks
+        .iter()
+        .any(|block| block.standing > 0 && !block.suppressed));
+    assert!(bound.blocks.iter().any(|block| block.withheld > 0));
+    assert_eq!(
+        bound
+            .blocks
+            .iter()
+            .map(|block| block.withheld)
+            .sum::<usize>(),
+        bound.withheld_lines
+    );
+    // Another scope keeps its own; a later turn replaces this event's bound.
+    assert!(
+        aikit_cli::pressure::read_turn(service.home(), "other-scope")
+            .unwrap()
+            .is_none()
+    );
+    let before = bound.recorded_at_unix_ms;
+    std::thread::sleep(std::time::Duration::from_millis(5));
+    service.dispatch_hook(&prompt("kept-scope")).unwrap();
+    let again = aikit_cli::pressure::read_turn(service.home(), "kept-scope")
+        .unwrap()
+        .unwrap();
+    assert!(again.events["UserPromptSubmit"].recorded_at_unix_ms > before);
+    assert_eq!(again.events.len(), 1);
+}
+
+#[test]
+fn an_uncomposed_turn_is_kept_whole_and_the_binary_reads_it() {
+    let tmp = tempfile::tempdir().unwrap();
+    let project = tmp.path().join("project");
+    std::fs::create_dir_all(&project).unwrap();
+    domain(&project, "alpha", false);
+    let service = service(tmp.path(), &project, UNCOMPOSED_PRESSURE);
+    service.dispatch_hook(&prompt("whole-scope")).unwrap();
+    let turn = aikit_cli::pressure::read_turn(service.home(), "whole-scope")
+        .unwrap()
+        .unwrap();
+    let bound = &turn.events["UserPromptSubmit"];
+    assert!(bound.pressure.is_none(), "no pressure capability composed");
+    assert!(bound
+        .blocks
+        .iter()
+        .all(|block| block.withheld == 0 && !block.suppressed));
+
+    let output = std::process::Command::new(assert_cmd::cargo::cargo_bin("aikit"))
+        .args([
+            "work",
+            "continuity",
+            "turn",
+            "--session",
+            "whole-scope",
+            "--json",
+        ])
+        .env("AIKIT_HOME", tmp.path())
+        .current_dir(&project)
+        .output()
+        .unwrap();
+    let envelope: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert!(output.status.success(), "{envelope}");
+    let data = &envelope["data"];
+    assert_eq!(data["scope"], "whole-scope");
+    assert_eq!(data["turn"]["version"], "aikit.turn-bound/v1");
+    assert_eq!(data["withheld_lines"], 0);
+    let first = &data["blocks"][0];
+    assert_eq!(first["event"], "UserPromptSubmit");
+    assert!(first["kept"].as_u64().unwrap() > 0);
+    assert_eq!(first["suppressed"], false);
+
+    let output = std::process::Command::new(assert_cmd::cargo::cargo_bin("aikit"))
+        .args([
+            "work",
+            "continuity",
+            "turn",
+            "--session",
+            "never-seen",
+            "--json",
+        ])
+        .env("AIKIT_HOME", tmp.path())
+        .current_dir(&project)
+        .output()
+        .unwrap();
+    let envelope: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert!(output.status.success());
+    assert!(envelope["data"]["turn"].is_null());
+    assert_eq!(envelope["data"]["blocks"], json!([]));
+}

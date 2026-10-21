@@ -94,15 +94,129 @@ pub fn record_turn(index: &Index, scope: &str) -> Vec<String> {
 pub fn apply(blocks: &[Block], reading: Option<&Reading>) -> Bounded {
     match reading {
         Some(reading) => bound(blocks, reading.pressure),
-        None => Bounded {
-            blocks: blocks
-                .iter()
-                .map(Block::render)
-                .filter(|text| !text.is_empty())
-                .collect(),
-            withheld_lines: 0,
-            withheld_blocks: 0,
-            notice: None,
-        },
+        None => aikit_core::pressure::whole(blocks),
+    }
+}
+
+/// The last bound each hook event gave one scope, kept fail-open so a reader
+/// can see what the turn's context carried and what pressure withheld
+/// (`aikit work continuity turn`). One document per scope under the home's
+/// `state/continuity/turns/`, replaced whole (written aside, then renamed).
+pub const TURN_BOUND_VERSION: &str = "aikit.turn-bound/v1";
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct EventBound {
+    pub recorded_at_unix_ms: u64,
+    /// The pressure reading the bound used; absent when no pressure
+    /// capability is composed (the blocks then arrive whole).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pressure: Option<serde_json::Value>,
+    pub blocks: Vec<aikit_core::pressure::BlockAccount>,
+    pub withheld_lines: usize,
+    pub withheld_blocks: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub notice: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct TurnBound {
+    pub version: String,
+    pub scope: String,
+    /// The last bound per hook event (UserPromptSubmit, SessionStart, …).
+    pub events: std::collections::BTreeMap<String, EventBound>,
+}
+
+fn turn_path(home: &aikit_store::home::AikitHome, scope: &str) -> std::path::PathBuf {
+    use sha2::{Digest, Sha256};
+    let digest = Sha256::digest(scope.as_bytes());
+    let name: String = digest[..16]
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    home.state()
+        .join("continuity")
+        .join("turns")
+        .join(format!("{name}.json"))
+}
+
+/// The last turn bounds kept for one scope, or `None` when none was kept.
+pub fn read_turn(
+    home: &aikit_store::home::AikitHome,
+    scope: &str,
+) -> aikit_core::Result<Option<TurnBound>> {
+    let path = turn_path(home, scope);
+    let body = match std::fs::read(&path) {
+        Ok(body) => body,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(aikit_core::AikitError::new(
+                "continuity.turn_unreadable",
+                format!("cannot read {}: {error}", path.display()),
+            ))
+        }
+    };
+    let turn: TurnBound = serde_json::from_slice(&body).map_err(|error| {
+        aikit_core::AikitError::new(
+            "continuity.turn_unreadable",
+            format!("{} is not a turn bound: {error}", path.display()),
+        )
+    })?;
+    if turn.scope != scope {
+        return Err(aikit_core::AikitError::new(
+            "continuity.turn_unreadable",
+            format!("{} keeps another scope's turn", path.display()),
+        ));
+    }
+    Ok(Some(turn))
+}
+
+/// Keep this event's bound as the scope's last one for it. Fail-open: a
+/// store that cannot keep it must not break the turn; the warning says so.
+pub fn record_turn_bound(
+    home: &aikit_store::home::AikitHome,
+    scope: &str,
+    event: &HookEvent,
+    reading: Option<&Reading>,
+    bounded: &Bounded,
+) -> Vec<String> {
+    let kept = (|| -> Result<(), String> {
+        let path = turn_path(home, scope);
+        let directory = path.parent().ok_or("no turn directory")?;
+        std::fs::create_dir_all(directory).map_err(|error| error.to_string())?;
+        let mut turn = match read_turn(home, scope) {
+            Ok(Some(turn)) => turn,
+            _ => TurnBound {
+                version: TURN_BOUND_VERSION.into(),
+                scope: scope.into(),
+                events: Default::default(),
+            },
+        };
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|elapsed| elapsed.as_millis() as u64)
+            .unwrap_or_default();
+        turn.events.insert(
+            event.kind.as_str().to_owned(),
+            EventBound {
+                recorded_at_unix_ms: now,
+                pressure: reading.map(Reading::describe),
+                blocks: bounded.accounts.clone(),
+                withheld_lines: bounded.withheld_lines,
+                withheld_blocks: bounded.withheld_blocks,
+                notice: bounded.notice.clone(),
+            },
+        );
+        let body = serde_json::to_vec_pretty(&turn).map_err(|error| error.to_string())?;
+        let mut aside =
+            tempfile::NamedTempFile::new_in(directory).map_err(|error| error.to_string())?;
+        std::io::Write::write_all(&mut aside, &body).map_err(|error| error.to_string())?;
+        aside.persist(&path).map_err(|error| error.to_string())?;
+        Ok(())
+    })();
+    match kept {
+        Ok(()) => Vec::new(),
+        Err(error) => vec![format!(
+            "continuity: this turn's bound was not kept ({error}); `aikit work continuity turn` reads the previous one"
+        )],
     }
 }

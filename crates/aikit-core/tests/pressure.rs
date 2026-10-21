@@ -183,3 +183,43 @@ fn a_block_that_carries_only_a_header_still_arrives() {
     assert_eq!(bounded.blocks, vec!["[continuity/turn-ledger] composed"]);
     assert!(bounded.notice.is_none());
 }
+
+#[test]
+fn each_block_is_accounted_for_kept_withheld_and_suppressed() {
+    let blocks = vec![
+        Block::standing("standing rules", vec!["never ship without the gate".into()]),
+        ordinary_block("first", 8),
+        ordinary_block("second", 8),
+        ordinary_block("third", 8),
+    ];
+    let critical = aikit_core::pressure::bound(&blocks, Pressure::Critical);
+    assert_eq!(
+        critical.accounts.len(),
+        4,
+        "suppressed blocks are accounted too"
+    );
+    assert_eq!(critical.accounts[0].title, "standing rules");
+    assert_eq!(critical.accounts[0].standing, 1);
+    assert!(!critical.accounts[0].suppressed);
+    for account in &critical.accounts[1..] {
+        assert_eq!((account.kept, account.withheld), (0, 8));
+        assert!(account.suppressed);
+    }
+    assert_eq!(critical.withheld_blocks, 3);
+    assert_eq!(
+        critical.accounts.iter().map(|a| a.withheld).sum::<usize>(),
+        critical.withheld_lines
+    );
+
+    let fresh = aikit_core::pressure::bound(&blocks, Pressure::Fresh);
+    assert!(fresh
+        .accounts
+        .iter()
+        .all(|a| a.withheld == 0 && !a.suppressed));
+    let whole = aikit_core::pressure::whole(&blocks);
+    assert_eq!(
+        whole.accounts, fresh.accounts,
+        "an uncomposed turn accounts as FRESH does"
+    );
+    assert_eq!(whole.blocks.len(), 4);
+}

@@ -5842,6 +5842,56 @@ fn cmd_continuity(cwd: &std::path::Path, c: ContinuityCmd) -> Result<Reply> {
             });
             Ok(reply(&service, data, warnings))
         }
+        ContinuitySub::Turn(a) => {
+            // The same scope the engine keys the kept turn on.
+            let scope = a
+                .session
+                .or_else(|| {
+                    service
+                        .descriptor()
+                        .session_id
+                        .as_ref()
+                        .map(ToString::to_string)
+                })
+                .or_else(|| {
+                    service
+                        .descriptor()
+                        .project_root
+                        .as_ref()
+                        .map(|root| root.display().to_string())
+                });
+            let turn = match &scope {
+                Some(scope) => aikit_cli::pressure::read_turn(service.home(), scope)?,
+                None => None,
+            };
+            let mut blocks = Vec::new();
+            let (mut withheld_lines, mut withheld_blocks) = (0usize, 0usize);
+            let mut notices = Vec::new();
+            for (event, bound) in turn.iter().flat_map(|turn| turn.events.iter()) {
+                withheld_lines += bound.withheld_lines;
+                withheld_blocks += bound.withheld_blocks;
+                notices.extend(bound.notice.clone());
+                for block in &bound.blocks {
+                    blocks.push(jval!({
+                        "event": event,
+                        "title": block.title,
+                        "standing": block.standing,
+                        "kept": block.kept,
+                        "withheld": block.withheld,
+                        "suppressed": block.suppressed,
+                    }));
+                }
+            }
+            let data = jval!({
+                "scope": scope,
+                "turn": turn,
+                "blocks": blocks,
+                "withheld_lines": withheld_lines,
+                "withheld_blocks": withheld_blocks,
+                "notices": notices,
+            });
+            Ok(reply(&service, data, Vec::new()))
+        }
         ContinuitySub::Closeout(closeout) => match closeout.command {
             ContinuityCloseoutSub::Verify(a) => {
                 use aikit_adapters::runner::SystemRunner;

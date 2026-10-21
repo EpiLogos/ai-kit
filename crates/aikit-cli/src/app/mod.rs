@@ -2652,6 +2652,19 @@ impl Service {
             None
         };
         let bounded = crate::pressure::apply(blocks, reading.as_ref());
+        // Keep this event's bound as the scope's last (fail-open), for
+        // `aikit work continuity turn`.
+        if let Some(scope) =
+            crate::domain_activation::dedup_scope(event, self.descriptor.project_root.as_deref())
+        {
+            decision.warnings.extend(crate::pressure::record_turn_bound(
+                &self.home,
+                &scope,
+                event,
+                reading.as_ref(),
+                &bounded,
+            ));
+        }
         decision.injected.extend(bounded.blocks);
         if let Some(notice) = bounded.notice {
             decision.injected.push(notice);
