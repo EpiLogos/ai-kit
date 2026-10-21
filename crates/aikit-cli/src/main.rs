@@ -2565,6 +2565,52 @@ fn cmd_project(cwd: &std::path::Path, command: ProjectCmd) -> Result<Reply> {
     }
 }
 
+/// One registered source's state, exactly as `source show` prints it.
+fn source_status_value(home: &AikitHome, id: &str) -> Result<Value> {
+    use aikit_cli::skill_sources;
+
+    let status = skill_sources::status(home, id)?;
+    let active_registry = skill_sources::active_registry(home, id)?;
+    let retired = |record: &Option<skill_sources::SnapshotRecord>| {
+        record
+            .as_ref()
+            .map(|snapshot| {
+                snapshot
+                    .skills
+                    .iter()
+                    .filter(|skill| skill.standing.as_deref() == Some("retired"))
+                    .count()
+            })
+            .unwrap_or(0)
+    };
+    Ok(jval!({
+        "id": status.spec.id,
+        "kind": status.spec.kind.label(),
+        "control_ground": status.spec.kind.control_ground(),
+        "portable": status.spec.kind.portable(),
+        "candidate_snapshot": status.state.candidate_snapshot,
+        "active_snapshot": status.state.active_snapshot,
+        "active_registry": active_registry.map(|path| path.display().to_string()),
+        "candidate_skills": status.candidate.as_ref().map(|record| record.skills.len()),
+        "active_skills": status.active.as_ref().map(|record| record.skills.len()),
+        "candidate_retired_skills": retired(&status.candidate),
+        "active_retired_skills": retired(&status.active),
+        "candidate_rejected": status.candidate.as_ref().map(|record| record.rejected.clone()),
+        "active_rejected": status.active.as_ref().map(|record| record.rejected.clone()),
+        "rollback_points": status.state.history,
+        "capsule": match &status.spec.kind {
+            skill_sources::SourceKind::Capsule { capsule_id, revision, .. } => {
+                jval!({"id": capsule_id, "revision": revision})
+            }
+            _ => Value::Null,
+        },
+        "upstream": match &status.spec.kind {
+            skill_sources::SourceKind::Capsule { upstream, .. } => upstream.reading(),
+            _ => Value::Null,
+        },
+    }))
+}
+
 fn cmd_source(cwd: &std::path::Path, command: SourceCmd) -> Result<Reply> {
     use aikit_cli::skill_sources;
 
@@ -2713,48 +2759,22 @@ fn cmd_source(cwd: &std::path::Path, command: SourceCmd) -> Result<Reply> {
                 warnings,
             ))
         }
-        SourceSub::Show(args) => {
-            let status = skill_sources::status(home, &args.id)?;
-            let active_registry = skill_sources::active_registry(home, &args.id)?;
-            let retired = |record: &Option<skill_sources::SnapshotRecord>| {
-                record
-                    .as_ref()
-                    .map(|snapshot| {
-                        snapshot
-                            .skills
-                            .iter()
-                            .filter(|skill| skill.standing.as_deref() == Some("retired"))
-                            .count()
-                    })
-                    .unwrap_or(0)
-            };
+        SourceSub::Show(args) => Ok(source_reply(source_status_value(home, &args.id)?, vec![])),
+        SourceSub::List(_) => {
+            let mut sources = Vec::new();
+            let mut unreadable = Vec::new();
+            for id in skill_sources::registered_ids(home)? {
+                match source_status_value(home, &id) {
+                    Ok(value) => sources.push(value),
+                    Err(error) => unreadable.push(jval!({
+                        "id": id,
+                        "code": error.code(),
+                        "message": error.message(),
+                    })),
+                }
+            }
             Ok(source_reply(
-                jval!({
-                    "id": status.spec.id,
-                    "kind": status.spec.kind.label(),
-                    "control_ground": status.spec.kind.control_ground(),
-                    "portable": status.spec.kind.portable(),
-                    "candidate_snapshot": status.state.candidate_snapshot,
-                    "active_snapshot": status.state.active_snapshot,
-                    "active_registry": active_registry.map(|path| path.display().to_string()),
-                    "candidate_skills": status.candidate.as_ref().map(|record| record.skills.len()),
-                    "active_skills": status.active.as_ref().map(|record| record.skills.len()),
-                    "candidate_retired_skills": retired(&status.candidate),
-                    "active_retired_skills": retired(&status.active),
-                    "candidate_rejected": status.candidate.as_ref().map(|record| record.rejected.clone()),
-                    "active_rejected": status.active.as_ref().map(|record| record.rejected.clone()),
-                    "rollback_points": status.state.history,
-                    "capsule": match &status.spec.kind {
-                        skill_sources::SourceKind::Capsule { capsule_id, revision, .. } => {
-                            jval!({"id": capsule_id, "revision": revision})
-                        }
-                        _ => Value::Null,
-                    },
-                    "upstream": match &status.spec.kind {
-                        skill_sources::SourceKind::Capsule { upstream, .. } => upstream.reading(),
-                        _ => Value::Null,
-                    },
-                }),
+                jval!({"sources": sources, "unreadable": unreadable}),
                 vec![],
             ))
         }

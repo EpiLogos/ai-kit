@@ -864,6 +864,7 @@ fn source_route(command: &SourceSub) -> &'static str {
         SourceSub::SetRevision(_) => "cmd_source_set_revision",
         SourceSub::Sync(_) => "cmd_source_sync",
         SourceSub::Show(_) => "cmd_source_show",
+        SourceSub::List(_) => "cmd_source_list",
         SourceSub::Promote(_) => "cmd_source_promote",
         SourceSub::Rollback(_) => "cmd_source_rollback",
         SourceSub::Remove(_) => "cmd_source_remove",
@@ -3088,6 +3089,8 @@ pub enum SourceSub {
     Sync(SourceNameArgs),
     /// Inspect source, candidate, active and rollback state.
     Show(SourceNameArgs),
+    /// Every registered source's state, each exactly as `show` prints it.
+    List(SourceListArgs),
     /// Promote the candidate snapshot; local directories need no extra trust flag.
     Promote(SourcePromoteArgs),
     /// Return to the previous promoted snapshot.
@@ -3097,6 +3100,9 @@ pub enum SourceSub {
     /// recorded trust stays as review evidence.
     Remove(SourceRemoveArgs),
 }
+
+#[derive(Debug, Args)]
+pub struct SourceListArgs {}
 
 #[derive(Debug, Args)]
 pub struct SourceBindCentralArgs {

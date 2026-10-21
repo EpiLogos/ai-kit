@@ -1196,6 +1196,26 @@ pub fn status(home: &AikitHome, id: &str) -> Result<SourceStatus> {
     })
 }
 
+/// Every registered source id, in id order: one directory per registration
+/// under the home's `sources/`. An absent `sources/` registers none.
+pub fn registered_ids(home: &AikitHome) -> Result<Vec<String>> {
+    let root = home.root().join("sources");
+    let entries = match fs::read_dir(&root) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(io("source.read_failed", &root, error)),
+    };
+    let mut ids = Vec::new();
+    for entry in entries {
+        let entry = entry.map_err(|error| io("source.read_failed", &root, error))?;
+        if entry.path().is_dir() {
+            ids.push(entry.file_name().to_string_lossy().to_string());
+        }
+    }
+    ids.sort();
+    Ok(ids)
+}
+
 pub fn active_registries(home: &AikitHome) -> Result<Vec<(String, PathBuf)>> {
     let root = home.root().join("sources");
     let entries = match fs::read_dir(&root) {
