@@ -785,6 +785,10 @@ fn knowledge_route(command: &KnowledgeSub) -> &'static str {
         KnowledgeSub::Explain(_) => "cmd_knowledge_explain",
         KnowledgeSub::History(_) => "cmd_knowledge_history",
         KnowledgeSub::Status(_) => "cmd_knowledge_status",
+        KnowledgeSub::Impact(_) => "cmd_knowledge_impact",
+        KnowledgeSub::Reflection(c) => match &c.command {
+            KnowledgeReflectionSub::Verify(_) => "cmd_knowledge_reflection_verify",
+        },
         KnowledgeSub::Forget(c) => match &c.command {
             KnowledgeForgetSub::Destination(_) => "cmd_knowledge_forget_destination",
             KnowledgeForgetSub::Route(_) => "cmd_knowledge_forget_route",
@@ -3553,6 +3557,47 @@ pub struct FlowContemplateArgs {
 }
 
 #[derive(Debug, Args)]
+pub struct KnowledgeImpactArgs {
+    /// Path to a provider-neutral `KnowledgeChangeHorizon` JSON owner seam
+    /// (e.g. Central's `central.source-change-horizon/v1`, adapted), or `-`
+    /// for stdin. Required: impact without a horizon would be a guess.
+    #[arg(long, value_name = "FILE")]
+    pub horizon: std::path::PathBuf,
+    /// ResourceRefs of the readings to report; none reports every resource
+    /// the closure reaches.
+    #[arg(value_name = "READING")]
+    pub readings: Vec<String>,
+    /// How many dependency hops the closure follows (default 8).
+    #[arg(long, value_name = "N")]
+    pub max_depth: Option<usize>,
+    /// How many affected resources the closure reports before it says it
+    /// cut the list (default 512).
+    #[arg(long, value_name = "N")]
+    pub max_affected: Option<usize>,
+}
+
+#[derive(Debug, Args)]
+pub struct KnowledgeReflectionCmd {
+    #[command(subcommand)]
+    pub command: KnowledgeReflectionSub,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum KnowledgeReflectionSub {
+    /// The verdict of one target-owned reflection law (`ReflectionLaw` JSON)
+    /// against the ProjectMap's explicit bindings: passed, and each issue
+    /// (missing, wrong-relation, duplicate, stale, constitutive-flattening).
+    Verify(KnowledgeReflectionVerifyArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct KnowledgeReflectionVerifyArgs {
+    /// Path to the target-owned `ReflectionLaw` JSON, or `-` for stdin.
+    #[arg(value_name = "LAW")]
+    pub law: std::path::PathBuf,
+}
+
+#[derive(Debug, Args)]
 pub struct FlowChangedSinceArgs {
     /// Path to a recorded `aikit.flow-cognition/v1` thought JSON (as emitted
     /// by a successful `flow contemplate`).
@@ -3589,6 +3634,14 @@ pub enum KnowledgeSub {
     Explain(KnowledgeAddressArgs),
     History(KnowledgeHistoryArgs),
     Status(KnowledgeStatusArgs),
+    /// Living Knowledge impact of an owner change horizon over the
+    /// dependency manifests this project's Semantic Wiki carries, for every
+    /// reading the closure reaches or for the named readings. Deterministic;
+    /// records nothing.
+    Impact(KnowledgeImpactArgs),
+    /// Verify a target-owned reflection law against the explicit bindings of
+    /// this project's ProjectMap. Records nothing.
+    Reflection(KnowledgeReflectionCmd),
     Forget(KnowledgeForgetCmd),
     /// Call the GitNexus-backed code lens directly, with the same provenance
     /// envelope (provider, version, tested version, drift, SourceRef, source

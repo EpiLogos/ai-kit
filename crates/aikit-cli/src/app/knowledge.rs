@@ -726,6 +726,12 @@ impl KnowledgeRuntime {
         self.wiki.as_ref().map(SqliteWikiProvider::index)
     }
 
+    /// The ProjectMap federation this runtime built; the reflection-law
+    /// verdict reads its explicit bindings and creates no second map.
+    pub(super) fn project_map(&self) -> &ProjectMap {
+        &self.project_map
+    }
+
     /// The Work-relative project display a reply's scope resolves to. An
     /// explicit scope key matches a pending project (display, project id or
     /// bare Work name) or this invocation's own project; a bare unknown name
