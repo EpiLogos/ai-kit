@@ -99,6 +99,76 @@ pub struct FlowContemplateReceipt {
     pub recorded: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub observation_id: Option<String>,
+    /// Where the successful thought was kept (`aikit flow thoughts` reads it
+    /// back, `flow changed-since --thought` takes its `thought`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thought_kept: Option<String>,
+    /// Why a successful thought could not be kept; the reading stands.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thought_keep_error: Option<String>,
+}
+
+pub const FLOW_THOUGHT_KEPT_VERSION: &str = "aikit.flow-thought-kept/v1";
+pub const FLOW_THOUGHTS_VERSION: &str = "aikit.flow-thoughts/v1";
+
+/// One successful thought as AIKit keeps it: the FlowThoughtRecord exactly as
+/// the cognition returned it, and when it was kept.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct KeptThought {
+    pub version: String,
+    pub recorded_at_unix_ms: u64,
+    pub thought: FlowThoughtRecord,
+}
+
+/// A Flow's kept thoughts, newest first.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FlowThoughts {
+    pub version: String,
+    pub flow: ResourceRef,
+    pub thoughts: Vec<KeptThought>,
+    /// Kept files that could not be read, named with the reason.
+    #[serde(default)]
+    pub unreadable: Vec<String>,
+}
+
+fn digest16(value: &str) -> String {
+    use sha2::{Digest, Sha256};
+    Sha256::digest(value.as_bytes())[..16]
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+fn thoughts_dir(home: &aikit_store::home::AikitHome, flow_ref: &ResourceRef) -> std::path::PathBuf {
+    home.state()
+        .join("flow-thoughts")
+        .join(digest16(flow_ref.as_str()))
+}
+
+/// Keep one successful thought beside the Flow's others, written aside and
+/// renamed so a reader never sees a torn record.
+fn keep_thought(
+    home: &aikit_store::home::AikitHome,
+    thought: &FlowThoughtRecord,
+) -> Result<std::path::PathBuf, String> {
+    let directory = thoughts_dir(home, &thought.flow_ref);
+    std::fs::create_dir_all(&directory).map_err(|error| error.to_string())?;
+    let recorded_at_unix_ms = now_ms();
+    let kept = KeptThought {
+        version: FLOW_THOUGHT_KEPT_VERSION.into(),
+        recorded_at_unix_ms,
+        thought: thought.clone(),
+    };
+    let body = serde_json::to_vec_pretty(&kept).map_err(|error| error.to_string())?;
+    let path = directory.join(format!(
+        "{recorded_at_unix_ms:016}-{}.json",
+        digest16(thought.invocation_ref.as_str())
+    ));
+    let mut aside =
+        tempfile::NamedTempFile::new_in(&directory).map_err(|error| error.to_string())?;
+    std::io::Write::write_all(&mut aside, &body).map_err(|error| error.to_string())?;
+    aside.persist(&path).map_err(|error| error.to_string())?;
+    Ok(path)
 }
 
 /// One W1.5 changed-since-thought owner read.
@@ -452,6 +522,8 @@ impl Service {
             },
             recorded: None,
             observation_id: None,
+            thought_kept: None,
+            thought_keep_error: None,
         };
         let descriptor = self.flow_descriptor(flow_ref)?.ok_or_else(|| {
             AikitError::new(
@@ -547,8 +619,65 @@ impl Service {
             append_familiarity_observation(&self.index, observation)?;
             receipt.recorded = Some(FLOW_CONTEMPLATE_USE_RECORDED.into());
             receipt.observation_id = Some(observation_id);
+            if let FlowCognition::Cognition { thought, .. } = &receipt.cognition {
+                match keep_thought(&self.home, thought) {
+                    Ok(path) => receipt.thought_kept = Some(path.display().to_string()),
+                    Err(error) => receipt.thought_keep_error = Some(error),
+                }
+            }
         }
         Ok(receipt)
+    }
+
+    /// A Flow's kept thoughts, newest first, at most `limit`: each the
+    /// FlowThoughtRecord a successful contemplation returned. A Flow never
+    /// contemplated keeps none.
+    pub fn flow_thoughts(
+        &self,
+        flow_ref: &ResourceRef,
+        limit: usize,
+    ) -> aikit_core::Result<FlowThoughts> {
+        let directory = thoughts_dir(&self.home, flow_ref);
+        let mut names = match std::fs::read_dir(&directory) {
+            Ok(entries) => entries
+                .filter_map(|entry| entry.ok())
+                .map(|entry| entry.path())
+                .filter(|path| path.extension().is_some_and(|ext| ext == "json"))
+                .collect::<Vec<_>>(),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+            Err(error) => {
+                return Err(AikitError::new(
+                    "flow.thoughts_unreadable",
+                    format!("cannot read {}: {error}", directory.display()),
+                ))
+            }
+        };
+        names.sort();
+        names.reverse();
+        let mut thoughts = Vec::new();
+        let mut unreadable = Vec::new();
+        for path in names {
+            if thoughts.len() >= limit {
+                break;
+            }
+            match std::fs::read(&path)
+                .map_err(|error| error.to_string())
+                .and_then(|body| {
+                    serde_json::from_slice::<KeptThought>(&body).map_err(|error| error.to_string())
+                }) {
+                Ok(kept) if &kept.thought.flow_ref == flow_ref => thoughts.push(kept),
+                Ok(_) => {
+                    unreadable.push(format!("{}: keeps another Flow's thought", path.display()))
+                }
+                Err(error) => unreadable.push(format!("{}: {error}", path.display())),
+            }
+        }
+        Ok(FlowThoughts {
+            version: FLOW_THOUGHTS_VERSION.into(),
+            flow: flow_ref.clone(),
+            thoughts,
+            unreadable,
+        })
     }
 
     /// One explicit Contemplate(FlowRef): preflight → Explain disclosure →
@@ -578,6 +707,8 @@ impl Service {
                 },
                 recorded: None,
                 observation_id: None,
+                thought_kept: None,
+                thought_keep_error: None,
             }),
         }
     }

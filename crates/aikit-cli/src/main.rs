@@ -4489,6 +4489,10 @@ fn cmd_flow(cwd: &std::path::Path, c: FlowCmd) -> Result<Reply> {
                 .transpose()?;
             jval!(service.flow_changed_since(&thought, horizon)?)
         }
+        FlowSub::Thoughts(a) => {
+            let flow_ref = aikit_core::resource::ResourceRef::parse(&a.flow_ref)?;
+            jval!(service.flow_thoughts(&flow_ref, a.limit.unwrap_or(20).max(1))?)
+        }
     };
     Ok(reply(&service, data, warnings))
 }
