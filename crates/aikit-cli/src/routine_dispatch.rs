@@ -349,7 +349,20 @@ impl OccurrenceSource for CtrlOccurrenceSource {
 }
 
 fn decode_action_output(output: &Output, argv: &[String]) -> Result<Value> {
+    // Central refuses with its envelope on stdout and a non-zero exit: its own
+    // words are the refusal, never only the exit status.
     if !output.ok() {
+        if let Ok(envelope) = serde_json::from_str::<Value>(output.stdout.trim()) {
+            if envelope.get("ok").and_then(Value::as_bool) == Some(false) {
+                if let Some(message) = envelope.pointer("/error/message").and_then(Value::as_str) {
+                    return Err(AikitError::new(
+                        "central.action_failed",
+                        format!("central.time.occurrences: {message}"),
+                    )
+                    .with("command", argv.join(" ")));
+                }
+            }
+        }
         return Err(AikitError::new(
             "central.action_failed",
             format!(

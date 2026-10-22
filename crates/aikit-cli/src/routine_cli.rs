@@ -183,22 +183,526 @@ pub fn catalog_methods(
 }
 
 /// `aikit method prove --method <ref> --proof-json ...`
+///
+/// The answer is the ProvenMethodBasis itself, exactly what `routine create
+/// --proof-json` takes. The basis is also kept beside the Method's other
+/// verified runs (`routine options` reads them back); a basis that could not
+/// be kept is named in the second value, and the proof stands either way.
 pub fn method_prove(
     home: &aikit_store::AikitHome,
     method: &str,
     proof_json: &str,
-) -> Result<Value> {
+) -> Result<(Value, Option<String>)> {
     let method_ref = ResourceRef::parse(method)?;
     let resolver = CatalogMethodResolver { home: home.clone() };
     let resolved = resolver.resolve(&method_ref)?;
     let input: MethodProofInput = parse_json(proof_json, "Method proof input")?;
     let basis = aikit_core::resource::routine::prove_method(&resolved, input)?;
-    serde_json::to_value(&basis).map_err(|error| {
+    let kept = keep_proof(home, &basis)
+        .err()
+        .map(|error| format!("the proof stands but was not kept for `routine options`: {error}"));
+    let value = serde_json::to_value(&basis).map_err(|error| {
         AikitError::new(
             "cli.routine_json_failed",
             format!("could not encode ProvenMethodBasis: {error}"),
         )
+    })?;
+    Ok((value, kept))
+}
+
+// ---- what a new Routine is made from ----------------------------------------
+
+pub const METHOD_PROOF_KEPT_VERSION: &str = "aikit.method-proof-kept/v1";
+pub const ROUTINE_OPTIONS_VERSION: &str = "aikit.routine-options/v1";
+pub const PREPARED_SCHEDULE_VERSION: &str = "aikit.prepared-schedule/v1";
+/// How far ahead a prepared schedule's occurrences are read: a week and a day,
+/// so a weekly schedule still shows its next run.
+const PREPARE_WINDOW_MS: i64 = 8 * 24 * 60 * 60_000;
+
+/// One verified run as AIKit keeps it: the ProvenMethodBasis exactly as
+/// `method prove` answered it, and when it was kept.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct KeptProof {
+    pub version: String,
+    pub kept_at_unix_ms: i64,
+    pub proof: ProvenMethodBasis,
+}
+
+fn digest32(value: &str) -> String {
+    blake3::hash(value.as_bytes()).to_hex()[..32].to_owned()
+}
+
+fn proofs_dir(home: &aikit_store::AikitHome, method: &ResourceRef) -> PathBuf {
+    home.state()
+        .join("method-proofs")
+        .join(digest32(method.as_str()))
+}
+
+/// Keep one proven basis beside the Method's others, one file per proof ref
+/// (proving the same run again keeps one), written aside and renamed so a
+/// reader never sees a torn record.
+fn keep_proof(
+    home: &aikit_store::AikitHome,
+    basis: &ProvenMethodBasis,
+) -> std::result::Result<PathBuf, String> {
+    let directory = proofs_dir(home, &basis.method);
+    std::fs::create_dir_all(&directory).map_err(|error| error.to_string())?;
+    let kept = KeptProof {
+        version: METHOD_PROOF_KEPT_VERSION.into(),
+        kept_at_unix_ms: now_unix_ms(),
+        proof: basis.clone(),
+    };
+    let body = serde_json::to_vec_pretty(&kept).map_err(|error| error.to_string())?;
+    let path = directory.join(format!("{}.json", digest32(basis.proof_ref.as_str())));
+    let mut aside =
+        tempfile::NamedTempFile::new_in(&directory).map_err(|error| error.to_string())?;
+    std::io::Write::write_all(&mut aside, &body).map_err(|error| error.to_string())?;
+    aside.persist(&path).map_err(|error| error.to_string())?;
+    Ok(path)
+}
+
+/// The Method's kept verified runs, newest first. A kept file that cannot be
+/// read is named in `absences`, never dropped silently.
+fn kept_proofs(
+    home: &aikit_store::AikitHome,
+    method: &ResourceRef,
+    absences: &mut Vec<String>,
+) -> Result<Vec<KeptProof>> {
+    let directory = proofs_dir(home, method);
+    let paths = match std::fs::read_dir(&directory) {
+        Ok(entries) => entries
+            .filter_map(|entry| entry.ok())
+            .map(|entry| entry.path())
+            .filter(|path| path.extension().is_some_and(|ext| ext == "json"))
+            .collect::<Vec<_>>(),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+        Err(error) => {
+            return Err(AikitError::new(
+                "routine.proofs_unreadable",
+                format!("cannot read {}: {error}", directory.display()),
+            ))
+        }
+    };
+    let mut kept = Vec::new();
+    for path in paths {
+        match std::fs::read(&path)
+            .map_err(|error| error.to_string())
+            .and_then(|body| {
+                serde_json::from_slice::<KeptProof>(&body).map_err(|error| error.to_string())
+            }) {
+            Ok(proof) if &proof.proof.method == method => kept.push(proof),
+            Ok(_) => absences.push(format!("{}: keeps another Method's proof", path.display())),
+            Err(error) => absences.push(format!("{}: {error}", path.display())),
+        }
+    }
+    kept.sort_by(|a, b| {
+        b.kept_at_unix_ms
+            .cmp(&a.kept_at_unix_ms)
+            .then_with(|| a.proof.proof_ref.as_str().cmp(b.proof.proof_ref.as_str()))
+    });
+    Ok(kept)
+}
+
+/// One read-only Central Action through the real `ctrl` binary, answered as
+/// its `data`, or refused in Central's own words.
+fn central_read(central_root: &std::path::Path, action: &str, input: &Value) -> Result<Value> {
+    use aikit_adapters::runner::{CommandRunner, SystemRunner};
+    let argv = vec![
+        "ctrl".to_owned(),
+        "--json".to_owned(),
+        "--root".to_owned(),
+        central_root.display().to_string(),
+        "action".to_owned(),
+        "run".to_owned(),
+        action.to_owned(),
+        input.to_string(),
+    ];
+    let output = SystemRunner::new().run(&argv)?;
+    let envelope: Value = serde_json::from_str(output.stdout.trim()).map_err(|error| {
+        AikitError::new(
+            "central.action_invalid_output",
+            format!("{action} returned no JSON envelope: {error}"),
+        )
+        .with("stderr", output.stderr.trim().to_owned())
+    })?;
+    if envelope.get("ok").and_then(Value::as_bool) != Some(true) {
+        let message = envelope
+            .pointer("/error/message")
+            .and_then(Value::as_str)
+            .unwrap_or("Central refused without a message");
+        return Err(AikitError::new(
+            "central.action_failed",
+            format!("{action}: {message}"),
+        ));
+    }
+    envelope.get("data").cloned().ok_or_else(|| {
+        AikitError::new(
+            "central.action_invalid_output",
+            format!("{action} succeeded without data"),
+        )
     })
+}
+
+fn trigger_document(record: &StoredRoutine) -> Option<Value> {
+    match &record.routine.trigger {
+        RoutineTrigger::Manual => Some(json!({"kind": "manual"})),
+        RoutineTrigger::Event { event_ref } => {
+            Some(json!({"kind": "event", "event_ref": event_ref}))
+        }
+        RoutineTrigger::External { trigger_ref } => {
+            Some(json!({"kind": "external", "trigger_ref": trigger_ref}))
+        }
+        // A schedule trigger is offered as the full record `create` takes;
+        // a Routine that lost its record has nothing to offer.
+        RoutineTrigger::Schedule { .. } => record
+            .time_schedule
+            .as_ref()
+            .and_then(|schedule| serde_json::to_value(schedule).ok()),
+    }
+}
+
+fn trigger_title(document: &Value) -> String {
+    if document.get("schema").and_then(Value::as_str) == Some(TIME_SCHEDULE_VERSION) {
+        let reference = document["schedule_ref"].as_str().unwrap_or("a schedule");
+        let shape = &document["schedule"];
+        let when = match shape["kind"].as_str() {
+            Some("daily") => format!("daily at {}", shape["time"].as_str().unwrap_or("?")),
+            Some("cron") => format!("cron {}", shape["expression"].as_str().unwrap_or("?")),
+            Some("every") => format!("every {} ms", shape["interval_ms"]),
+            Some("once") => match shape["rfc3339"].as_str() {
+                Some(at) => format!("once at {at}"),
+                None => format!("once at {} (Unix ms)", shape["due_unix_ms"]),
+            },
+            _ => "a schedule".to_owned(),
+        };
+        return format!("{reference}: {when}");
+    }
+    match document["kind"].as_str() {
+        Some("manual") => "Manual: runs only when you press Run now".to_owned(),
+        Some("event") => format!("Event {}", document["event_ref"].as_str().unwrap_or("?")),
+        Some("external") => format!(
+            "External {}",
+            document["trigger_ref"].as_str().unwrap_or("?")
+        ),
+        _ => "A trigger".to_owned(),
+    }
+}
+
+fn profile_title(profile: &Value) -> Option<String> {
+    let text = |key: &str| {
+        profile[key]
+            .as_str()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_owned)
+    };
+    let title = text("name")
+        .or_else(|| text("role"))
+        .or_else(|| text("purpose"))?;
+    Some(title.chars().take(80).collect())
+}
+
+/// `aikit routine options --method <ref>`: what a new Routine over this Method
+/// can be made from, each row a complete document `routine create` takes as
+/// handed — the Method's verified runs at its current revision, the authority
+/// receipts, the admitted triggers, the agent profiles, the context scopes and
+/// Central's time policy. It reads only: nothing is kept, and the one document
+/// AIKit names itself is the pending authority a Draft stands on (the same
+/// pending receipt `import-foreign` gives an imported Routine), which grants
+/// nothing.
+pub fn options(home: &aikit_store::AikitHome, method: &str) -> Result<Value> {
+    let method_ref = ResourceRef::parse(method)?;
+    let resolver = CatalogMethodResolver { home: home.clone() };
+    let resolved = resolver.resolve(&method_ref)?;
+    let revision = resolved.revision.clone().ok_or_else(|| {
+        AikitError::new(
+            "routine.method_revision_required",
+            "a Method must carry an exact source revision before a Routine can be made from it",
+        )
+        .with("method", method_ref.to_string())
+    })?;
+    let routines = RoutineStore::new(home.clone()).list()?;
+    let mut absences: Vec<String> = Vec::new();
+
+    // Verified runs: kept proofs, newest first, then the proofs Routines over
+    // this Method carry. A proof of an earlier revision cannot make a Routine.
+    let mut proofs: Vec<Value> = Vec::new();
+    let mut seen_proofs = std::collections::BTreeSet::new();
+    let mut stale_proofs = 0usize;
+    let current =
+        |proof: &ProvenMethodBasis| proof.method == method_ref && proof.method_revision == revision;
+    for kept in kept_proofs(home, &method_ref, &mut absences)? {
+        if !current(&kept.proof) {
+            stale_proofs += 1;
+            continue;
+        }
+        if seen_proofs.insert(kept.proof.proof_ref.to_string()) {
+            proofs.push(json!({
+                "title": kept.proof.proof_ref.to_string(),
+                "source": "kept",
+                "kept_at_unix_ms": kept.kept_at_unix_ms,
+                "document": kept.proof,
+            }));
+        }
+    }
+    for record in routines
+        .iter()
+        .filter(|record| record.routine.method == method_ref)
+    {
+        let proof = &record.routine.proof;
+        if !current(proof) {
+            stale_proofs += 1;
+            continue;
+        }
+        if seen_proofs.insert(proof.proof_ref.to_string()) {
+            proofs.push(json!({
+                "title": proof.proof_ref.to_string(),
+                "source": record.routine.id.to_string(),
+                "document": proof,
+            }));
+        }
+    }
+    if proofs.is_empty() {
+        absences.push(format!(
+            "no verified run of {method_ref} at {revision}: run it, verify it, then `aikit method \
+             prove --method {method_ref}`"
+        ));
+    }
+
+    // Authority receipts: the pending one a Draft stands on, then the receipts
+    // Routines over this Method were enabled with, while every Action they
+    // name is still one of the Method's.
+    let mut authorities: Vec<Value> = Vec::new();
+    let mut seen_authorities = std::collections::BTreeSet::new();
+    if resolved.actions.is_empty() {
+        absences.push(format!(
+            "{method_ref} declares no Actions, so no authority can name one"
+        ));
+    } else {
+        let pending = RoutineAuthority {
+            authority_ref: ResourceRef::parse(format!(
+                "authority:routine:pending-{}",
+                slug(method_ref.as_str())
+            ))?,
+            revision: None,
+            action_refs: resolved.actions.clone(),
+            granted: false,
+            unattended: false,
+        };
+        let document = serde_json::to_value(&pending)
+            .map_err(|error| AikitError::new("cli.routine_json_failed", error.to_string()))?;
+        seen_authorities.insert(document.to_string());
+        authorities.push(json!({
+            "title": "Pending: makes a Draft and grants nothing; Enable needs a granted receipt",
+            "source": "aikit",
+            "document": document,
+        }));
+    }
+    for record in routines
+        .iter()
+        .filter(|record| record.routine.method == method_ref)
+    {
+        let authority = &record.routine.authority;
+        if authority
+            .action_refs
+            .iter()
+            .any(|action| !resolved.actions.contains(action))
+        {
+            continue;
+        }
+        let document = serde_json::to_value(authority)
+            .map_err(|error| AikitError::new("cli.routine_json_failed", error.to_string()))?;
+        if seen_authorities.insert(document.to_string()) {
+            let standing = match (authority.granted, authority.unattended) {
+                (true, true) => "granted, unattended",
+                (true, false) => "granted, attended only",
+                (false, _) => "not granted",
+            };
+            authorities.push(json!({
+                "title": format!("{} ({standing})", authority.authority_ref),
+                "source": record.routine.id.to_string(),
+                "document": document,
+            }));
+        }
+    }
+    if !authorities
+        .iter()
+        .any(|row| row["document"]["granted"] == Value::Bool(true))
+    {
+        absences.push(
+            "no granted authority receipt for this Method: AIKit mints none; Enable takes the \
+             receipt its authority owner supplies"
+                .to_owned(),
+        );
+    }
+
+    // Triggers: Manual always, then each trigger a stored Routine is admitted
+    // under — schedules as the full owner-validated record.
+    let mut triggers = vec![json!({
+        "title": trigger_title(&json!({"kind": "manual"})),
+        "source": "aikit",
+        "document": {"kind": "manual"},
+    })];
+    let mut seen_triggers =
+        std::collections::BTreeSet::from([json!({"kind": "manual"}).to_string()]);
+    for record in &routines {
+        let Some(document) = trigger_document(record) else {
+            continue;
+        };
+        if seen_triggers.insert(document.to_string()) {
+            triggers.push(json!({
+                "title": trigger_title(&document),
+                "source": record.routine.id.to_string(),
+                "document": document,
+            }));
+        }
+    }
+
+    // Context scopes: the refs AIKit's Routines carry. AIKit keeps no other
+    // registry of them; a Routine carries what it is handed.
+    let mut context_scopes: Vec<Value> = Vec::new();
+    let mut seen_scopes = std::collections::BTreeSet::new();
+    for record in &routines {
+        for scope in &record.routine.context_scope_refs {
+            if seen_scopes.insert(scope.to_string()) {
+                context_scopes.push(json!({"title": scope.to_string(), "ref": scope.to_string()}));
+            }
+        }
+    }
+
+    // Central's: the agent profiles and the civil-time policy, each named
+    // absent with Central's reason when it cannot be read.
+    let mut profiles: Vec<Value> = Vec::new();
+    let mut time_policy = Value::Null;
+    match CtrlOccurrenceSource::discover() {
+        Err(error) => absences.push(format!("Central's root: {error}")),
+        Ok(central_root) => {
+            match central_read(
+                &central_root,
+                "agent-profile.list",
+                &json!({"scope": "root"}),
+            ) {
+                Ok(data) => {
+                    for entry in data["profiles"].as_array().cloned().unwrap_or_default() {
+                        let profile = &entry["profile"];
+                        let Some(reference) = profile["ref"].as_str() else {
+                            continue;
+                        };
+                        if ResourceRef::parse(reference).is_err() {
+                            continue;
+                        }
+                        profiles.push(json!({
+                            "title": profile_title(profile).unwrap_or_else(|| reference.to_owned()),
+                            "ref": reference,
+                        }));
+                    }
+                }
+                Err(error) => absences.push(format!("agent profiles: {error}")),
+            }
+            match central_read(&central_root, "central.time.policy", &json!({})) {
+                Ok(data) => {
+                    time_policy = json!({
+                        "ref": data["source_ref"],
+                        "revision": data["revision"],
+                        "timezone": data["policy"]["timezone"],
+                    });
+                }
+                Err(error) => absences.push(format!("time policy: {error}")),
+            }
+        }
+    }
+
+    Ok(json!({
+        "schema": ROUTINE_OPTIONS_VERSION,
+        "method": {
+            "ref": method_ref.to_string(),
+            "revision": revision.to_string(),
+            "actions": resolved.actions.iter().map(ToString::to_string).collect::<Vec<_>>(),
+        },
+        "proofs": proofs,
+        "stale_proofs": stale_proofs,
+        "authorities": authorities,
+        "triggers": triggers,
+        "profiles": profiles,
+        "context_scopes": context_scopes,
+        "time_policy": time_policy,
+        "absences": absences,
+    }))
+}
+
+/// `aikit routine prepare-schedule --schedule-json <shape>`: validate one
+/// time-shape with AIKit's grammar and Central's civil-time policy, and name
+/// the ScheduleRecord a new Routine would carry — its identity allocated
+/// here — without keeping or enabling anything. `trigger` is exactly the
+/// document `routine create --trigger-json` takes; `create` validates it again.
+pub fn prepare_schedule(schedule_json: &str) -> Result<Value> {
+    let shape: aikit_core::schedule::ScheduleShape =
+        parse_json(schedule_json, "schedule shape").map_err(|error| {
+            if error.code() == "cli.structured_json_invalid" {
+                AikitError::new(
+                    "routine.trigger_invalid",
+                    format!(
+                        "{}; a schedule shape is {{kind: daily, time}}, {{kind: cron, expression}}, \
+                         {{kind: every, interval_ms}} or {{kind: once, rfc3339 | due_unix_ms}}",
+                        error.message()
+                    ),
+                )
+            } else {
+                error
+            }
+        })?;
+    shape.validate()?;
+    let now = now_unix_ms();
+    let shape_value = serde_json::to_value(&shape)
+        .map_err(|error| AikitError::new("routine.schedule_encoding", error.to_string()))?;
+    let kind = shape_value["kind"]
+        .as_str()
+        .unwrap_or("schedule")
+        .to_owned();
+    let schedule_ref = ResourceRef::parse(format!(
+        "schedule/{kind}-{}",
+        &digest32(&format!(
+            "{shape_value}\u{0}{now}\u{0}{}\u{0}{:?}",
+            std::process::id(),
+            std::time::SystemTime::now()
+        ))[..16]
+    ))?;
+    let record = ScheduleRecord::new(schedule_ref, shape, None)?;
+    let source = CtrlOccurrenceSource {
+        central_root: CtrlOccurrenceSource::discover()?,
+    };
+    let reading = source.occurrences(&shape_value, now, now + PREPARE_WINDOW_MS)?;
+    let trigger = serde_json::to_value(&record)
+        .map_err(|error| AikitError::new("routine.schedule_encoding", error.to_string()))?;
+    let next = reading
+        .occurrences
+        .iter()
+        .take(8)
+        .map(|occurrence| {
+            json!({
+                "occurrence_ref": occurrence.occurrence_ref.to_string(),
+                "due_unix_ms": occurrence.due_unix_ms,
+            })
+        })
+        .collect::<Vec<_>>();
+    let note = if next.is_empty() {
+        "Central resolves no occurrence in the next eight days; nothing is kept"
+    } else {
+        "prepared and not kept: create the Routine with this trigger, then enable it"
+    };
+    Ok(json!({
+        "schema": PREPARED_SCHEDULE_VERSION,
+        "trigger": trigger,
+        "time_policy": {
+            "ref": reading.time_policy_ref.to_string(),
+            "revision": reading.time_policy_revision.to_string(),
+        },
+        "window": {"from_unix_ms": now, "to_unix_ms": now + PREPARE_WINDOW_MS},
+        "next_occurrences": next,
+        "kept": false,
+        "note": note,
+    }))
 }
 
 /// `aikit routine create` — the Routine sits in Draft until enabled.

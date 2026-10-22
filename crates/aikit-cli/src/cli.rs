@@ -1069,6 +1069,8 @@ fn routine_route(command: &RoutineSub) -> &'static str {
         RoutineSub::Invocations { .. } => "cmd_routine_invocations",
         RoutineSub::List { .. } => "cmd_routine_list",
         RoutineSub::Show { .. } => "cmd_routine_show",
+        RoutineSub::Options { .. } => "cmd_routine_options",
+        RoutineSub::PrepareSchedule { .. } => "cmd_routine_prepare_schedule",
         RoutineSub::Create { .. } => "cmd_routine_create",
         RoutineSub::Enable { .. } => "cmd_routine_enable",
         RoutineSub::Disable { .. } => "cmd_routine_disable",
@@ -2192,6 +2194,25 @@ pub enum RoutineSub {
     Show {
         #[arg(value_name = "ROUTINE_REF")]
         routine_ref: String,
+    },
+    /// What a new Routine over one Method can be made from: its verified runs
+    /// at the current revision, the authority receipts, the admitted triggers,
+    /// Central's agent profiles, the context scopes and the time policy — each
+    /// a document `routine create` takes as handed. Reads only.
+    Options {
+        #[arg(long, value_name = "REF")]
+        method: String,
+    },
+    /// Validate one schedule shape with AIKit's grammar and Central's
+    /// civil-time policy and name the ScheduleRecord a new Routine would carry
+    /// (its identity allocated here). Nothing is kept or enabled.
+    PrepareSchedule {
+        /// Schedule shape JSON: {"kind":"daily","time":"07:30"},
+        /// {"kind":"cron","expression":"0 8 * * 1-5"},
+        /// {"kind":"every","interval_ms":N} or {"kind":"once","rfc3339":"…"}.
+        /// Prefix with @ for a file.
+        #[arg(long = "schedule-json", value_name = "JSON|@FILE")]
+        schedule_json: String,
     },
     /// Create a Routine from a proven basis. The Routine sits in Draft until
     /// explicitly enabled.

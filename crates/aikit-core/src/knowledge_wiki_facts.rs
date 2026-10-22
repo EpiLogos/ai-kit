@@ -330,6 +330,47 @@ pub fn inspect(input: &str, reference: &ResourceRef) -> Result<Value> {
     }
     Ok(reading)
 }
+pub const PLACES_READING: &str = "aikit.wiki-places/v1";
+/// Every place one register's Wiki declares: each spatial facet on a node, a
+/// whole frame or a space, with the object it stands on. A place with a
+/// `body_ref` stands on that world body; without one it stands on the Earth.
+/// An object whose facets cannot be read is named, never dropped. Reads only.
+pub fn places(input: &str) -> Result<Value> {
+    let doc = WikiDocument::parse(input)?;
+    let mut places = Vec::new();
+    let mut unreadable = Vec::new();
+    for object in doc.objects() {
+        let (kind, reference, title, extensions) = match object {
+            WikiObject::Node(row) => ("node", &row.ref_id, row.title.clone(), &row.extensions),
+            WikiObject::Frame(row) => ("frame", &row.ref_id, None, &row.extensions),
+            WikiObject::Space(row) => ("space", &row.ref_id, row.title.clone(), &row.extensions),
+            _ => continue,
+        };
+        match parse_facets_from_extensions(extensions) {
+            Ok(facets) => {
+                for place in facets.spatial {
+                    let name = place
+                        .identity
+                        .as_ref()
+                        .and_then(|identity| identity.names.first())
+                        .map(|name| name.name.clone());
+                    places.push(json!({
+                        "place_ref": place.place_ref,
+                        "name": name,
+                        "stands_on": place.body_ref.clone().map_or(json!("earth"), |body| json!({"body_ref": body})),
+                        "on": {"object": kind, "ref": reference, "title": title},
+                        "place": place,
+                    }));
+                }
+            }
+            Err(error) => unreadable
+                .push(json!({"object": kind, "ref": reference, "reason": error.to_string()})),
+        }
+    }
+    Ok(
+        json!({"schema":PLACES_READING,"native_owner":"ai-kit","places":places,"unreadable":unreadable}),
+    )
+}
 fn object_of<'a>(doc: &'a WikiDocument, reference: &ResourceRef) -> Result<&'a WikiObject> {
     doc.object(reference)
         .ok_or_else(|| err("native facts target is absent"))
