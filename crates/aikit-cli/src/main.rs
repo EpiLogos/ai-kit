@@ -1213,6 +1213,10 @@ fn cmd_routine(command: RoutineCmd) -> Result<Reply> {
         })?,
         RoutineSub::List { state } => routine_cli::list(&home, state.as_deref())?,
         RoutineSub::Show { routine_ref } => routine_cli::show(&home, &routine_ref)?,
+        RoutineSub::Options { method } => routine_cli::options(&home, &method)?,
+        RoutineSub::PrepareSchedule { schedule_json } => {
+            routine_cli::prepare_schedule(&schedule_json)?
+        }
         RoutineSub::Create {
             name,
             description,
@@ -4840,8 +4844,9 @@ fn cmd_search(cwd: &std::path::Path, a: SearchArgs) -> Result<Reply> {
 fn cmd_method(cwd: &std::path::Path, a: MethodArgs) -> Result<Reply> {
     let mut service = Service::discover(cwd)?;
     if let MethodCommand::Prove { method, proof_json } = &a.command {
-        let data = aikit_cli::routine_cli::method_prove(service.home(), method, proof_json)?;
-        return Ok(reply(&service, data, vec![]));
+        let (data, unkept) =
+            aikit_cli::routine_cli::method_prove(service.home(), method, proof_json)?;
+        return Ok(reply(&service, data, unkept.into_iter().collect()));
     }
     if let MethodCommand::Run {
         method,

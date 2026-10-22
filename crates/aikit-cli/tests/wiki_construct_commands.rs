@@ -524,3 +524,65 @@ fn symlink_file_and_symlink_lock_are_refused_without_touching_target() {
         b"retained legacy source\n"
     );
 }
+
+#[test]
+fn facts_places_lists_each_declared_place_with_its_object_and_body() {
+    let (temp, path) = fixture();
+    let original = fs::read_to_string(&path).unwrap();
+    // None declared yet: an empty listing, not an absence.
+    let list = || {
+        command(
+            temp.path(),
+            &[
+                "wiki-construct",
+                "facts-places",
+                "--file",
+                path.to_str().unwrap(),
+            ],
+            None,
+        )
+    };
+    let (code, empty) = list();
+    assert_eq!(code, 0, "{empty}");
+    assert_eq!(empty["data"]["reading"]["schema"], "aikit.wiki-places/v1");
+    assert_eq!(empty["data"]["reading"]["places"], json!([]));
+
+    let places = json!([
+        {"place_ref":"place:harbour","identity":{"names":[{"name":"The harbour"}]},
+         "geometry":{"type":"point","coordinates":[-4.14,50.37]},"precision":"exact","source_ref":"central:source:alpha.md"},
+        {"place_ref":"place:keep","identity":{"names":[{"name":"The keep"}]},"precision":"approximate",
+         "body_ref":"body:your-world","source_ref":"central:source:alpha.md"}
+    ]);
+    let request = json!({"schema":"aikit.wiki-facts-action/v1","target":{"kind":"node","ref":"wiki:alpha"},
+        "expected_revision":1,"actor_ref":"human:author","operation_ref":"action:places",
+        "changes":[{"change":"place_set","places":places}]});
+    let (code, saved) = command(
+        temp.path(),
+        &[
+            "wiki-construct",
+            "facts-apply",
+            "--file",
+            path.to_str().unwrap(),
+        ],
+        Some(&json!({"request":request,"basis_content":original})),
+    );
+    assert_eq!(code, 0, "{saved}");
+    let written = fs::read(&path).unwrap();
+
+    let (code, listed) = list();
+    assert_eq!(code, 0, "{listed}");
+    let rows = listed["data"]["reading"]["places"].as_array().unwrap();
+    assert_eq!(rows.len(), 2, "{listed}");
+    assert_eq!(rows[0]["place_ref"], "place:harbour");
+    assert_eq!(rows[0]["name"], "The harbour");
+    assert_eq!(rows[0]["stands_on"], "earth");
+    assert_eq!(
+        rows[0]["on"],
+        json!({"object":"node","ref":"wiki:alpha","title":"Alpha"})
+    );
+    assert_eq!(rows[0]["place"], places[0]);
+    assert_eq!(rows[1]["stands_on"], json!({"body_ref":"body:your-world"}));
+    assert_eq!(listed["data"]["reading"]["unreadable"], json!([]));
+    // Listing writes nothing.
+    assert_eq!(fs::read(&path).unwrap(), written);
+}

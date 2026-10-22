@@ -45,6 +45,12 @@ pub enum ConstructSub {
         #[arg(long)]
         file: PathBuf,
     },
+    /// Every place the register's Wiki declares, each with the object it is
+    /// on and the body it stands on (a world body, or the Earth). Reads only.
+    FactsPlaces {
+        #[arg(long)]
+        file: PathBuf,
+    },
     Capabilities,
 }
 #[derive(Debug, Deserialize)]
@@ -109,6 +115,10 @@ pub fn run(args: ConstructArgs) -> Result<Value> {
         })),
         ConstructSub::FactsInspect { target_ref, file } => {
             let reading = facts::inspect(&read_bounded(&file)?, &ResourceRef::parse(target_ref)?)?;
+            Ok(json!({"state":"read","file":file,"reading":reading}))
+        }
+        ConstructSub::FactsPlaces { file } => {
+            let reading = facts::places(&read_bounded(&file)?)?;
             Ok(json!({"state":"read","file":file,"reading":reading}))
         }
         ConstructSub::FactsApply { file } => {
