@@ -525,13 +525,14 @@ fn a_projectcentral_ground_source_routes_per_project_through_existing_bindings()
 }
 
 #[test]
-fn unresolved_personal_ground_withdraws_a_previously_projected_skill() {
+fn a_retired_manifest_withdraws_a_previously_projected_skill_and_a_missing_one_does_not() {
     let temp = tempfile::tempdir().unwrap();
     let home = temp.path().join("home");
     let project = temp.path().join("project");
     fs::create_dir_all(&project).unwrap();
     let ground = temp.path().join("Control/user/skills");
     write_skill(&ground.join("curated"), "curated");
+    write_skill(&ground.join("bare"), "bare");
     write_manifest(
         &ground.join("curated"),
         &active_manifest("curated", "control-user"),
@@ -553,24 +554,35 @@ fn unresolved_personal_ground_withdraws_a_previously_projected_skill() {
         &project,
         &["source", "promote", "personal", "--trust"],
     );
+    for id in ["skill/personal/curated", "skill/personal/bare"] {
+        aikit(&home, &project, &["enable", id, "--scope", "user"]);
+    }
     aikit(
         &home,
         &project,
-        &["enable", "skill/personal/curated", "--scope", "user"],
-    );
-    aikit(
-        &home,
-        &project,
-        &["set", "create", "curated", "skill/personal/curated"],
+        &[
+            "set",
+            "create",
+            "curated",
+            "skill/personal/curated",
+            "skill/personal/bare",
+        ],
     );
     let applied = aikit(&home, &project, &["apply"]);
     let current = home
         .join("state/contexts")
         .join(applied["context"]["context_id"].as_str().unwrap())
         .join("current");
-    assert!(current
-        .join("projections/claude/.claude/skills/curated/SKILL.md")
-        .is_file());
+    // A skill with no manifest at all stands active by being in the spool.
+    for name in ["curated", "bare"] {
+        assert!(
+            current
+                .join(format!("projections/claude/.claude/skills/{name}/SKILL.md"))
+                .is_file(),
+            "{name}"
+        );
+    }
+    // Dropping a manifest changes nothing: the skill is still the owner's.
     fs::remove_file(ground.join("curated/skill.json")).unwrap();
     aikit(&home, &project, &["source", "sync", "personal"]);
     aikit(
@@ -579,26 +591,40 @@ fn unresolved_personal_ground_withdraws_a_previously_projected_skill() {
         &["source", "promote", "personal", "--trust"],
     );
     let shown = aikit(&home, &project, &["set", "show", "curated"]);
-    assert_eq!(data(&shown)["projected"], serde_json::json!([]));
-    assert!(data(&shown)["withheld"][0]["reason"]
-        .as_str()
-        .unwrap()
-        .contains("withheld-unresolved"));
-    aikit(&home, &project, &["apply"]);
-    for relative in [
-        "projections/claude/.claude/skills/curated",
-        "projections/codex/.agents/skills/curated",
-    ] {
-        assert!(!current.join(relative).exists(), "{relative}");
-    }
-    // Reconcile the explicit selection before removing the authored resource.
+    assert_eq!(data(&shown)["withheld"], serde_json::json!([]));
+
+    // Retirement is what withdraws one, and it says why in the owner's words.
+    write_manifest(
+        &ground.join("curated"),
+        &retired_manifest("curated", "control-user", "Superseded by bare."),
+    );
+    aikit(&home, &project, &["source", "sync", "personal"]);
     aikit(
         &home,
         &project,
-        &["disable", "skill/personal/curated", "--scope", "user"],
+        &["source", "promote", "personal", "--trust"],
     );
+    let shown = aikit(&home, &project, &["set", "show", "curated"]);
+    let reason = data(&shown)["withheld"][0]["reason"].as_str().unwrap();
+    assert!(
+        reason.contains("withheld-retired") && reason.contains("Superseded by bare."),
+        "{reason}"
+    );
+    aikit(&home, &project, &["apply"]);
+    assert!(!current
+        .join("projections/claude/.claude/skills/curated")
+        .exists());
+    assert!(current
+        .join("projections/claude/.claude/skills/bare/SKILL.md")
+        .is_file());
+
+    // Reconcile the explicit selection before removing the authored resource.
+    for id in ["skill/personal/curated", "skill/personal/bare"] {
+        aikit(&home, &project, &["disable", id, "--scope", "user"]);
+    }
     // An empty authored collection is a real state, not a failed source refresh.
     fs::remove_dir_all(ground.join("curated")).unwrap();
+    fs::remove_dir_all(ground.join("bare")).unwrap();
     let empty = aikit(&home, &project, &["source", "sync", "personal"]);
     assert_eq!(data(&empty)["skills"], 0);
     aikit(

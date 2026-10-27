@@ -133,6 +133,7 @@ pub fn layer(kind: ScopeKind, enable: &[&str], disable: &[&str]) -> ScopeLayer {
             disable: disable.iter().map(|s| cid(s)).collect(),
             config: Default::default(),
             skill_overlays: Default::default(),
+            ..Default::default()
         },
     }
 }

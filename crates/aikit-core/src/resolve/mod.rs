@@ -100,14 +100,22 @@ pub struct SelectionOp {
     pub scope: ScopeKind,
     pub origin: LayerOrigin,
     pub via_profile: Option<ProfileId>,
+    /// The rule that selected this capability (`allow skill/personal/*`), when
+    /// a rule rather than an exact declaration did.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub via_rule: Option<String>,
 }
 
 impl SelectionOp {
     pub fn describe(&self) -> String {
         let verb = if self.enable { "enabled" } else { "disabled" };
-        match &self.via_profile {
+        let by = match &self.via_profile {
             Some(p) => format!("{verb} by {} {} via {p}", self.scope, self.origin),
             None => format!("{verb} by {} {}", self.scope, self.origin),
+        };
+        match &self.via_rule {
+            Some(rule) => format!("{by} (rule: {rule})"),
+            None => by,
         }
     }
 }
@@ -120,6 +128,9 @@ pub struct DeclaredState {
     pub scope: ScopeKind,
     pub origin: LayerOrigin,
     pub via_profile: Option<ProfileId>,
+    /// The rule that decided it, when a rule rather than an exact declaration did.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub via_rule: Option<String>,
 }
 
 /// Why a declared-enabled capability is nevertheless not in the effective view.
@@ -462,6 +473,7 @@ impl<'a> Resolver<'a> {
                     scope: op.scope,
                     origin: op.origin.clone(),
                     via_profile: op.via_profile.clone(),
+                    via_rule: op.via_rule.clone(),
                 },
             );
         }
@@ -486,6 +498,7 @@ impl<'a> Resolver<'a> {
                     scope: ScopeKind::Global,
                     origin: LayerOrigin::new(format!("managed policy {}", policy.source)),
                     via_profile: None,
+                    via_rule: None,
                 },
             );
             policy_forced.insert(required.clone());
@@ -819,23 +832,32 @@ impl<'a> Resolver<'a> {
         config: &mut BTreeMap<CapsuleId, ConfigTable>,
         skill_usage_overlays: &mut BTreeMap<CapsuleId, Vec<AppliedSkillUsageOverlay>>,
     ) {
+        // Within one scope the later operation wins, so the order below is the
+        // precedence: a family allowed, then one capability enabled, then a
+        // family denied, then one capability disabled. Deny beats allow.
+        let op = |id: &CapsuleId, enable: bool, rule: Option<String>| SelectionOp {
+            capsule: id.clone(),
+            enable,
+            scope: layer.kind,
+            origin: layer.origin.clone(),
+            via_profile: via_profile.cloned(),
+            via_rule: rule,
+        };
+        for pattern in &patch.allow {
+            for id in self.rule_matches(pattern, "allow", layer) {
+                ops.push(op(&id, true, Some(format!("allow {pattern}"))));
+            }
+        }
         for id in &patch.enable {
-            ops.push(SelectionOp {
-                capsule: id.clone(),
-                enable: true,
-                scope: layer.kind,
-                origin: layer.origin.clone(),
-                via_profile: via_profile.cloned(),
-            });
+            ops.push(op(id, true, None));
+        }
+        for pattern in &patch.deny {
+            for id in self.rule_matches(pattern, "deny", layer) {
+                ops.push(op(&id, false, Some(format!("deny {pattern}"))));
+            }
         }
         for id in &patch.disable {
-            ops.push(SelectionOp {
-                capsule: id.clone(),
-                enable: false,
-                scope: layer.kind,
-                origin: layer.origin.clone(),
-                via_profile: via_profile.cloned(),
-            });
+            ops.push(op(id, false, None));
         }
         for (id, table) in &patch.config {
             // The merge mode is a property of the capsule the section configures,
@@ -899,6 +921,28 @@ impl<'a> Resolver<'a> {
                 );
             }
         }
+    }
+
+    /// The catalogued capabilities a rule names, in id order. A rule that names
+    /// nothing is said aloud: a typo in a pattern would otherwise be a rule that
+    /// silently never fires.
+    fn rule_matches(&mut self, pattern: &str, effect: &str, layer: &ScopeLayer) -> Vec<CapsuleId> {
+        let mut matched: Vec<CapsuleId> = self
+            .catalog
+            .capsules()
+            .into_iter()
+            .map(|capsule| capsule.id.clone())
+            .filter(|id| crate::skillset::glob_matches(pattern, &id.to_string()))
+            .collect();
+        matched.sort();
+        matched.dedup();
+        if matched.is_empty() {
+            self.warn(format!(
+                "{effect} `{pattern}` matches nothing in the catalogue ({} {})",
+                layer.kind, layer.origin
+            ));
+        }
+        matched
     }
 
     fn expand(

@@ -2740,7 +2740,7 @@ fn cmd_source(cwd: &std::path::Path, command: SourceCmd) -> Result<Reply> {
             // A rejected skill must never be silent: the reply's warnings
             // name every skip and its reason, while the structured
             // `rejected` array stays machine-readable.
-            let warnings = snapshot
+            let mut warnings: Vec<String> = snapshot
                 .rejected
                 .iter()
                 .map(|rejection| {
@@ -2750,6 +2750,21 @@ fn cmd_source(cwd: &std::path::Path, command: SourceCmd) -> Result<Reply> {
                     )
                 })
                 .collect();
+            // The Agent Skills format requires a skill's directory to equal its
+            // `name`. A mismatch still projects (under the name), but it is said
+            // here, where the author can fix it, not discovered at projection.
+            warnings.extend(snapshot.skills.iter().filter_map(|skill| {
+                let directory = std::path::Path::new(&skill.source_path)
+                    .file_name()?
+                    .to_str()?;
+                (directory != skill.name).then(|| {
+                    format!(
+                        "skill directory `{directory}` declares name `{}`; the Agent Skills format \
+                         requires them to agree — rename one so they do",
+                        skill.name
+                    )
+                })
+            }));
             Ok(source_reply(
                 jval!({
                     "id": args.id,
@@ -2785,25 +2800,33 @@ fn cmd_source(cwd: &std::path::Path, command: SourceCmd) -> Result<Reply> {
         SourceSub::Promote(args) => {
             let (snapshot, trusted) =
                 skill_sources::promote(home, &args.id, args.trust, &args.trust_skills)?;
+            // A promoted snapshot is a new catalogue: the user scope is rebuilt
+            // so what was authored reaches the agents the profile names it for.
+            let mut warnings = Vec::new();
+            let user_scope = refresh_user_scope(home, &mut warnings);
             Ok(source_reply(
                 jval!({
                     "id": args.id,
                     "active_snapshot": snapshot.digest,
                     "skills": snapshot.skills.len(),
                     "trusted_skills": trusted,
+                    "user_scope": user_scope,
                 }),
-                vec![],
+                warnings,
             ))
         }
         SourceSub::Rollback(args) => {
             let snapshot = skill_sources::rollback(home, &args.id)?;
+            let mut warnings = Vec::new();
+            let user_scope = refresh_user_scope(home, &mut warnings);
             Ok(source_reply(
                 jval!({
                     "id": args.id,
                     "active_snapshot": snapshot.digest,
                     "skills": snapshot.skills.len(),
+                    "user_scope": user_scope,
                 }),
-                vec![],
+                warnings,
             ))
         }
         SourceSub::Remove(args) => {
@@ -5012,6 +5035,34 @@ fn cmd_a2a(cwd: &std::path::Path, a: A2aCmd) -> Result<Reply> {
 /// catalogued forever, projectable never. This is that verb. It writes exactly
 /// what promotion writes, into the same trust table, keyed on the same
 /// content-hashed revision.
+fn cmd_trust_audit(service: &Service, args: &aikit_cli::cli::TrustAuditArgs) -> Result<Reply> {
+    use aikit_cli::skill_audit::{audit_one, settle_unreviewed, Auditor};
+    let Some(auditor) = Auditor::configured(service.home()) else {
+        return Err(AikitError::new(
+            "audit.unavailable",
+            "no skill auditor is configured: set AIKIT_SKILL_AUDITOR (a JSON argv array) or \
+             `skill_auditor = [...]` in ~/.aikit/config.toml, or install the Hermes skills guard",
+        ));
+    };
+    match &args.capability {
+        Some(text) => {
+            let id = CapsuleId::parse(text)?;
+            let outcome = audit_one(
+                service.home(),
+                &auditor,
+                service.snapshot(),
+                &id,
+                !args.no_record,
+            )?;
+            Ok(reply(service, jval!({ "audited": [outcome] }), Vec::new()))
+        }
+        None => {
+            let (outcomes, warnings) = settle_unreviewed(service);
+            Ok(reply(service, jval!({ "audited": outcomes }), warnings))
+        }
+    }
+}
+
 fn cmd_trust(cwd: &std::path::Path, a: TrustCmd) -> Result<Reply> {
     let service = Service::discover(cwd)?;
     let (capability_text, requested_source, note) = match &a.command {
@@ -5021,6 +5072,7 @@ fn cmd_trust(cwd: &std::path::Path, a: TrustCmd) -> Result<Reply> {
             args.note.clone(),
         ),
         TrustSub::Show(args) => (args.capability.clone(), None, None),
+        TrustSub::Audit(args) => return cmd_trust_audit(&service, args),
     };
     let capability = CapsuleId::parse(&capability_text).map_err(|error| {
         AikitError::new(
@@ -5110,6 +5162,8 @@ fn cmd_trust(cwd: &std::path::Path, a: TrustCmd) -> Result<Reply> {
                 Vec::new(),
             ))
         }
+        // Handled before the capability lookup above; the match stays exhaustive.
+        TrustSub::Audit(args) => cmd_trust_audit(&service, args),
     }
 }
 
@@ -5662,7 +5716,30 @@ fn cmd_run(cwd: &std::path::Path, a: RunArgs) -> Result<Reply> {
 fn cmd_toggle(cwd: &std::path::Path, a: ToggleArgs, enable: bool) -> Result<Reply> {
     use aikit_tui::backend::Toggle;
     let mut service = Service::discover(cwd)?;
+    if a.capability.contains('*') {
+        return cmd_rule(&mut service, a, enable);
+    }
     let id = CapsuleId::parse(&a.capability)?;
+    if a.forget {
+        let scope = resolve_scope(&service, a.scope.as_deref())?;
+        let applied = service.forget(&id, scope)?;
+        let data = jval!({
+            "capability": id.to_string(),
+            "forgotten": true,
+            "scope": scope.as_str(),
+            "generation": applied.id.to_string(),
+            "replaced": applied.replaced.as_ref().map(|g| g.to_string()),
+        });
+        let mut warnings = applied.warnings;
+        let mut data = data;
+        data["user_scope"] = if scope == ScopeKind::Global {
+            refresh_user_scope(service.home(), &mut warnings)
+        } else {
+            warnings.extend(aikit_cli::skill_reach::settle(&service).warnings);
+            Value::Null
+        };
+        return Ok(reply(&service, data, warnings));
+    }
     // Typos surface here, where they are typed, rather than as a stale
     // declaration that shadows every later command. A capability that was
     // catalogued once and lost its source since is a doctor repair, not an
@@ -5688,12 +5765,82 @@ fn cmd_toggle(cwd: &std::path::Path, a: ToggleArgs, enable: bool) -> Result<Repl
         "replaced": applied.replaced.as_ref().map(|g| g.to_string()),
     });
     let mut warnings = applied.warnings;
-    warnings.extend(aikit_cli::skill_reach::settle(&service).warnings);
+    let mut data = data;
+    data["user_scope"] = if scope == ScopeKind::Global {
+        refresh_user_scope(service.home(), &mut warnings)
+    } else {
+        warnings.extend(aikit_cli::skill_reach::settle(&service).warnings);
+        Value::Null
+    };
     Ok(reply(&service, data, warnings))
+}
+
+/// A change to the user's profile reaches the agents the user-level harness
+/// roots feed, or says why not. A failed rebuild never undoes the declaration
+/// already written; it is a warning that names the failure.
+fn refresh_user_scope(home: &AikitHome, warnings: &mut Vec<String>) -> Value {
+    match Service::refresh_user_scope(home) {
+        Ok(refresh) => {
+            warnings.extend(refresh.warnings);
+            jval!({
+                "generation": refresh.generation.to_string(),
+                "replaced": refresh.replaced.as_ref().map(|g| g.to_string()),
+                "skill_roots": refresh.skill_roots,
+                "audited": refresh.audited,
+            })
+        }
+        Err(error) => {
+            warnings.push(format!(
+                "skill-reach: the user scope could not be rebuilt, so no agent has this change yet: {}",
+                error.message()
+            ));
+            Value::Null
+        }
+    }
+}
+
+/// `aikit enable 'skill/personal/**'` and `aikit disable …`: a rule names a
+/// family, is matched against the catalogue each time resolution runs, and is
+/// forgotten with `--forget`.
+fn cmd_rule(service: &mut Service, a: ToggleArgs, enable: bool) -> Result<Reply> {
+    let scope = resolve_scope(service, a.scope.as_deref())?;
+    let effect = (!a.forget).then_some(enable);
+    let change = service.set_rule(&a.capability, effect, scope)?;
+    let data = jval!({
+        "rule": a.capability,
+        "effect": match change.effect {
+            Some(true) => "allow",
+            Some(false) => "deny",
+            None => "forgotten",
+        },
+        "scope": scope.as_str(),
+        "covers": change.covers,
+        "generation": change.applied.id.to_string(),
+        "replaced": change.applied.replaced.as_ref().map(|g| g.to_string()),
+    });
+    let mut warnings = change.applied.warnings;
+    let user_scope = if scope == ScopeKind::Global {
+        refresh_user_scope(service.home(), &mut warnings)
+    } else {
+        warnings.extend(aikit_cli::skill_reach::settle(service).warnings);
+        Value::Null
+    };
+    let mut data = data;
+    data["user_scope"] = user_scope;
+    Ok(reply(service, data, warnings))
 }
 
 fn cmd_apply(cwd: &std::path::Path, a: ApplyArgs) -> Result<Reply> {
     let mut service = Service::discover(cwd)?;
+    if a.user {
+        let mut warnings = Vec::new();
+        let user_scope = refresh_user_scope(service.home(), &mut warnings);
+        return Ok(reply(
+            &service,
+            jval!({ "user_scope": user_scope }),
+            warnings,
+        ));
+    }
     let scope = service.descriptor().default_mutation_scope();
     let applied = service.apply(ApplyRequest {
         scope,

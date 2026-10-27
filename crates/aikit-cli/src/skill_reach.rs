@@ -8,9 +8,15 @@
 //! resolve through (AIKit#299 left this as a documented manual step).
 //!
 //! `settle` runs after every apply. It keeps the harness roots a generation is
-//! already wired into complete (adding only absent links, through a reversible
-//! Procedure) and turns every other hand-off failure into a warning that names
-//! the skill and the one-line way out.
+//! already wired into complete (adding absent links through a reversible
+//! Procedure, and removing links whose skill the generation no longer carries)
+//! and turns every other hand-off failure into a warning that names the skill
+//! and the one-line way out.
+//!
+//! The user-level roots (`~/.claude/skills`, `~/.agents/skills`) belong to the
+//! user scope alone: they are wired to the user-scope context, which resolves
+//! the global profile and nothing else, so no project or session layer can leak
+//! into every session the user starts.
 
 use std::collections::BTreeMap;
 use std::path::{Component, Path, PathBuf};
@@ -20,7 +26,7 @@ use serde::Serialize;
 use aikit_core::capsule::{ControlStanding, Kind};
 use aikit_core::resolve::UnavailableReason;
 
-use crate::app::Service;
+use crate::app::{Service, USER_SCOPE_CONTEXT};
 
 /// How many names a warning spells out before it counts the rest.
 const NAMED: usize = 8;
@@ -35,6 +41,8 @@ pub struct WiredRoot {
     pub procedure: Option<String>,
     pub undo: Option<String>,
     pub shadowed: Vec<String>,
+    /// Links removed because the generation no longer carries the skill.
+    pub pruned: Vec<String>,
     pub reason: Option<String>,
 }
 
@@ -128,6 +136,41 @@ fn absent(root: &Path, tree: &Path) -> Vec<String> {
     out
 }
 
+/// Links in `root` that point into `tree` at a skill the generation no longer
+/// carries. A denied, retired or removed skill leaves one of these behind;
+/// leaving it would keep naming a skill the profile has withdrawn.
+fn dangling(root: &Path, tree: &Path) -> Vec<String> {
+    let mut out = Vec::new();
+    // A generation tree that is not there at all is a build that failed, not a
+    // profile that withdrew every skill: never read it as licence to prune.
+    if !tree.is_dir() {
+        return out;
+    }
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return out;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Ok(target) = std::fs::read_link(&path) else {
+            continue;
+        };
+        if target.parent() == Some(tree) && !target.join("SKILL.md").is_file() {
+            out.push(entry.file_name().to_string_lossy().into_owned());
+        }
+    }
+    out.sort();
+    out
+}
+
+/// The generation tree a harness root is fed from.
+fn delivery_tree(projection_root: &Path, label: &str) -> Option<PathBuf> {
+    match label {
+        "@claude" => Some(projection_root.join("projections/claude/.claude/skills")),
+        "@agents" | "@codex" => Some(projection_root.join("projections/codex/.agents/skills")),
+        _ => None,
+    }
+}
+
 pub fn settle(service: &Service) -> Settlement {
     let mut settlement = Settlement::default();
     let home_dir = std::env::var_os("HOME")
@@ -135,15 +178,45 @@ pub fn settle(service: &Service) -> Settlement {
         .unwrap_or_else(|| PathBuf::from("."));
     let current = service.descriptor().context_id.to_string();
 
-    for (_, root) in crate::foreign::roots_for(&home_dir, service.invocation_cwd()) {
-        for (context, tree) in wirings(&root) {
-            if context != current {
+    let user_scope = current == USER_SCOPE_CONTEXT;
+
+    for (label, root) in crate::foreign::roots_for(&home_dir, service.invocation_cwd()) {
+        let wiring = wirings(&root);
+        if user_scope && root.is_dir() && !wiring.contains_key(&current) {
+            if let Some(tree) = delivery_tree(&service.context_projection_root(), &label) {
+                let shown = if wiring.is_empty() {
+                    "is not wired to the user scope".to_string()
+                } else {
+                    format!(
+                        "is wired through {}, not the user scope",
+                        wiring.keys().cloned().collect::<Vec<_>>().join(", ")
+                    )
+                };
                 settlement.warnings.push(format!(
-                    "skill-reach: {} resolves through {context}, not this context ({current}); \
-                     this apply did not refresh it — run `AIKIT_CONTEXT_ID={context} aikit apply`",
-                    root.display()
+                    "skill-reach: {} {shown}; preview the wiring with `aikit adopt {} --projection {}`",
+                    root.display(),
+                    root.display(),
+                    tree.display()
                 ));
+            }
+            continue;
+        }
+        for (context, tree) in wiring {
+            if context != current {
+                // The user scope owns the user-level roots; an apply anywhere
+                // else has no business with them.
+                if context != USER_SCOPE_CONTEXT {
+                    settlement.warnings.push(format!(
+                        "skill-reach: {} resolves through {context}, not this context ({current}); \
+                         this apply did not refresh it — run `AIKIT_CONTEXT_ID={context} aikit apply`",
+                        root.display()
+                    ));
+                }
                 continue;
+            }
+            let pruned = dangling(&root, &tree);
+            for name in &pruned {
+                let _ = std::fs::remove_file(root.join(name));
             }
             let mut wired = WiredRoot {
                 root: root.display().to_string(),
@@ -153,6 +226,7 @@ pub fn settle(service: &Service) -> Settlement {
                 procedure: None,
                 undo: None,
                 shadowed: shadowed(&root, &tree),
+                pruned,
                 reason: None,
             };
             match crate::adopt::plan_projection_fill(service.home(), &root, &tree) {

@@ -168,6 +168,7 @@ fn layer(kind: ScopeKind, enable: &[&str]) -> ScopeLayer {
             disable: vec![],
             config: Default::default(),
             skill_overlays: Default::default(),
+            ..Default::default()
         },
     }
 }

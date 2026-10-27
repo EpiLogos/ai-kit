@@ -253,6 +253,7 @@ fn layer_tuning(kind: ScopeKind, enable: &str, config: ConfigTable) -> ScopeLaye
             disable: vec![],
             config: table,
             skill_overlays: Default::default(),
+            ..Default::default()
         },
     }
 }

@@ -314,7 +314,8 @@ impl Facets {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum ControlStanding {
-    /// Derived when explicit Control ground has no authored manifest.
+    /// Read from snapshots written before a skill without a manifest stood
+    /// active by being in its spool; nothing derives it any more.
     Unresolved,
     Active,
     Retired,
