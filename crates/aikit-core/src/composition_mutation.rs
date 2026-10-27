@@ -229,10 +229,22 @@ pub enum ProfileActivationIntent {
     Disable,
 }
 
+/// What a staged rule does to a family of capabilities. `Forget` removes the
+/// rule so lower scopes decide again.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum RuleIntent {
+    Allow,
+    Deny,
+    Forget,
+}
+
 /// Typed, write-free staged Profile activation intent.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StagedProfileComposition {
     changes: BTreeMap<CapsuleId, ProfileActivationIntent>,
+    #[serde(default)]
+    rules: BTreeMap<String, RuleIntent>,
 }
 
 impl StagedProfileComposition {
@@ -252,12 +264,34 @@ impl StagedProfileComposition {
         self.changes.keys()
     }
 
+    /// Stage a rule over a family of capabilities. A malformed pattern is
+    /// refused here, where it is typed, not discovered at apply.
+    pub fn stage_rule(&mut self, pattern: &str, intent: RuleIntent) -> crate::Result<()> {
+        crate::profile::validate_rule(pattern)?;
+        self.rules.insert(pattern.to_string(), intent);
+        Ok(())
+    }
+
+    pub fn unstage_rule(&mut self, pattern: &str) -> Option<RuleIntent> {
+        self.rules.remove(pattern)
+    }
+
+    pub fn rule(&self, pattern: &str) -> Option<RuleIntent> {
+        self.rules.get(pattern).copied()
+    }
+
+    pub fn rules(&self) -> impl Iterator<Item = (&str, RuleIntent)> {
+        self.rules
+            .iter()
+            .map(|(pattern, intent)| (pattern.as_str(), *intent))
+    }
+
     pub fn len(&self) -> usize {
-        self.changes.len()
+        self.changes.len() + self.rules.len()
     }
 
     pub fn is_empty(&self) -> bool {
-        self.changes.is_empty()
+        self.changes.is_empty() && self.rules.is_empty()
     }
 
     /// Materialise staged intent into an authored copy for resolver preview.
@@ -269,6 +303,18 @@ impl StagedProfileComposition {
                 capability,
                 matches!(intent, ProfileActivationIntent::Enable),
             );
+        }
+        for (pattern, intent) in &self.rules {
+            match intent {
+                // Staging validated the pattern, so writing it cannot fail.
+                RuleIntent::Allow => {
+                    let _ = after.set_rule(pattern, true);
+                }
+                RuleIntent::Deny => {
+                    let _ = after.set_rule(pattern, false);
+                }
+                RuleIntent::Forget => after.clear_rule(pattern),
+            }
         }
         after
     }
@@ -387,6 +433,12 @@ pub struct AuthoredProfileReadModel {
     pub profiles: Vec<ProfileId>,
     pub enabled: Vec<CapsuleId>,
     pub disabled: Vec<CapsuleId>,
+    /// Allow rules authored at this scope: families, matched at resolution.
+    #[serde(default)]
+    pub allow: Vec<String>,
+    /// Deny rules authored at this scope.
+    #[serde(default)]
+    pub deny: Vec<String>,
 }
 
 impl From<&PoolPatch> for AuthoredProfileReadModel {
@@ -395,6 +447,8 @@ impl From<&PoolPatch> for AuthoredProfileReadModel {
             profiles: patch.profiles.clone(),
             enabled: patch.enable.clone(),
             disabled: patch.disable.clone(),
+            allow: patch.allow.clone(),
+            deny: patch.deny.clone(),
         }
     }
 }

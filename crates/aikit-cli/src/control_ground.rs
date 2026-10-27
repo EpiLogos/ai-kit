@@ -10,8 +10,10 @@
 //!
 //! The reading rules, mirrored from the contract itself:
 //!
-//! * absent `skill.json` ⇒ unresolved Control standing; the source adapter
-//!   preserves that fact and withholds it (ordinary sources remain compatible);
+//! * absent `skill.json` ⇒ **active, by being in the spool**: a skill the owner
+//!   put in their own Control spool needs no second file to say it is theirs.
+//!   The manifest is how a skill is *retired* or given a recorded provenance,
+//!   not a permit every skill must carry;
 //! * any other `schema` ⇒ refused, naming the file — a neighbour's future
 //!   contract version is a loud event, not a guess;
 //! * `standing` is `active` or `retired`; anything else is unresolved and
@@ -69,12 +71,17 @@ pub struct ControlMetadata {
     pub retirement_reason: Option<String>,
 }
 
+/// The provenance recorded for a skill that stands active only by being in the
+/// spool, with no manifest of its own.
+pub const SPOOL_PROVENANCE: &str = "spool";
+
 impl ControlMetadata {
-    pub fn unresolved() -> Self {
+    /// A skill in a Control spool with no manifest: active by being there.
+    pub fn spooled() -> Self {
         Self {
-            standing: "unresolved".into(),
+            standing: "active".into(),
             scope: None,
-            provenance: None,
+            provenance: Some(SPOOL_PROVENANCE.into()),
             retired_by: None,
             retired_at_unix_seconds: None,
             retirement_reason: None,

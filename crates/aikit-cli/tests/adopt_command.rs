@@ -805,6 +805,21 @@ fn successful(home: &Path, project: &Path, args: &[&str]) -> Value {
     envelope(&output)
 }
 
+/// `successful`, but standing in a named context rather than the pinned one.
+fn successful_in(home: &Path, project: &Path, context: &str, args: &[&str]) -> Value {
+    let output = Command::new(assert_cmd::cargo::cargo_bin("aikit"))
+        .args(args)
+        .arg("--json")
+        .env("AIKIT_HOME", home)
+        .env("HOME", home)
+        .env("AIKIT_CONTEXT_ID", context)
+        .current_dir(project)
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{args:?}: {:?}", envelope(&output));
+    envelope(&output)
+}
+
 #[test]
 fn control_cutover_uses_a_real_generation_and_undo_restores_the_original_tree() {
     let (home, project, original) = fixture();
@@ -1092,5 +1107,164 @@ fn mixed_harness_cutover_recovers_links_preserves_host_files_and_undoes() {
     assert_eq!(
         fs::read_link(root.join("deep-review")).unwrap(),
         authored.path().join("deep-review")
+    );
+}
+
+/// A skill whose frontmatter `name` differs from its projected directory
+/// (workcell's `provider-authoring` declares `workcell-provider-authoring`)
+/// must not block the reconcile: the directory is named by the export rule,
+/// and every other generated skill still gets its harness-root link.
+#[test]
+fn cutover_links_every_skill_when_one_frontmatter_name_differs_from_its_directory() {
+    let (home, project, authored) = fixture();
+    write(
+        &authored.path().join("provider-authoring/SKILL.md"),
+        "---\nname: workcell-provider-authoring\ndescription: Author providers.\n---\nBody.\n",
+    );
+    let root = home.path().join("harness/skills");
+    fs::create_dir_all(&root).unwrap();
+    successful(
+        home.path(),
+        project.path(),
+        &[
+            "source",
+            "add-directory",
+            "local",
+            authored.path().to_str().unwrap(),
+        ],
+    );
+    successful(home.path(), project.path(), &["source", "sync", "local"]);
+    successful(home.path(), project.path(), &["source", "promote", "local"]);
+    for id in ["skill/local/deep-review", "skill/local/provider-authoring"] {
+        successful(
+            home.path(),
+            project.path(),
+            &["enable", id, "--scope", "user"],
+        );
+    }
+    let applied = successful(home.path(), project.path(), &["apply"]);
+    let projection = home
+        .path()
+        .join("state/contexts")
+        .join(applied["context"]["context_id"].as_str().unwrap())
+        .join("current/projections/codex/.agents/skills");
+    assert!(projection.join("provider-authoring/SKILL.md").is_file());
+    let args = [
+        "adopt",
+        root.to_str().unwrap(),
+        "--projection",
+        projection.to_str().unwrap(),
+    ];
+    let preview = successful(home.path(), project.path(), &args);
+    let ids = preview["data"]["capsules"].as_array().unwrap();
+    assert!(ids.contains(&serde_json::json!("skill/local/provider-authoring")));
+    assert!(ids.contains(&serde_json::json!("skill/local/deep-review")));
+    let mut confirm = args.to_vec();
+    confirm.extend([
+        "--yes",
+        "--expect-digest",
+        preview["data"]["review_digest"].as_str().unwrap(),
+    ]);
+    successful(home.path(), project.path(), &confirm);
+    for name in ["provider-authoring", "deep-review"] {
+        assert!(
+            root.join(name).is_symlink() && root.join(name).join("SKILL.md").is_file(),
+            "{name} must be linked into the harness root"
+        );
+    }
+}
+
+/// A root moves from one context's generation to another's (the legacy context
+/// to the user scope): every link is replaced, and the originals each earlier
+/// cutover archived stay where they are. An archive keyed only by root and
+/// skill name refused the second cutover for every name the first had touched.
+#[test]
+fn a_root_can_move_to_another_contexts_generation_after_an_earlier_cutover() {
+    let (home, project, authored) = fixture();
+    let root = home.path().join("harness/skills");
+    // The harness root starts as a byte-identical copy of the authored skill.
+    write(
+        &root.join("deep-review/SKILL.md"),
+        &fs::read_to_string(authored.path().join("deep-review/SKILL.md")).unwrap(),
+    );
+    write(
+        &root.join("deep-review/references/checklist.md"),
+        &fs::read_to_string(authored.path().join("deep-review/references/checklist.md")).unwrap(),
+    );
+    successful(
+        home.path(),
+        project.path(),
+        &[
+            "source",
+            "add-directory",
+            "local",
+            authored.path().to_str().unwrap(),
+        ],
+    );
+    successful(home.path(), project.path(), &["source", "sync", "local"]);
+    successful(home.path(), project.path(), &["source", "promote", "local"]);
+    successful(
+        home.path(),
+        project.path(),
+        &["enable", "skill/local/deep-review", "--scope", "user"],
+    );
+    let tree = |applied: &Value| {
+        home.path()
+            .join("state/contexts")
+            .join(applied["context"]["context_id"].as_str().unwrap())
+            .join("current/projections/codex/.agents/skills")
+    };
+    let cut_over = |projection: &Path| {
+        let args = [
+            "adopt",
+            root.to_str().unwrap(),
+            "--projection",
+            projection.to_str().unwrap(),
+        ];
+        let preview = successful(home.path(), project.path(), &args);
+        let mut confirm = args.to_vec();
+        confirm.extend([
+            "--yes",
+            "--expect-digest",
+            preview["data"]["review_digest"].as_str().unwrap(),
+        ]);
+        successful(home.path(), project.path(), &confirm);
+    };
+
+    let linked_to = |path: &Path| fs::canonicalize(root.join("deep-review")).unwrap() == path;
+
+    let first = tree(&successful_in(
+        home.path(),
+        project.path(),
+        "ctx_FIRSTCONTEXT00000000000",
+        &["apply"],
+    ));
+    cut_over(&first);
+    assert!(linked_to(
+        &fs::canonicalize(first.join("deep-review")).unwrap()
+    ));
+
+    // The skill is edited and re-promoted before the second context applies.
+    write(
+        &authored.path().join("deep-review/SKILL.md"),
+        "---\nname: deep-review\ndescription: Review the whole change.\n---\n\nRead every diff, twice.\n",
+    );
+    successful(home.path(), project.path(), &["source", "sync", "local"]);
+    successful(home.path(), project.path(), &["source", "promote", "local"]);
+    let second = tree(&successful_in(
+        home.path(),
+        project.path(),
+        "ctx_SECONDCONTEXT0000000000",
+        &["apply"],
+    ));
+    assert_ne!(first, second);
+    cut_over(&second);
+    assert!(
+        root.join("deep-review")
+            .read_link()
+            .unwrap()
+            .to_string_lossy()
+            .contains("ctx_SECONDCONTEXT0000000000"),
+        "the root must follow the second context's generation"
     );
 }

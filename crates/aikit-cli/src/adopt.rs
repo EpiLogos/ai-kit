@@ -916,6 +916,28 @@ pub fn plan_projection_cutover(
     projection: &Path,
     namespace: Option<&str>,
 ) -> Result<Adoption> {
+    plan_projection(home, source, projection, namespace, false)
+}
+
+/// Link only the generated skills a harness root already wired to this
+/// generation lacks. It never moves, replaces or compares an existing entry —
+/// those stay for an explicit `adopt --projection` review — so `apply` can run
+/// it every time without a consent step.
+pub fn plan_projection_fill(
+    home: &AikitHome,
+    source: &Path,
+    projection: &Path,
+) -> Result<Adoption> {
+    plan_projection(home, source, projection, None, true)
+}
+
+fn plan_projection(
+    home: &AikitHome,
+    source: &Path,
+    projection: &Path,
+    namespace: Option<&str>,
+    fill_only: bool,
+) -> Result<Adoption> {
     let refusal = |message: String| AikitError::new("adopt.cutover_refused", message);
     let source = std::fs::canonicalize(source).map_err(|e| refusal(e.to_string()))?;
     let (projection, current, generation) = native_projection(home, projection)?;
@@ -940,15 +962,22 @@ pub fn plan_projection_cutover(
     // Only entries actually supplied by this generation participate in cutover.
     let mut plan = Plan::new();
     let mut capsules = Vec::new();
-    // Stable archive identity is content-bound below through preconditions;
-    // include the source path to prevent two harness roots sharing an archive.
-    let archive_key = blake3::hash(source.to_string_lossy().as_bytes())
-        .to_hex()
-        .to_string();
+    // Stable archive identity is content-bound below through preconditions.
+    // It names the harness root *and* the projection it is being moved onto: a
+    // root moves between contexts (the legacy context, then the user scope), and
+    // an archive keyed by the root alone refused every second cutover for each
+    // skill name the first had archived.
+    let archive_key =
+        blake3::hash(format!("{}\0{}", source.display(), projection.display()).as_bytes())
+            .to_hex()
+            .to_string();
     let archive = home.state().join("adoption-undo").join(archive_key);
     for (name, target) in generated {
         let path = source.join(&name);
         if path.is_symlink() && std::fs::read_link(&path).ok().as_ref() == Some(&target) {
+            continue;
+        }
+        if fill_only && (path.exists() || path.is_symlink()) {
             continue;
         }
         if path.exists() && !path.join("SKILL.md").is_file() {
@@ -958,32 +987,43 @@ pub fn plan_projection_cutover(
             )));
         }
         if path.join("SKILL.md").is_file() {
-            let original = agent_skills::validate(&path)?;
-            let replacement = agent_skills::validate(&target)?;
-            let payload = |files: Vec<String>| {
-                files
-                    .into_iter()
-                    .filter(|p| p != "skill.json")
-                    .collect::<BTreeSet<_>>()
-            };
-            let files = payload(original.files);
-            if files != payload(replacement.files) {
-                return Err(refusal(format!(
-                    "payload file set differs for {}",
-                    path.display()
-                )));
-            }
-            for relative in files {
-                let old = path.join(&relative);
-                let new = target.join(&relative);
-                if std::fs::read(&old).map_err(|e| refusal(e.to_string()))?
-                    != std::fs::read(&new).map_err(|e| refusal(e.to_string()))?
-                    || source_mode(&old)? != source_mode(&new)?
-                {
+            // A link into another AIKit generation is AIKit's own: replacing it
+            // loses nothing, and a root moving from one context to another
+            // (the legacy context to the user scope) differs in content for
+            // every skill edited since. Only a copy or a foreign link has
+            // authored bytes the generation must already carry.
+            let aikit_owned = std::fs::read_link(&path)
+                .ok()
+                .zip(std::fs::canonicalize(home.contexts()).ok())
+                .is_some_and(|(linked, contexts)| linked.starts_with(contexts));
+            if !aikit_owned {
+                let original = agent_skills::validate(&path)?;
+                let replacement = agent_skills::validate(&target)?;
+                let payload = |files: Vec<String>| {
+                    files
+                        .into_iter()
+                        .filter(|p| p != "skill.json")
+                        .collect::<BTreeSet<_>>()
+                };
+                let files = payload(original.files);
+                if files != payload(replacement.files) {
                     return Err(refusal(format!(
-                        "payload bytes or mode differ for {}",
-                        old.display()
+                        "payload file set differs for {}",
+                        path.display()
                     )));
+                }
+                for relative in files {
+                    let old = path.join(&relative);
+                    let new = target.join(&relative);
+                    if std::fs::read(&old).map_err(|e| refusal(e.to_string()))?
+                        != std::fs::read(&new).map_err(|e| refusal(e.to_string()))?
+                        || source_mode(&old)? != source_mode(&new)?
+                    {
+                        return Err(refusal(format!(
+                            "payload bytes or mode differ for {}",
+                            old.display()
+                        )));
+                    }
                 }
             }
             if path.is_symlink() {
@@ -1011,10 +1051,18 @@ pub fn plan_projection_cutover(
             target,
             inverse: Inverse::Remove,
         });
+        // The projected directory is named by the rule that projected it
+        // (`effective_export_name`: the profile's export name, else the capsule
+        // leaf). Matching the frontmatter `name` instead refused the whole
+        // reconcile whenever one skill's frontmatter differs from its
+        // directory, so every other newly generated skill went unlinked.
         let identities: Vec<_> = resolved
             .active
             .iter()
-            .filter(|(_, capability)| capability.name == name.to_string_lossy())
+            .filter(|(_, capability)| {
+                capability.kind == aikit_core::capsule::Kind::Skill
+                    && agent_skills::effective_export_name(capability) == name.to_string_lossy()
+            })
             .map(|(id, _)| id.clone())
             .collect();
         if identities.len() != 1 {

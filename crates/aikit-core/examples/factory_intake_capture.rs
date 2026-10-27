@@ -136,6 +136,7 @@ provenance = "human-authored"
                 disable: vec![],
                 config: Default::default(),
                 skill_overlays: Default::default(),
+                ..Default::default()
             },
         }],
         policy: ManagedPolicy::default(),

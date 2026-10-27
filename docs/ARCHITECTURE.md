@@ -147,6 +147,35 @@ Files:
 6. Nothing becomes active merely because it matches a tag. Tags are for search.
 7. Every final decision is explainable (`aikit explain`).
 
+### Allow and deny rules
+
+`enable` and `disable` name one capability. `allow` and `deny` name a family:
+patterns over capability ids (`skill/personal/**`; `*` stays inside a path
+segment, `**` crosses them), matched against the catalogue every time
+resolution runs, so a capability catalogued tomorrow is covered without editing
+a list. Within one scope the precedence is allow, then exact `enable`, then
+deny, then exact `disable`: **deny beats allow and an exact enable**. Across
+scopes rule 1 holds, so a nearer scope may allow what a farther one denied.
+
+A rule is a request, never trust: a matched skill that is unreviewed is still
+withheld (`trust-required`). A rule that matches nothing in the catalogue is a
+resolution warning, and `aikit enable|disable <pattern>` refuses to write one.
+`aikit explain` names the deciding rule (`rule: allow skill/personal/**`).
+Set patterns (Spec III 1.5) are unchanged: they expand when a set is authored.
+
+### The user scope
+
+The user-level harness roots (`~/.claude/skills`, `~/.agents/skills`,
+`~/.codex/skills`) are fed from one fixed context, `ctx_user-scope`, which
+resolves the global profile and nothing else. Contexts are otherwise
+throwaway (a fresh id per invocation unless `AIKIT_CONTEXT_ID` is exported), so
+no other context can be the one a root points at. Global changes,
+`source promote`/`rollback` and `aikit apply --user` rebuild it, audit any
+selected unreviewed registry skill (`aikit trust audit`), and settle the roots:
+add absent links, prune links to skills the profile withdrew. Wiring a root for
+the first time is the explicit, digest-reviewed `aikit adopt <root>
+--projection <tree>`.
+
 ### Skill Usage Overlays
 
 `[skill-overlays."<skill-id>"]` is a scoped orientation layer, not a fork of a

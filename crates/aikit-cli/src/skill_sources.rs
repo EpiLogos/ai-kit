@@ -46,8 +46,8 @@ pub enum SourceKind {
         path: PathBuf,
         /// The directory publishes the Control ground skill manifest contract
         /// (`central.skill/v1`): each member skill may carry a `skill.json`
-        /// whose standing and provenance become capability metadata. Skills
-        /// without one have unresolved standing and cannot project.
+        /// whose standing and provenance become capability metadata. A skill
+        /// without one stands active by being in the spool.
         #[serde(default)]
         control_ground: bool,
     },
@@ -826,7 +826,7 @@ fn build_snapshot(
                 .unwrap_or_default();
             Some(
                 crate::control_ground::read(&root, directory_name)?
-                    .unwrap_or_else(crate::control_ground::ControlMetadata::unresolved),
+                    .unwrap_or_else(crate::control_ground::ControlMetadata::spooled),
             )
         } else {
             None

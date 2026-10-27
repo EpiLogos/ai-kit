@@ -130,10 +130,50 @@ pub struct PoolPatch {
     pub enable: Vec<CapsuleId>,
     #[serde(default)]
     pub disable: Vec<CapsuleId>,
+    /// Rules that enable a family: patterns over capability ids (`skill/personal/*`,
+    /// `skill/**`), matched against the catalogue each time resolution runs, so a
+    /// capability catalogued tomorrow is covered without anyone editing a list.
+    /// `enable` names one capability; `allow` names a family.
+    #[serde(default)]
+    pub allow: Vec<String>,
+    /// Rules that disable a family. A deny rule beats every allow rule and every
+    /// exact `enable` in the same scope; a nearer scope may still allow what a
+    /// farther one denied.
+    #[serde(default)]
+    pub deny: Vec<String>,
     #[serde(default)]
     pub config: BTreeMap<CapsuleId, ConfigTable>,
     #[serde(default, rename = "skill-overlays")]
     pub skill_overlays: BTreeMap<CapsuleId, SkillUsageOverlayPatch>,
+}
+
+/// Check that `rule` is a capability pattern: lowercase id characters and `*`,
+/// no empty segment, and nothing that could climb out of the id namespace.
+pub fn validate_rule(rule: &str) -> Result<()> {
+    let trimmed = rule.trim();
+    if trimmed.is_empty() {
+        return err("rule.malformed", "an allow/deny rule is empty");
+    }
+    let well_formed = trimmed == rule
+        && trimmed.split('/').all(|segment| {
+            !segment.is_empty()
+                && segment != "."
+                && segment != ".."
+                && segment.chars().all(|c| {
+                    c.is_ascii_lowercase()
+                        || c.is_ascii_digit()
+                        || matches!(c, '-' | '_' | '.' | '*')
+                })
+        });
+    if !well_formed {
+        return err(
+            "rule.malformed",
+            format!(
+                "`{rule}` is not a capability pattern (lowercase id characters and `*`, e.g. `skill/personal/*`)"
+            ),
+        );
+    }
+    Ok(())
 }
 
 impl PoolPatch {
@@ -142,6 +182,8 @@ impl PoolPatch {
             && self.uses.is_empty()
             && self.enable.is_empty()
             && self.disable.is_empty()
+            && self.allow.is_empty()
+            && self.deny.is_empty()
             && self.config.is_empty()
             && self.skill_overlays.is_empty()
     }
@@ -154,6 +196,17 @@ impl PoolPatch {
                 return err(
                     "patch.contradiction",
                     format!("`{id}` is both enabled and disabled in the same scope"),
+                );
+            }
+        }
+        for rule in self.allow.iter().chain(&self.deny) {
+            validate_rule(rule)?;
+        }
+        for rule in &self.allow {
+            if self.deny.contains(rule) {
+                return err(
+                    "patch.contradiction",
+                    format!("`{rule}` is both allowed and denied in the same scope"),
                 );
             }
         }
@@ -182,6 +235,27 @@ impl PoolPatch {
         self.disable.retain(|c| c != id);
         self.config.remove(id);
         self.skill_overlays.remove(id);
+    }
+
+    /// Write a rule in place: `allow` or `deny`, replacing the opposite one for
+    /// the same pattern.
+    pub fn set_rule(&mut self, pattern: &str, allow: bool) -> Result<()> {
+        validate_rule(pattern)?;
+        self.clear_rule(pattern);
+        let list = if allow {
+            &mut self.allow
+        } else {
+            &mut self.deny
+        };
+        list.push(pattern.to_string());
+        list.sort();
+        Ok(())
+    }
+
+    /// Forget a rule, letting lower scopes decide again.
+    pub fn clear_rule(&mut self, pattern: &str) {
+        self.allow.retain(|rule| rule != pattern);
+        self.deny.retain(|rule| rule != pattern);
     }
 }
 
@@ -293,6 +367,10 @@ pub struct ProfileTemplate {
     #[serde(default)]
     pub disable: Vec<String>,
     #[serde(default)]
+    pub allow: Vec<String>,
+    #[serde(default)]
+    pub deny: Vec<String>,
+    #[serde(default)]
     pub config: BTreeMap<String, ConfigTable>,
     #[serde(default, rename = "skill-overlays")]
     pub skill_overlays: BTreeMap<String, SkillUsageOverlayPatch>,
@@ -336,6 +414,8 @@ impl Profile {
             && self.template.profiles.is_empty()
             && self.template.enable.is_empty()
             && self.template.disable.is_empty()
+            && self.template.allow.is_empty()
+            && self.template.deny.is_empty()
             && self.template.config.is_empty()
             && self.template.skill_overlays.is_empty()
         {
@@ -408,6 +488,12 @@ impl Profile {
                 .disable
                 .push(CapsuleId::parse(&substitute(raw, &values))?);
         }
+        for raw in &self.template.allow {
+            patch.allow.push(substitute(raw, &values));
+        }
+        for raw in &self.template.deny {
+            patch.deny.push(substitute(raw, &values));
+        }
         for (raw_id, table) in &self.template.config {
             let id = CapsuleId::parse(&substitute(raw_id, &values))?;
             patch.config.insert(id, substitute_table(table, &values));
@@ -451,6 +537,10 @@ pub struct ProfileFile {
     #[serde(default)]
     pub disable: Vec<String>,
     #[serde(default)]
+    pub allow: Vec<String>,
+    #[serde(default)]
+    pub deny: Vec<String>,
+    #[serde(default)]
     pub config: BTreeMap<String, ConfigTable>,
     #[serde(default, rename = "skill-overlays")]
     pub skill_overlays: BTreeMap<String, SkillUsageOverlayPatch>,
@@ -468,6 +558,8 @@ impl ProfileFile {
             profiles: self.profiles,
             enable: self.enable,
             disable: self.disable,
+            allow: self.allow,
+            deny: self.deny,
             config: self.config,
             skill_overlays: self.skill_overlays,
         };

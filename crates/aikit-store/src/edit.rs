@@ -32,6 +32,8 @@ use crate::home::{create_dir_all, io_error};
 
 const ENABLE: &str = "enable";
 const DISABLE: &str = "disable";
+const ALLOW: &str = "allow";
+const DENY: &str = "deny";
 const PROFILES: &str = "profiles";
 const CONFIG: &str = "config";
 const SKILL_OVERLAYS: &str = "skill-overlays";
@@ -96,6 +98,22 @@ impl ProfileDocument {
         if let Some(config) = self.doc.get_mut(CONFIG).and_then(Item::as_table_like_mut) {
             config.remove(&id.to_string());
         }
+    }
+
+    /// Write a rule here: `allow` or `deny` a family of capabilities by pattern,
+    /// removing the opposite rule for the same pattern.
+    pub fn set_rule(&mut self, pattern: &str, allow: bool) -> Result<()> {
+        aikit_core::profile::validate_rule(pattern)?;
+        self.remove_text_from(ALLOW, pattern);
+        self.remove_text_from(DENY, pattern);
+        self.add_to(if allow { ALLOW } else { DENY }, pattern);
+        Ok(())
+    }
+
+    /// Forget a rule, letting lower scopes decide again.
+    pub fn clear_rule(&mut self, pattern: &str) {
+        self.remove_text_from(ALLOW, pattern);
+        self.remove_text_from(DENY, pattern);
     }
 
     /// Reference a profile from this scope.
@@ -214,9 +232,12 @@ impl ProfileDocument {
     }
 
     fn remove_from(&mut self, field: &str, id: &CapsuleId) {
-        let rendered = id.to_string();
+        self.remove_text_from(field, &id.to_string());
+    }
+
+    fn remove_text_from(&mut self, field: &str, rendered: &str) {
         if let Some(array) = self.doc.get_mut(field).and_then(Item::as_array_mut) {
-            array.retain(|v| v.as_str() != Some(rendered.as_str()));
+            array.retain(|v| v.as_str() != Some(rendered));
         }
     }
 }
@@ -307,6 +328,14 @@ impl OverlayDocument {
 
     pub fn clear(&mut self, id: &CapsuleId) {
         self.inner.clear(id);
+    }
+
+    pub fn set_rule(&mut self, pattern: &str, allow: bool) -> Result<()> {
+        self.inner.set_rule(pattern, allow)
+    }
+
+    pub fn clear_rule(&mut self, pattern: &str) {
+        self.inner.clear_rule(pattern);
     }
 
     pub fn use_profile(&mut self, id: &ProfileId) {

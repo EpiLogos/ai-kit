@@ -156,6 +156,34 @@ pub struct ApplyRequest {
     pub label: Option<String>,
 }
 
+/// The context that backs the user-level harness roots. Fixed, so a change to
+/// the user's profile always lands in the one place the roots read from — never
+/// in whichever throwaway context the invoking shell happened to mint.
+pub const USER_SCOPE_CONTEXT: &str = "ctx_user-scope";
+
+/// What rebuilding the user scope produced.
+#[derive(Debug, Clone)]
+pub struct UserScopeRefresh {
+    pub generation: GenerationId,
+    pub replaced: Option<GenerationId>,
+    pub skill_roots: Vec<crate::skill_reach::WiredRoot>,
+    /// Registry skills the auditor reviewed on this refresh.
+    pub audited: Vec<crate::skill_audit::AuditOutcome>,
+    pub warnings: Vec<String>,
+}
+
+/// The result of writing, changing or forgetting a rule.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuleChange {
+    pub pattern: String,
+    /// `Some(true)` allow, `Some(false)` deny, `None` forgotten.
+    pub effect: Option<bool>,
+    pub scope: ScopeKind,
+    /// How many catalogued capabilities the pattern names right now.
+    pub covers: usize,
+    pub applied: AppliedGeneration,
+}
+
 /// The result of a successful apply.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AppliedGeneration {
@@ -467,6 +495,61 @@ impl Service {
         let home = AikitHome::discover()?;
         let (_, _, _, descriptor) = Self::open_context(&home, cwd, &|k| std::env::var(k).ok())?;
         Ok((home, descriptor))
+    }
+
+    /// The service for the user scope alone: the global profile resolved in its
+    /// own well-known context, with no project layer and no session overlay.
+    ///
+    /// The user-level harness roots (`~/.claude/skills`, `~/.agents/skills`)
+    /// are fed from this context. Resolving anything else into them would put
+    /// one project's skills in front of every session the user starts.
+    pub fn open_user_scope(home: AikitHome) -> Result<Self> {
+        let cwd = home.root().join("state").join("user-scope");
+        std::fs::create_dir_all(&cwd).map_err(|error| {
+            AikitError::new(
+                "scope.write_failed",
+                format!("could not create {}: {error}", cwd.display()),
+            )
+        })?;
+        Self::open(home, &cwd, |key| match key {
+            "AIKIT_CONTEXT_ID" => Some(USER_SCOPE_CONTEXT.to_string()),
+            "AIKIT_SESSION_ID" | "AIKIT_PROJECT_ID" | "AIKIT_TASK" | "AIKIT_MUX"
+            | "AIKIT_ISOLATION" | "CENTRAL_ROOT" => None,
+            other => std::env::var(other).ok(),
+        })
+    }
+
+    /// Rebuild the user scope's generation from the global profile and settle
+    /// the harness roots wired to it, so a change to the user's profile reaches
+    /// the agents it was written for, or says why not.
+    pub fn refresh_user_scope(home: &AikitHome) -> Result<UserScopeRefresh> {
+        let mut user = Self::open_user_scope(home.clone())?;
+        // A registry skill the profile selects is reviewed by the auditor, not
+        // by the owner. Recorded verdicts reach the resolver only through a
+        // fresh trust snapshot, so the service is reopened when any landed.
+        let (audited, mut warnings) = crate::skill_audit::settle_unreviewed(&user);
+        if audited.iter().any(|outcome| outcome.recorded) {
+            user = Self::open_user_scope(home.clone())?;
+        }
+        let applied = AikitApplication::apply(
+            &mut user,
+            ApplyRequest {
+                scope: ScopeKind::Global,
+                toggles: vec![],
+                label: None,
+            },
+        )?;
+        let settled = crate::skill_reach::settle(&user);
+        warnings.extend(applied.warnings.clone());
+        warnings.extend(settled.warnings);
+        warnings.dedup();
+        Ok(UserScopeRefresh {
+            generation: applied.id,
+            replaced: applied.replaced,
+            skill_roots: settled.roots,
+            audited,
+            warnings,
+        })
     }
 
     pub fn open<F>(home: AikitHome, cwd: &Path, env: F) -> Result<Self>
@@ -829,6 +912,11 @@ impl Service {
         &self.invocation_cwd
     }
 
+    /// The view this service resolved: what is active, declared and withheld.
+    pub fn resolved_view(&self) -> &ResolvedView {
+        &self.view
+    }
+
     /// Reference a profile from a scope's declaration and apply.
     ///
     /// Writing the reference and re-resolving are one act: a declaration that is
@@ -851,6 +939,77 @@ impl Service {
                 label: None,
             },
         )
+    }
+
+    /// Forget every declaration a scope holds for one capability and apply,
+    /// letting lower scopes decide again.
+    pub fn forget(&mut self, id: &CapsuleId, scope: ScopeKind) -> Result<AppliedGeneration> {
+        {
+            let mut writer = self.scope_document(scope)?;
+            writer.clear(id);
+            writer.save()?;
+        }
+        AikitApplication::apply(
+            self,
+            ApplyRequest {
+                scope,
+                toggles: vec![],
+                label: None,
+            },
+        )
+    }
+
+    /// Write, change or forget a rule at a scope and apply. `Some(true)` allows
+    /// a family of capabilities, `Some(false)` denies it, `None` forgets the
+    /// rule so lower scopes decide again.
+    ///
+    /// The change is previewed against the live catalogue first: a pattern that
+    /// names nothing is refused here rather than written as a rule that never
+    /// fires, and the receipt says how many capabilities the rule now names.
+    pub fn set_rule(
+        &mut self,
+        pattern: &str,
+        effect: Option<bool>,
+        scope: ScopeKind,
+    ) -> Result<RuleChange> {
+        aikit_core::profile::validate_rule(pattern)?;
+        let covers: Vec<CapsuleId> = aikit_core::catalog::Catalog::capsules(&self.catalog)
+            .into_iter()
+            .map(|capsule| capsule.id.clone())
+            .filter(|id| aikit_core::skillset::glob_matches(pattern, &id.to_string()))
+            .collect();
+        if effect.is_some() && covers.is_empty() {
+            return Err(AikitError::new(
+                "rule.matches_nothing",
+                format!(
+                    "`{pattern}` names no capability in any registry, so the rule would never fire"
+                ),
+            )
+            .with("pattern", pattern.to_string()));
+        }
+        {
+            let mut writer = self.scope_document(scope)?;
+            match effect {
+                Some(allow) => writer.set_rule(pattern, allow)?,
+                None => writer.clear_rule(pattern),
+            }
+            writer.save()?;
+        }
+        let applied = AikitApplication::apply(
+            self,
+            ApplyRequest {
+                scope,
+                toggles: vec![],
+                label: None,
+            },
+        )?;
+        Ok(RuleChange {
+            pattern: pattern.to_string(),
+            effect,
+            scope,
+            covers: covers.len(),
+            applied,
+        })
     }
 
     pub fn set_skill_usage_overlay(
@@ -3133,6 +3292,20 @@ impl ScopeWriter {
         }
     }
 
+    fn set_rule(&mut self, pattern: &str, allow: bool) -> Result<()> {
+        match self {
+            ScopeWriter::Overlay(doc) => doc.set_rule(pattern, allow),
+            ScopeWriter::Profile(doc) => doc.set_rule(pattern, allow),
+        }
+    }
+
+    fn clear_rule(&mut self, pattern: &str) {
+        match self {
+            ScopeWriter::Overlay(doc) => doc.clear_rule(pattern),
+            ScopeWriter::Profile(doc) => doc.clear_rule(pattern),
+        }
+    }
+
     /// Remove a profile declaration from this scope, letting lower scopes
     /// decide again.
     fn drop_profile(&mut self, profile: &aikit_core::id::ProfileId) {
@@ -4451,6 +4624,7 @@ fn resolve_or_explain(
                                 .unwrap_or_else(|| "an unknown scope".to_string()),
                         ),
                         via_profile: None,
+                        via_rule: None,
                     },
                 );
             }

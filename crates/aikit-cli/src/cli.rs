@@ -1138,6 +1138,7 @@ fn trust_route(command: &TrustSub) -> &'static str {
     match command {
         TrustSub::Record(_) => "cmd_trust_record",
         TrustSub::Show(_) => "cmd_trust_show",
+        TrustSub::Audit(_) => "cmd_trust_audit",
     }
 }
 
@@ -4695,7 +4696,9 @@ pub struct RunArgs {
 
 #[derive(Debug, Args)]
 pub struct ToggleArgs {
-    /// The capability id to enable or disable.
+    /// The capability id to enable or disable, or a pattern naming a family
+    /// (`skill/personal/**`): `enable` writes an allow rule, `disable` a deny
+    /// rule, and a rule covers every capability catalogued now or later.
     #[arg(value_name = "CAPABILITY")]
     pub capability: String,
     /// Write to this scope rather than the context's default mutation scope.
@@ -4704,6 +4707,10 @@ pub struct ToggleArgs {
     /// Apply immediately rather than only recording the declaration.
     #[arg(long)]
     pub apply: bool,
+    /// Forget the declaration instead of writing one, letting lower scopes
+    /// decide again.
+    #[arg(long)]
+    pub forget: bool,
 }
 
 #[derive(Debug, Args)]
@@ -4724,6 +4731,11 @@ pub struct ApplyArgs {
     /// a new generation.
     #[arg(long, value_name = "TEXT")]
     pub label: Option<String>,
+    /// Rebuild the user scope instead of this directory's context: the global
+    /// profile alone, which is what the user-level harness roots
+    /// (`~/.claude/skills`, `~/.agents/skills`) are fed from.
+    #[arg(long)]
+    pub user: bool,
 }
 
 #[derive(Debug, Args)]
@@ -4962,6 +4974,18 @@ pub enum TrustSub {
     Record(TrustRecordArgs),
     /// Show the recorded trust state of a catalogued capsule's revisions.
     Show(TrustShowArgs),
+    /// Audit registry skills with the skill auditor and record the ones it passes.
+    /// With no capability, audits every selected skill nobody has reviewed.
+    Audit(TrustAuditArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct TrustAuditArgs {
+    #[arg(value_name = "CAPABILITY")]
+    pub capability: Option<String>,
+    /// Report what the auditor finds without recording a verdict.
+    #[arg(long)]
+    pub no_record: bool,
 }
 
 #[derive(Debug, Args)]

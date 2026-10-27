@@ -127,6 +127,8 @@ pub mod encounter_profile_provider;
 pub mod encounter_service;
 pub mod encounter_task_executor;
 pub mod encounter_use;
+pub mod skill_audit;
+pub mod skill_reach;
 
 /// Self-invocation shape for session-space verbs. The main `aikit` binary
 /// takes them under the `session-space` subcommand; the standalone
