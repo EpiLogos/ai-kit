@@ -5687,7 +5687,9 @@ fn cmd_toggle(cwd: &std::path::Path, a: ToggleArgs, enable: bool) -> Result<Repl
         "generation": applied.id.to_string(),
         "replaced": applied.replaced.as_ref().map(|g| g.to_string()),
     });
-    Ok(reply(&service, data, applied.warnings))
+    let mut warnings = applied.warnings;
+    warnings.extend(aikit_cli::skill_reach::settle(&service).warnings);
+    Ok(reply(&service, data, warnings))
 }
 
 fn cmd_apply(cwd: &std::path::Path, a: ApplyArgs) -> Result<Reply> {
@@ -5709,6 +5711,9 @@ fn cmd_apply(cwd: &std::path::Path, a: ApplyArgs) -> Result<Reply> {
     // apply is where that record reaches the harness configs the profiles
     // declare managed.
     let tools_projections = aikit_cli::client::project_tools_layers(&service);
+    // Skills reach an agent only after the generation is linked into the
+    // harness root; keep the wired roots complete and name every other miss.
+    let skill_reach = aikit_cli::skill_reach::settle(&service);
     let warnings: Vec<String> = hook_seams
         .iter()
         .filter(|outcome| outcome.state == "refused")
@@ -5731,6 +5736,7 @@ fn cmd_apply(cwd: &std::path::Path, a: ApplyArgs) -> Result<Reply> {
                     )
                 }),
         )
+        .chain(skill_reach.warnings.iter().cloned())
         .collect();
     let data = jval!({
         "generation": applied.id.to_string(),
@@ -5738,6 +5744,7 @@ fn cmd_apply(cwd: &std::path::Path, a: ApplyArgs) -> Result<Reply> {
         "label": a.label,
         "hook_seams": hook_seams,
         "tools_projections": tools_projections,
+        "skill_roots": skill_reach.roots,
     });
     Ok(reply(&service, data, warnings))
 }

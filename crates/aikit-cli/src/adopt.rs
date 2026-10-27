@@ -916,6 +916,28 @@ pub fn plan_projection_cutover(
     projection: &Path,
     namespace: Option<&str>,
 ) -> Result<Adoption> {
+    plan_projection(home, source, projection, namespace, false)
+}
+
+/// Link only the generated skills a harness root already wired to this
+/// generation lacks. It never moves, replaces or compares an existing entry —
+/// those stay for an explicit `adopt --projection` review — so `apply` can run
+/// it every time without a consent step.
+pub fn plan_projection_fill(
+    home: &AikitHome,
+    source: &Path,
+    projection: &Path,
+) -> Result<Adoption> {
+    plan_projection(home, source, projection, None, true)
+}
+
+fn plan_projection(
+    home: &AikitHome,
+    source: &Path,
+    projection: &Path,
+    namespace: Option<&str>,
+    fill_only: bool,
+) -> Result<Adoption> {
     let refusal = |message: String| AikitError::new("adopt.cutover_refused", message);
     let source = std::fs::canonicalize(source).map_err(|e| refusal(e.to_string()))?;
     let (projection, current, generation) = native_projection(home, projection)?;
@@ -949,6 +971,9 @@ pub fn plan_projection_cutover(
     for (name, target) in generated {
         let path = source.join(&name);
         if path.is_symlink() && std::fs::read_link(&path).ok().as_ref() == Some(&target) {
+            continue;
+        }
+        if fill_only && (path.exists() || path.is_symlink()) {
             continue;
         }
         if path.exists() && !path.join("SKILL.md").is_file() {
@@ -1011,10 +1036,18 @@ pub fn plan_projection_cutover(
             target,
             inverse: Inverse::Remove,
         });
+        // The projected directory is named by the rule that projected it
+        // (`effective_export_name`: the profile's export name, else the capsule
+        // leaf). Matching the frontmatter `name` instead refused the whole
+        // reconcile whenever one skill's frontmatter differs from its
+        // directory, so every other newly generated skill went unlinked.
         let identities: Vec<_> = resolved
             .active
             .iter()
-            .filter(|(_, capability)| capability.name == name.to_string_lossy())
+            .filter(|(_, capability)| {
+                capability.kind == aikit_core::capsule::Kind::Skill
+                    && agent_skills::effective_export_name(capability) == name.to_string_lossy()
+            })
             .map(|(id, _)| id.clone())
             .collect();
         if identities.len() != 1 {

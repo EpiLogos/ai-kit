@@ -1094,3 +1094,67 @@ fn mixed_harness_cutover_recovers_links_preserves_host_files_and_undoes() {
         authored.path().join("deep-review")
     );
 }
+
+/// A skill whose frontmatter `name` differs from its projected directory
+/// (workcell's `provider-authoring` declares `workcell-provider-authoring`)
+/// must not block the reconcile: the directory is named by the export rule,
+/// and every other generated skill still gets its harness-root link.
+#[test]
+fn cutover_links_every_skill_when_one_frontmatter_name_differs_from_its_directory() {
+    let (home, project, authored) = fixture();
+    write(
+        &authored.path().join("provider-authoring/SKILL.md"),
+        "---\nname: workcell-provider-authoring\ndescription: Author providers.\n---\nBody.\n",
+    );
+    let root = home.path().join("harness/skills");
+    fs::create_dir_all(&root).unwrap();
+    successful(
+        home.path(),
+        project.path(),
+        &[
+            "source",
+            "add-directory",
+            "local",
+            authored.path().to_str().unwrap(),
+        ],
+    );
+    successful(home.path(), project.path(), &["source", "sync", "local"]);
+    successful(home.path(), project.path(), &["source", "promote", "local"]);
+    for id in ["skill/local/deep-review", "skill/local/provider-authoring"] {
+        successful(
+            home.path(),
+            project.path(),
+            &["enable", id, "--scope", "user"],
+        );
+    }
+    let applied = successful(home.path(), project.path(), &["apply"]);
+    let projection = home
+        .path()
+        .join("state/contexts")
+        .join(applied["context"]["context_id"].as_str().unwrap())
+        .join("current/projections/codex/.agents/skills");
+    assert!(projection.join("provider-authoring/SKILL.md").is_file());
+    let args = [
+        "adopt",
+        root.to_str().unwrap(),
+        "--projection",
+        projection.to_str().unwrap(),
+    ];
+    let preview = successful(home.path(), project.path(), &args);
+    let ids = preview["data"]["capsules"].as_array().unwrap();
+    assert!(ids.contains(&serde_json::json!("skill/local/provider-authoring")));
+    assert!(ids.contains(&serde_json::json!("skill/local/deep-review")));
+    let mut confirm = args.to_vec();
+    confirm.extend([
+        "--yes",
+        "--expect-digest",
+        preview["data"]["review_digest"].as_str().unwrap(),
+    ]);
+    successful(home.path(), project.path(), &confirm);
+    for name in ["provider-authoring", "deep-review"] {
+        assert!(
+            root.join(name).is_symlink() && root.join(name).join("SKILL.md").is_file(),
+            "{name} must be linked into the harness root"
+        );
+    }
+}
