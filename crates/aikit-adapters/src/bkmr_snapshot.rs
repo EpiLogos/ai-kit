@@ -11,8 +11,10 @@ use rusqlite::{
     Connection, OpenFlags,
 };
 
-const MAX_BYTES: u64 = 256 * 1024 * 1024;
-const BACKUP_BUDGET: Duration = Duration::from_secs(5);
+/// How long the copy may wait on a store that is making no progress at all (a
+/// writer holding it). The copy itself has no size or total-time bound: a store
+/// over 256 MiB used to be refused outright, and the pool grows with the corpus.
+const STALL_BUDGET: Duration = Duration::from_secs(5);
 
 pub(super) struct Snapshot {
     _directory: tempfile::TempDir,
@@ -26,7 +28,6 @@ fn failure(error: impl std::fmt::Display) -> AikitError {
 
 impl Snapshot {
     pub fn read_only(source: &Path) -> Result<Self> {
-        let started = Instant::now();
         let original = Connection::open_with_flags(
             source,
             OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
@@ -40,17 +41,6 @@ impl Snapshot {
         original
             .execute_batch("PRAGMA query_only=ON; BEGIN;")
             .map_err(failure)?;
-        let pages: u64 = original
-            .query_row("PRAGMA page_count", [], |r| r.get(0))
-            .map_err(failure)?;
-        let page_size: u64 = original
-            .query_row("PRAGMA page_size", [], |r| r.get(0))
-            .map_err(failure)?;
-        if pages.saturating_mul(page_size) > MAX_BYTES {
-            return Err(failure(
-                "bookmark store exceeds the 256 MiB read snapshot limit",
-            ));
-        }
         let directory = tempfile::Builder::new()
             .prefix("aikit-bkmr-read-")
             .tempdir()
@@ -60,17 +50,18 @@ impl Snapshot {
         let mut destination = Connection::open(&database).map_err(failure)?;
         {
             let backup = Backup::new(&original, &mut destination).map_err(failure)?;
+            let mut remaining = i32::MAX;
+            let mut last_progress = Instant::now();
             loop {
-                if started.elapsed() >= BACKUP_BUDGET {
-                    return Err(failure(
-                        "bookmark read snapshot exceeded its five second budget",
-                    ));
-                }
                 let step = backup.step(128).map_err(failure)?;
-                if (backup.progress().pagecount.max(0) as u64).saturating_mul(page_size) > MAX_BYTES
-                {
+                let progress = backup.progress();
+                if progress.remaining < remaining {
+                    remaining = progress.remaining;
+                    last_progress = Instant::now();
+                }
+                if last_progress.elapsed() >= STALL_BUDGET {
                     return Err(failure(
-                        "bookmark store exceeds the 256 MiB read snapshot limit",
+                        "bookmark read snapshot made no progress for five seconds",
                     ));
                 }
                 match step {

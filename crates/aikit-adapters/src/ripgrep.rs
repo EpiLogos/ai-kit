@@ -26,6 +26,10 @@ use aikit_core::{AikitError, Result};
 /// Per-file byte budget handed to `--max-filesize`. Files above it are skipped
 /// by ripgrep itself, which keeps a stray binary or log from dominating a scan.
 pub const DEFAULT_MAX_FILE_BYTES: u64 = 1024 * 1024;
+/// `max_file_bytes` for a search that must see every file its globs admit: the
+/// flag is left off. A skipped file is invisible, not refused, so a source over
+/// the budget could not be found at all.
+pub const NO_FILE_BOUND: u64 = u64::MAX;
 /// Long matched lines are previewed, not returned whole: a minified asset must
 /// not be able to push megabytes through one match event.
 pub const MAX_COLUMNS: u32 = 240;
@@ -98,14 +102,18 @@ impl SearchRequest {
             executable.to_string_lossy().into_owned(),
             "--json".into(),
             "--no-messages".into(),
-            "--max-filesize".into(),
-            format_filesize(self.max_file_bytes),
+        ];
+        if self.max_file_bytes != NO_FILE_BOUND {
+            argv.push("--max-filesize".into());
+            argv.push(format_filesize(self.max_file_bytes));
+        }
+        argv.extend([
             "--max-columns".into(),
             MAX_COLUMNS.to_string(),
             "--max-columns-preview".into(),
             "--threads".into(),
             SEARCH_THREADS.to_string(),
-        ];
+        ]);
         if !self.regex {
             argv.push("--fixed-strings".into());
         }
@@ -433,6 +441,15 @@ mod tests {
         assert!(argv.iter().any(|arg| arg == "--hidden"));
         assert!(argv.iter().any(|arg| arg == "--no-ignore"));
         assert!(argv.iter().any(|arg| arg == "--max-filesize"));
+    }
+
+    #[test]
+    fn a_search_with_no_file_bound_leaves_the_size_flag_off() {
+        let mut unbounded = request();
+        unbounded.max_file_bytes = NO_FILE_BOUND;
+        let argv = unbounded.argv(Path::new("rg"));
+        assert!(!argv.iter().any(|arg| arg == "--max-filesize"), "{argv:?}");
+        assert!(argv.iter().any(|arg| arg == "--max-columns"));
     }
 
     #[test]

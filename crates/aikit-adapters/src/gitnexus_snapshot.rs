@@ -1,10 +1,14 @@
 //! GitNexus's read-only graph open can repair/quarantine its input. Give it only
-//! a bounded, quiescent private copy; never forward the owner's graph or registry.
+//! a quiescent private copy; never forward the owner's graph or registry.
+//!
+//! The copy has no size or time bound of its own. Both used to: a 512 MiB size
+//! gate and a five-second copy budget. Measured 27 Oct 2026, a cold `query`
+//! against a clone of O-I's 1.5 GiB graph answers in 0.6 to 2.7 s, so the gate
+//! was refusing a graph that reads fast, and ProjectMap code search for O-I was
+//! dark behind it. Time is bounded once, by the deadline the search runs under.
 use aikit_core::{AikitError, Result};
 use std::fs;
-use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant};
 
 pub(super) struct Snapshot {
     _directory: tempfile::TempDir,
@@ -30,39 +34,19 @@ fn active_sidecars(storage: &Path) -> Result<()> {
 }
 impl Snapshot {
     pub fn read_only(root: &Path) -> Result<Self> {
-        let began = Instant::now();
         let storage = root.join(".gitnexus");
         active_sidecars(&storage)?;
         let source = storage.join("lbug");
         let before = fs::metadata(&source).map_err(failure)?;
-        if !before.is_file() || before.len() > 512 * 1024 * 1024 {
-            // A clone would make the snapshot free (APFS), but GitNexus still
-            // has to open the graph: measured 18 Oct, a 1.6 GB graph (O-I's)
-            // ran past the search's whole deadline, so the bound stays and the
-            // refusal names the size — the index is what wants trimming.
-            return Err(failure(format!(
-                "existing graph must be a regular file no larger than 512 MiB for an isolated read \
-                 (this one is {} MiB; re-index with exclusions to bring it under)",
-                before.len() / (1024 * 1024)
-            )));
+        if !before.is_file() {
+            return Err(failure("existing graph must be a regular file"));
         }
         let metadata_path = if storage.join("gitnexus.json").exists() {
             storage.join("gitnexus.json")
         } else {
             storage.join("meta.json")
         };
-        let mut metadata_bytes = Vec::new();
-        fs::File::open(&metadata_path)
-            .map_err(failure)?
-            .take(super::MAX_INDEX_METADATA_BYTES as u64 + 1)
-            .read_to_end(&mut metadata_bytes)
-            .map_err(failure)?;
-        if metadata_bytes.len() > super::MAX_INDEX_METADATA_BYTES {
-            return Err(failure(format!(
-                "index metadata exceeds {} MiB",
-                super::MAX_INDEX_METADATA_BYTES / (1024 * 1024)
-            )));
-        }
+        let metadata_bytes = fs::read(&metadata_path).map_err(failure)?;
         let metadata: serde_json::Value =
             serde_json::from_slice(&metadata_bytes).map_err(failure)?;
         let directory = tempfile::Builder::new()
@@ -75,15 +59,9 @@ impl Snapshot {
         fs::create_dir(&home).map_err(failure)?;
         // The platform copy clones the graph where the filesystem can (APFS
         // clonefile, a reflink elsewhere), so a query no longer rewrites
-        // hundreds of MiB; the bounds and the quiescence check below still
-        // decide whether the copy stands.
+        // hundreds of MiB; the quiescence check below decides whether the copy
+        // stands.
         let copied = fs::copy(&source, snapshot.join("lbug")).map_err(failure)?;
-        if copied > 512 * 1024 * 1024 {
-            return Err(failure("graph grew beyond 512 MiB"));
-        }
-        if began.elapsed() > Duration::from_secs(5) {
-            return Err(failure("graph snapshot exceeded five seconds"));
-        }
         active_sidecars(&storage)?;
         let after = fs::metadata(&source).map_err(failure)?;
         if before.len() != copied
