@@ -15,7 +15,11 @@
 //! Launch panel"): Launch mode Trigger · Gate · Toggle · Repeat, Then Next
 //! task · Again · Stop, Loop Off or On with its stop condition (Task done,
 //! Test pass) and its cap, and for Repeat its Variable, Levels, Repeats and
-//! Stop when. Hand off to and Then's handoff are retired: "To hand the work to
+//! Stop when. "Once the first run starts, these do not change. A change
+//! starts a new set of takes": a Repeat's takes start and end here
+//! (`takes`, by whoever runs them), keeping the four fields as they stood at
+//! the first run, and a change to them is refused while the takes run.
+//! Hand off to and Then's handoff are retired: "To hand the work to
 //! another session, drag the task onto that session's track" — the drag sends
 //! the task to that session through its encounter's own Draft and Prompt.
 //! Settings stored in the earlier words read in these (`migrate`).
@@ -83,6 +87,46 @@ struct TaskSettings {
     task_ref: ResourceRef,
     #[serde(default)]
     set: Map<String, Value>,
+    /// The set of takes a Repeat runs, with the fields it froze when its
+    /// first run started. Absent until a Repeat's takes start.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    takes: Option<TakesSet>,
+}
+
+/// One set of takes a Repeat runs (DLW.md, The Launch panel: "Once the first
+/// run starts, these do not change. A change starts a new set of takes."):
+/// Repeat's Variable, Levels, Repeats and Stop when as they stood when its
+/// first run started, and how the set ended. Whoever runs the takes starts
+/// and ends the set (the shell's Repeat press, through Actuation's
+/// comparison run); AIKit keeps it and refuses the frozen fields' changes
+/// while it runs.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TakesSet {
+    trace_ref: String,
+    started_at_unix_ms: u64,
+    variable: Value,
+    levels: Value,
+    repeats: Value,
+    stop: Value,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    ended: Option<TakesEnd>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TakesEnd {
+    at_unix_ms: u64,
+    /// made · failed · stopped.
+    outcome: String,
+    /// The takes the set made, as the run counted them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    takes: Option<u64>,
+    /// Where the run keeps its takes (Actuation's comparison root).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    root: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    reason: Option<String>,
 }
 
 /// The person's change. `null` returns a field to its default.
@@ -93,7 +137,40 @@ struct SettingsRequest {
     track: Option<Map<String, Value>>,
     #[serde(default)]
     task: Option<TaskRequest>,
+    #[serde(default)]
+    takes: Option<TakesRequest>,
 }
+
+/// A Repeat's takes starting or ending, by whoever runs them.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "snake_case")]
+enum TakesRequest {
+    Start {
+        task_ref: ResourceRef,
+        trace_ref: String,
+    },
+    End {
+        task_ref: ResourceRef,
+        trace_ref: String,
+        outcome: String,
+        #[serde(default)]
+        takes: Option<u64>,
+        #[serde(default)]
+        root: Option<String>,
+        #[serde(default)]
+        reason: Option<String>,
+    },
+}
+
+/// How a set of takes ends.
+const TAKES_OUTCOMES: &[&str] = &["made", "failed", "stopped"];
+/// The fields a set of takes freezes, as the settings name them.
+const REPEAT_FIELDS: &[&str] = &[
+    "repeat_variable",
+    "repeat_levels",
+    "repeat_repeats",
+    "repeat_stop",
+];
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -482,6 +559,32 @@ fn bound_task(home: &AikitHome, session: &ResourceRef) -> Result<Option<BoundTas
     }))
 }
 
+/// Repeat's fields as they stand: what the person set, else the defaults the
+/// reading states.
+fn repeat_value(set: &Map<String, Value>, key: &str) -> Value {
+    set.get(key).cloned().unwrap_or_else(|| match key {
+        "repeat_variable" => json!("condition"),
+        "repeat_levels" => json!([]),
+        "repeat_repeats" => json!(3),
+        _ => json!("done"),
+    })
+}
+
+fn takes_reading(takes: Option<&TakesSet>) -> Value {
+    takes.map_or(Value::Null, |takes| {
+        json!({
+            "trace_ref": takes.trace_ref,
+            "started_at_unix_ms": takes.started_at_unix_ms,
+            "running": takes.ended.is_none(),
+            "variable": takes.variable,
+            "levels": takes.levels,
+            "repeats": takes.repeats,
+            "stop": takes.stop,
+            "ended": takes.ended,
+        })
+    })
+}
+
 /// The reading: every value as it stands, defaults stated, what the person
 /// set listed, and a previous task's settings disclosed but not applied.
 fn reading(
@@ -513,10 +616,11 @@ fn reading(
             "launch": value("launch", json!("trigger")),
             "then": value("then", json!("next")),
             "quantize": value("quantize", json!("global")),
-            "repeat_variable": value("repeat_variable", json!("condition")),
-            "repeat_levels": value("repeat_levels", json!([])),
-            "repeat_repeats": value("repeat_repeats", json!(3)),
-            "repeat_stop": value("repeat_stop", json!("done")),
+            "repeat_variable": repeat_value(&set, "repeat_variable"),
+            "repeat_levels": repeat_value(&set, "repeat_levels"),
+            "repeat_repeats": repeat_value(&set, "repeat_repeats"),
+            "repeat_stop": repeat_value(&set, "repeat_stop"),
+            "takes": takes_reading(current.and_then(|task| task.takes.as_ref())),
             "envelope_mode": value("envelope_mode", json!("automation")),
             "envelope_linked": value("envelope_linked", json!(true)),
             // The constellation the task was made of, until the person sets another.
@@ -536,7 +640,7 @@ fn reading(
         "track": track,
         "task": task,
         "previous_task": previous,
-        "standing": "The person's settings for this session and its bound task: intent the owners of launch, model and delivery read. Colour null takes the session's colour; an empty envelope inherits the session's value; a null loop cap sets no cap; Repeat's levels stay empty until chosen; the source is the constellation the task was made of until another is set, and null when it was made of none.",
+        "standing": "The person's settings for this session and its bound task: intent the owners of launch, model and delivery read. Colour null takes the session's colour; an empty envelope inherits the session's value; a null loop cap sets no cap; Repeat's levels stay empty until chosen, and its variable, levels, repeats and stop when do not change while its takes run (a change starts a new set once they end); the source is the constellation the task was made of until another is set, and null when it was made of none.",
     })
 }
 
@@ -562,6 +666,7 @@ fn apply(
         .transpose()?;
     if track_changes.as_ref().is_none_or(Map::is_empty)
         && task_changes.as_ref().is_none_or(|(_, set)| set.is_empty())
+        && request.takes.is_none()
     {
         return Err(error("Nothing to set"));
     }
@@ -583,14 +688,23 @@ fn apply(
             )));
         }
         // A rebound session starts its new task from the defaults.
-        let mut set = task
+        let (mut set, takes) = task
             .filter(|task| task.task_ref == task_ref)
-            .map(|task| task.set)
+            .map(|task| (task.set, task.takes))
             .unwrap_or_default();
+        let before = set.clone();
         merge(&mut set, &changes);
         check_envelopes(&mut set)?;
         check_repeat(&set)?;
-        task = Some(TaskSettings { task_ref, set });
+        check_frozen(takes.as_ref(), &before, &set)?;
+        task = Some(TaskSettings {
+            task_ref,
+            set,
+            takes,
+        });
+    }
+    if let Some(act) = request.takes {
+        task = Some(takes_act(task, bound, act, now_unix_ms())?);
     }
     Ok(SettingsRecord {
         schema: RECORD_SCHEMA.into(),
@@ -599,6 +713,141 @@ fn apply(
         track,
         task,
     })
+}
+
+/// "Once the first run starts, these do not change" (DLW.md, The Launch
+/// panel): while a set of takes runs, a change to the fields it froze is
+/// refused. The same value is no change.
+fn check_frozen(
+    takes: Option<&TakesSet>,
+    before: &Map<String, Value>,
+    after: &Map<String, Value>,
+) -> Result<()> {
+    let Some(running) = takes.filter(|takes| takes.ended.is_none()) else {
+        return Ok(());
+    };
+    if REPEAT_FIELDS
+        .iter()
+        .any(|key| repeat_value(before, key) != repeat_value(after, key))
+    {
+        return Err(error(format!(
+            "Once the first run starts, these do not change: the takes {} are running. A change starts a new set of takes once they end.",
+            running.trace_ref
+        )));
+    }
+    Ok(())
+}
+
+fn now_unix_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX))
+        .unwrap_or_default()
+}
+
+/// A set of takes starts on the bound task launched with Repeat, freezing
+/// its fields as they stand, one set at a time; it ends by its own trace.
+fn takes_act(
+    task: Option<TaskSettings>,
+    bound: Option<&BoundTask>,
+    act: TakesRequest,
+    now: u64,
+) -> Result<TaskSettings> {
+    let bound = bound.ok_or_else(|| error("No task is bound to this session"))?;
+    let (task_ref, trace_ref) = match &act {
+        TakesRequest::Start {
+            task_ref,
+            trace_ref,
+        }
+        | TakesRequest::End {
+            task_ref,
+            trace_ref,
+            ..
+        } => (task_ref, trace_ref),
+    };
+    if &bound.task_ref != task_ref {
+        return Err(error(format!(
+            "The session's bound task is {}, not {}; read again",
+            bound.task_ref.as_str(),
+            task_ref.as_str()
+        )));
+    }
+    let trace_ref = words("The takes' trace", &json!(trace_ref), 256)?
+        .as_str()
+        .unwrap_or_default()
+        .to_owned();
+    let mut task = task
+        .filter(|task| &task.task_ref == task_ref)
+        .unwrap_or_else(|| TaskSettings {
+            task_ref: task_ref.clone(),
+            set: Map::new(),
+            takes: None,
+        });
+    let running = task.takes.as_ref().filter(|takes| takes.ended.is_none());
+    match act {
+        TakesRequest::Start { .. } => {
+            if let Some(running) = running {
+                return Err(error(format!(
+                    "The takes {} are running: a Repeat runs one set of takes at a time",
+                    running.trace_ref
+                )));
+            }
+            if task.set.get("launch").and_then(Value::as_str) != Some("repeat") {
+                return Err(error(
+                    "Only a task launched with Repeat makes takes. Set Launch mode to Repeat first.",
+                ));
+            }
+            task.takes = Some(TakesSet {
+                trace_ref,
+                started_at_unix_ms: now,
+                variable: repeat_value(&task.set, "repeat_variable"),
+                levels: repeat_value(&task.set, "repeat_levels"),
+                repeats: repeat_value(&task.set, "repeat_repeats"),
+                stop: repeat_value(&task.set, "repeat_stop"),
+                ended: None,
+            });
+        }
+        TakesRequest::End {
+            outcome,
+            takes,
+            root,
+            reason,
+            ..
+        } => {
+            let Some(running) = running.filter(|running| running.trace_ref == trace_ref) else {
+                return Err(error(match running {
+                    Some(running) => format!(
+                        "The takes running are {}, not {trace_ref}",
+                        running.trace_ref
+                    ),
+                    None => format!("No takes are running to end as {trace_ref}"),
+                }));
+            };
+            let outcome = one_of("How the takes ended", &json!(outcome), TAKES_OUTCOMES)?
+                .as_str()
+                .unwrap_or_default()
+                .to_owned();
+            let text = |field: &str, value: Option<String>, max: usize| {
+                value
+                    .map(|value| {
+                        words(field, &json!(value), max)
+                            .map(|kept| kept.as_str().unwrap_or_default().to_owned())
+                    })
+                    .transpose()
+            };
+            let ended = TakesEnd {
+                at_unix_ms: now,
+                outcome,
+                takes,
+                root: text("Where the takes are kept", root, 4096)?,
+                reason: text("Why the takes ended", reason, 1024)?,
+            };
+            let mut running = running.clone();
+            running.ended = Some(ended);
+            task.takes = Some(running);
+        }
+    }
+    Ok(task)
 }
 
 impl EncounterService {
@@ -1301,6 +1550,177 @@ mod tests {
         assert_eq!(
             reading(&session(), Some(&condition), Some(&task))["task"]["repeat_variable"],
             "condition"
+        );
+    }
+
+    /// A task launched with Repeat, its fields chosen, and its takes started.
+    fn repeating(task: &BoundTask) -> SettingsRecord {
+        let set = apply(
+            &session(),
+            None,
+            Some(task),
+            json!({"task": {"task_ref": "task:fixtures", "set": {"launch": "repeat",
+                "repeat_levels": ["classic", "ql-direct"], "repeat_repeats": 4}}}),
+            None,
+        )
+        .unwrap();
+        apply(
+            &session(),
+            Some(set.clone()),
+            Some(task),
+            json!({"takes": {"start": {"task_ref": "task:fixtures", "trace_ref": "takes:t1"}}}),
+            Some(&set.revision),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn once_the_first_run_starts_repeats_fields_do_not_change() {
+        let task = bound("task:fixtures");
+        let running = repeating(&task);
+        let read = reading(&session(), Some(&running), Some(&task));
+        assert_eq!(read["task"]["takes"]["trace_ref"], "takes:t1");
+        assert_eq!(read["task"]["takes"]["running"], true);
+        // The fields the takes run with, as they stood when the first run started (defaults stated).
+        assert_eq!(read["task"]["takes"]["variable"], "condition");
+        assert_eq!(
+            read["task"]["takes"]["levels"],
+            json!(["classic", "ql-direct"])
+        );
+        assert_eq!(read["task"]["takes"]["repeats"], 4);
+        assert_eq!(read["task"]["takes"]["stop"], "done");
+        // "Once the first run starts, these do not change" (DLW.md, The Launch panel).
+        for change in [
+            json!({"repeat_levels": ["classic"]}),
+            json!({"repeat_variable": "effort", "repeat_levels": ["low"]}),
+            json!({"repeat_repeats": 5}),
+            json!({"repeat_stop": "pass"}),
+            json!({"repeat_repeats": null}),
+        ] {
+            let refused = apply(
+                &session(),
+                Some(running.clone()),
+                Some(&task),
+                json!({"task": {"task_ref": "task:fixtures", "set": change}}),
+                Some(&running.revision),
+            )
+            .unwrap_err()
+            .to_string();
+            assert!(
+                refused.contains("Once the first run starts, these do not change")
+                    && refused.contains("takes:t1"),
+                "{change}: {refused}"
+            );
+        }
+        // The same value is no change; the task's other settings still change.
+        let same = apply(
+            &session(),
+            Some(running.clone()),
+            Some(&task),
+            json!({"task": {"task_ref": "task:fixtures", "set": {"repeat_repeats": 4, "name": "Fixtures"}}}),
+            Some(&running.revision),
+        )
+        .unwrap();
+        let read = reading(&session(), Some(&same), Some(&task));
+        assert_eq!(read["task"]["name"], "Fixtures");
+        assert_eq!(read["task"]["takes"]["running"], true, "the takes stand");
+        // Once they end, a change starts a new set of takes.
+        let ended = apply(
+            &session(),
+            Some(same.clone()),
+            Some(&task),
+            json!({"takes": {"end": {"task_ref": "task:fixtures", "trace_ref": "takes:t1", "outcome": "made",
+                "takes": 8, "root": "/takes/t1"}}}),
+            Some(&same.revision),
+        )
+        .unwrap();
+        let read = reading(&session(), Some(&ended), Some(&task));
+        assert_eq!(read["task"]["takes"]["running"], false);
+        assert_eq!(read["task"]["takes"]["ended"]["outcome"], "made");
+        assert_eq!(read["task"]["takes"]["ended"]["takes"], 8);
+        assert_eq!(read["task"]["takes"]["ended"]["root"], "/takes/t1");
+        let changed = apply(
+            &session(),
+            Some(ended.clone()),
+            Some(&task),
+            json!({"task": {"task_ref": "task:fixtures", "set": {"repeat_repeats": 5}}}),
+            Some(&ended.revision),
+        )
+        .unwrap();
+        assert_eq!(
+            reading(&session(), Some(&changed), Some(&task))["task"]["repeat_repeats"],
+            5
+        );
+    }
+
+    #[test]
+    fn takes_start_on_a_repeat_launch_one_set_at_a_time_and_end_by_their_own_trace() {
+        let task = bound("task:fixtures");
+        let trigger = apply(
+            &session(),
+            None,
+            Some(&task),
+            json!({"takes": {"start": {"task_ref": "task:fixtures", "trace_ref": "takes:t0"}}}),
+            None,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(trigger.contains("Set Launch mode to Repeat"), "{trigger}");
+        let running = repeating(&task);
+        let second = apply(
+            &session(),
+            Some(running.clone()),
+            Some(&task),
+            json!({"takes": {"start": {"task_ref": "task:fixtures", "trace_ref": "takes:t2"}}}),
+            Some(&running.revision),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(second.contains("takes:t1 are running"), "{second}");
+        let other = apply(
+            &session(),
+            Some(running.clone()),
+            Some(&task),
+            json!({"takes": {"end": {"task_ref": "task:fixtures", "trace_ref": "takes:t9", "outcome": "made"}}}),
+            Some(&running.revision),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(other.contains("takes:t1"), "{other}");
+        let word = apply(
+            &session(),
+            Some(running.clone()),
+            Some(&task),
+            json!({"takes": {"end": {"task_ref": "task:fixtures", "trace_ref": "takes:t1", "outcome": "done"}}}),
+            Some(&running.revision),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(word.contains("made, failed, stopped"), "{word}");
+        // A rebound session's new task starts with no takes.
+        let rebound = reading(&session(), Some(&running), Some(&bound("task:docs")));
+        assert_eq!(rebound["task"]["takes"], Value::Null);
+        // A stopped set ends with its reason, and another may start.
+        let stopped = apply(
+            &session(),
+            Some(running.clone()),
+            Some(&task),
+            json!({"takes": {"end": {"task_ref": "task:fixtures", "trace_ref": "takes:t1", "outcome": "stopped",
+                "reason": "The person stopped the takes"}}}),
+            Some(&running.revision),
+        )
+        .unwrap();
+        let next = apply(
+            &session(),
+            Some(stopped.clone()),
+            Some(&task),
+            json!({"takes": {"start": {"task_ref": "task:fixtures", "trace_ref": "takes:t2"}}}),
+            Some(&stopped.revision),
+        )
+        .unwrap();
+        assert_eq!(
+            reading(&session(), Some(&next), Some(&task))["task"]["takes"]["trace_ref"],
+            "takes:t2"
         );
     }
 }
