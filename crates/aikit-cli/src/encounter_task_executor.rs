@@ -22,16 +22,28 @@
 //!    `provider_mode_id`, at the envelope's value for the task's elapsed time
 //!    (seconds since the executor first saw this session's task bound).
 //! 2. A turn's end (`HostEvent::TurnEnded`, read back as `/event/TurnEnded`
-//!    on the session's own event page) is the task's own end, unless Launch
-//!    is `hold` or `loop` and the task is still active, in which case the
-//!    executor resubmits the task's own name/purpose as a fresh turn — the
-//!    clip repeating, in this system's own words for Launch. Otherwise Then
-//!    runs: `handoff` sends that same text to `handoff_to` (if it is itself
-//!    resident and not gated out by Solo), `stop` does nothing further, and
-//!    `next` — "the next task" — is a no-op here: this record names one
-//!    bound task, never a queue of them, so there is nothing to derive an
-//!    advance to; a session already rebound to a new task before this fires
-//!    picks that new task up on its own, as settings always have.
+//!    on the session's own event page) is the task's own end (`after_turn`).
+//!    Only a finish runs anything: a turn that ends `Completed`. A turn a
+//!    person stopped (the track's Stop, the Thread's) or that failed ends the
+//!    task where it stands, and the activator off launches nothing. After a
+//!    finish, Loop runs first: while it is on, the executor resubmits the
+//!    task's own name/purpose as a fresh turn, until the cap (the most runs,
+//!    the first launch included). Loop's stop condition (Task done, Test
+//!    pass) is kept with it, but no reading of a task's done or a test's pass
+//!    reaches this executor, so it judges neither: a loop ends at its cap, at
+//!    a turn that does not finish, or with the activator off. Once the loop
+//!    is spent (or off), Then follows: `again` launches the task afresh, its
+//!    loop counted over; `stop` does nothing further; and `next` — "the next
+//!    task" — is a no-op here: this record names one bound task, never a
+//!    queue of them, so there is nothing to derive an advance to; a session
+//!    already rebound to a new task before this fires picks that new task up
+//!    on its own, as settings always have. Launch mode (Trigger, Gate,
+//!    Toggle, Repeat) is how a press starts and stops the task — the shell's
+//!    press and release, which reach the encounter as `Prompt` and `cancel` —
+//!    so no mode runs the task again by itself. Repeat's runs are takes, and
+//!    a take is made by the run that varies them, not by resubmitting here.
+//!    Then's `handoff` is retired: the work moves to another session when
+//!    the person drags the task onto that session's track.
 //! 3. Quantize gates exactly how eagerly that settling happens: `now` settles
 //!    the moment a turn-end is observed; `global`, `next-tool` and `next-turn`
 //!    all settle one sweep later. The sweep has no visibility into a single
@@ -45,7 +57,7 @@
 //!    poll is served) — the session keeps working; its events stop
 //!    answering a read. Solo is this module's `solo_gate`: while any session
 //!    sharing a SessionSpace has `track.solo` on, every launch this executor
-//!    would otherwise make (a loop continuation, a handoff) on a sibling that
+//!    would otherwise make (a loop's run, an Again) on a sibling that
 //!    is not itself soloed is refused; a human's own `Prompt` is gated the
 //!    same way, in `encounter_service.rs`.
 //!
@@ -122,6 +134,10 @@ struct ExecutorState {
     /// is not `now`: the next sweep settles it unconditionally.
     #[serde(default)]
     pending_turn_end_cursor: Option<u64>,
+    /// The runs the task's loop has launched since its last launch from
+    /// elsewhere; anything but a loop's run counts it over from 0.
+    #[serde(default)]
+    loop_runs: u32,
 }
 
 fn state_path(home: &AikitHome, session: &ResourceRef) -> PathBuf {
@@ -258,15 +274,6 @@ fn proportional_index(rank: usize, ranks: usize, options: usize) -> Option<usize
     Some((rank * (options - 1) + (ranks - 1) / 2) / (ranks - 1))
 }
 
-/// Whether the task's own time should keep running another turn (Launch, and
-/// the clip activator): `once` never does; `hold`/`loop` do while the task
-/// is still active. Hold and loop differ only in how a control sets `active`
-/// (a held pad vs. a toggle) — this executor cannot tell which pressed it,
-/// and does not need to: both read the same "still active" fact.
-fn should_loop(active: bool, launch: &str) -> bool {
-    active && matches!(launch, "hold" | "loop")
-}
-
 /// Whether a turn-end observed this sweep may be settled now, or must wait
 /// for the boundary a previous sweep already marked pending (see the module
 /// doc's Quantize standing).
@@ -274,20 +281,42 @@ fn should_settle_now(quantize: &str, already_pending: bool) -> bool {
     quantize == "now" || already_pending
 }
 
+/// What a settled turn's end launches on the task's own track.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ThenAction {
-    Stop,
-    Handoff,
-    /// `next`: nothing this executor can derive (see the module doc).
-    Noop,
+enum AfterTurn {
+    /// Loop is on and its cap not reached: the task runs again.
+    Loop,
+    /// The loop is spent or off and Then is Again: the task launches afresh.
+    Again,
+    /// Nothing: Next task (no queue here), Stop, the activator off, or a turn
+    /// that did not finish.
+    Rest,
 }
 
-fn then_action(then: &str) -> ThenAction {
-    match then {
-        "handoff" => ThenAction::Handoff,
-        "stop" => ThenAction::Stop,
-        _ => ThenAction::Noop,
+/// The task's own decision at a turn's end (see the module doc): `loop_runs`
+/// are the runs its loop has already launched, so with a cap the task has
+/// run `loop_runs + 1` times.
+fn after_turn(active: bool, task: &Value, finished: bool, loop_runs: u32) -> AfterTurn {
+    if !active || !finished {
+        return AfterTurn::Rest;
     }
+    if task["loop"].as_bool() == Some(true)
+        && task["loop_cap"]
+            .as_u64()
+            .is_none_or(|cap| u64::from(loop_runs) + 1 < cap)
+    {
+        return AfterTurn::Loop;
+    }
+    match task["then"].as_str() {
+        Some("again") => AfterTurn::Again,
+        _ => AfterTurn::Rest,
+    }
+}
+
+/// A turn's end is a finish when it completed; a cancelled or failed turn is
+/// not (`aikit_store` encounter.rs reads the same `TurnEnded` stop).
+fn turn_finished(stop: &Value) -> bool {
+    stop.get("Completed").is_some() || stop.as_str() == Some("Completed")
 }
 
 /// Telemetry's own default (on) when nothing was read at all, so a reader
@@ -355,7 +384,7 @@ fn soloed_siblings(home: &AikitHome, session: &ResourceRef) -> Result<Vec<Resour
 
 /// Refuse a launch on `session` while another session of its SessionSpace is
 /// soloed and `session` is not one of them. Called both from this executor's
-/// own loop/handoff continuations and from `encounter_service.rs`'s `Prompt`
+/// own loop and Again runs and from `encounter_service.rs`'s `Prompt`
 /// handler, so a human's own send is gated exactly the same way.
 pub fn solo_gate(home: &AikitHome, session: &ResourceRef) -> Result<()> {
     let soloed = soloed_siblings(home, session)?;
@@ -442,6 +471,7 @@ fn settle_session(
         applied_mode: None,
         settled_through_cursor: 0,
         pending_turn_end_cursor: None,
+        loop_runs: 0,
     });
     if state.task_ref != task_ref {
         // A rebound session starts the task's own time over, exactly as its
@@ -457,6 +487,7 @@ fn settle_session(
             applied_mode: None,
             settled_through_cursor: 0,
             pending_turn_end_cursor: None,
+            loop_runs: 0,
         };
     }
 
@@ -647,15 +678,25 @@ fn play_autonomy(
     }
 }
 
+/// The latest turn's end on this session's own event page, from the cursor
+/// the last settle left off.
+struct TurnEnd {
+    cursor: u64,
+    /// The page was read through this cursor.
+    scanned_through: u64,
+    /// The turn completed (`turn_finished`).
+    finished: bool,
+}
+
 /// A turn's end scan over this session's own event page, from the cursor the
-/// last settle left off. Returns the highest `TurnEnded` cursor seen, if any.
+/// last settle left off. Returns the highest `TurnEnded` seen, if any.
 fn last_turn_end(
     service: &EncounterService,
     session: &ResourceRef,
     after: u64,
-) -> Result<Option<(u64, u64)>> {
+) -> Result<Option<TurnEnd>> {
     let mut after = after;
-    let mut found: Option<u64> = None;
+    let mut found: Option<(u64, bool)> = None;
     loop {
         let page = service.apply(EncounterRequest::Read {
             agent_session: session.clone(),
@@ -665,13 +706,17 @@ fn last_turn_end(
         let events = page["events"].as_array().cloned().unwrap_or_default();
         for row in &events {
             let cursor = row["cursor"].as_u64().unwrap_or(after);
-            if row["event"].pointer("/event/TurnEnded").is_some() {
-                found = Some(cursor);
+            if let Some(ended) = row["event"].pointer("/event/TurnEnded") {
+                found = Some((cursor, turn_finished(&ended["stop"])));
             }
             after = after.max(cursor);
         }
         if !page["more"].as_bool().unwrap_or(false) || events.is_empty() {
-            return Ok(found.map(|cursor| (cursor, after)));
+            return Ok(found.map(|(cursor, finished)| TurnEnd {
+                cursor,
+                scanned_through: after,
+                finished,
+            }));
         }
     }
 }
@@ -684,62 +729,34 @@ fn settle_turn_end(
     active: bool,
     state: &mut ExecutorState,
 ) -> Result<()> {
-    let Some((turn_end_cursor, scanned_through)) =
-        last_turn_end(service, session, state.settled_through_cursor)?
-    else {
+    let Some(turn_end) = last_turn_end(service, session, state.settled_through_cursor)? else {
         return Ok(());
     };
     let quantize = task["quantize"].as_str().unwrap_or("global");
-    let already_pending = state.pending_turn_end_cursor == Some(turn_end_cursor);
+    let already_pending = state.pending_turn_end_cursor == Some(turn_end.cursor);
     if !should_settle_now(quantize, already_pending) {
-        state.pending_turn_end_cursor = Some(turn_end_cursor);
+        state.pending_turn_end_cursor = Some(turn_end.cursor);
         return Ok(());
     }
     state.pending_turn_end_cursor = None;
-    state.settled_through_cursor = scanned_through;
+    state.settled_through_cursor = turn_end.scanned_through;
 
-    let launch = task["launch"].as_str().unwrap_or("once");
     let name = task["name"].as_str().unwrap_or("this task");
-    if should_loop(active, launch) {
-        if solo_gate(home, session).is_ok() {
-            let _ = resubmit(service, session, name);
-        }
-        return Ok(());
-    }
-    match then_action(task["then"].as_str().unwrap_or("next")) {
-        ThenAction::Stop | ThenAction::Noop => Ok(()),
-        ThenAction::Handoff => {
-            let Some(handoff_to) = task["handoff_to"].as_str() else {
-                return Ok(());
-            };
-            let Ok(handoff_to) = ResourceRef::parse(handoff_to) else {
-                return Ok(());
-            };
-            if service
-                .apply(EncounterRequest::Status {
-                    agent_session: handoff_to.clone(),
-                })
-                .is_err()
-            {
-                return Ok(()); // Not resident: nothing to hand off to yet.
-            }
-            if solo_gate(home, &handoff_to).is_ok() {
-                let _ = resubmit(
-                    service,
-                    &handoff_to,
-                    &format!(
-                        "Handed off from {}'s task \u{2014} \"{name}\": continue this work.",
-                        session.as_str()
-                    ),
-                );
-            }
-            Ok(())
-        }
-    }
+    let after = after_turn(active, task, turn_end.finished, state.loop_runs);
+    let launched = after != AfterTurn::Rest
+        && solo_gate(home, session).is_ok()
+        && resubmit(service, session, name).is_ok();
+    // A loop's count lives only across its own runs: anything else ends the
+    // loop, and the task's next launch counts it over.
+    state.loop_runs = match after {
+        AfterTurn::Loop if launched => state.loop_runs.saturating_add(1),
+        _ => 0,
+    };
+    Ok(())
 }
 
-/// Set a fresh draft and prompt it: the one owner path a loop continuation
-/// and a handoff both resubmit through, reading the current draft revision
+/// Set a fresh draft and prompt it: the one owner path a loop's run and an
+/// Again both resubmit through, reading the current draft revision
 /// first because `Draft`/`Prompt` are both optimistic-concurrency writes.
 fn resubmit(service: &EncounterService, session: &ResourceRef, text: &str) -> Result<()> {
     let page = service.apply(EncounterRequest::Read {
@@ -826,21 +843,80 @@ mod tests {
         assert_eq!(proportional_index(9, 3, 5), proportional_index(2, 3, 5));
     }
 
+    // REPLACED (#787): `hold_and_loop_both_keep_going_only_while_active_once_never_does` and
+    // `then_actions_match_the_manuals_three_words` read Launch hold/loop as running the task again
+    // and Then handoff as a send to another session. Loop is its own setting and the handoff is
+    // retired (encounter_task_settings.rs `migrate` reads hold and loop as Loop on):
+    // `loop_runs_the_task_again_until_its_cap_then_again_launches_it_afresh` replaces both.
     #[test]
-    fn hold_and_loop_both_keep_going_only_while_active_once_never_does() {
-        assert!(should_loop(true, "loop"));
-        assert!(should_loop(true, "hold"));
-        assert!(!should_loop(false, "loop"));
-        assert!(!should_loop(false, "hold"));
-        assert!(!should_loop(true, "once"));
+    fn loop_runs_the_task_again_until_its_cap_then_again_launches_it_afresh() {
+        let task = |set: Value| {
+            let mut task = json!({"launch": "trigger", "then": "next", "loop": false, "loop_until": "done", "loop_cap": null});
+            for (key, value) in set.as_object().unwrap() {
+                task[key] = value.clone();
+            }
+            task
+        };
+        // Loop on, no cap: each finish runs the task again while the activator is on.
+        let looped = task(json!({"loop": true}));
+        assert_eq!(after_turn(true, &looped, true, 0), AfterTurn::Loop);
+        assert_eq!(after_turn(true, &looped, true, 500), AfterTurn::Loop);
+        // The cap is the most runs, the first launch included: cap 3 runs the loop twice more.
+        let capped = task(json!({"loop": true, "loop_cap": 3}));
+        assert_eq!(after_turn(true, &capped, true, 0), AfterTurn::Loop);
+        assert_eq!(after_turn(true, &capped, true, 1), AfterTurn::Loop);
+        assert_eq!(after_turn(true, &capped, true, 2), AfterTurn::Rest);
+        assert_eq!(
+            after_turn(true, &task(json!({"loop": true, "loop_cap": 1})), true, 0),
+            AfterTurn::Rest
+        );
+        // Once the loop is spent, Then follows: Again launches the task afresh; Next task and Stop
+        // launch nothing here (no queue of tasks to advance to).
+        let again = task(json!({"loop": true, "loop_cap": 2, "then": "again"}));
+        assert_eq!(after_turn(true, &again, true, 1), AfterTurn::Again);
+        assert_eq!(
+            after_turn(true, &task(json!({"then": "again"})), true, 0),
+            AfterTurn::Again
+        );
+        assert_eq!(
+            after_turn(true, &task(json!({"then": "stop"})), true, 0),
+            AfterTurn::Rest
+        );
+        assert_eq!(after_turn(true, &task(json!({})), true, 0), AfterTurn::Rest);
+        // The activator off, or a turn that did not finish (a Stop, a failure), launches nothing.
+        assert_eq!(after_turn(false, &looped, true, 0), AfterTurn::Rest);
+        assert_eq!(
+            after_turn(false, &task(json!({"then": "again"})), true, 0),
+            AfterTurn::Rest
+        );
+        assert_eq!(after_turn(true, &looped, false, 0), AfterTurn::Rest);
+        assert_eq!(
+            after_turn(true, &task(json!({"then": "again"})), false, 0),
+            AfterTurn::Rest
+        );
+        // Launch mode is how a press starts and stops the task: no mode runs it again by itself.
+        for launch in ["trigger", "gate", "toggle", "repeat"] {
+            assert_eq!(
+                after_turn(true, &task(json!({"launch": launch})), true, 0),
+                AfterTurn::Rest,
+                "{launch}"
+            );
+        }
     }
 
     #[test]
-    fn then_actions_match_the_manuals_three_words() {
-        assert_eq!(then_action("stop"), ThenAction::Stop);
-        assert_eq!(then_action("handoff"), ThenAction::Handoff);
-        assert_eq!(then_action("next"), ThenAction::Noop);
-        assert_eq!(then_action("anything else"), ThenAction::Noop);
+    fn only_a_completed_turn_is_a_finish() {
+        assert!(turn_finished(
+            &json!({"Completed": {"stop_reason": "end_turn"}})
+        ));
+        assert!(turn_finished(&json!({"Completed": "EndTurn"})));
+        assert!(turn_finished(&json!({"Completed": {}})));
+        assert!(!turn_finished(&json!("Cancelled")));
+        assert!(!turn_finished(&json!({"Cancelled": {}})));
+        assert!(!turn_finished(
+            &json!({"Failed": {"message": "provider exited"}})
+        ));
+        assert!(!turn_finished(&Value::Null));
     }
 
     #[test]
@@ -902,10 +978,20 @@ mod tests {
             applied_mode: None,
             settled_through_cursor: 7,
             pending_turn_end_cursor: Some(8),
+            loop_runs: 2,
         };
         publish_state(&home, &who, &state).unwrap();
         let back = read_state(&home, &who).unwrap().unwrap();
         assert_eq!(back, state);
+        // A state written before the loop was counted reads with its count at 0.
+        let mut earlier = serde_json::to_value(&state).unwrap();
+        earlier.as_object_mut().unwrap().remove("loop_runs");
+        fs::write(
+            state_path(&home, &who),
+            serde_json::to_vec(&earlier).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(read_state(&home, &who).unwrap().unwrap().loop_runs, 0);
     }
 
     #[test]
@@ -924,6 +1010,7 @@ mod tests {
             applied_mode: None,
             settled_through_cursor: 0,
             pending_turn_end_cursor: None,
+            loop_runs: 0,
         };
         // Published at who's own path despite naming another session.
         let path = state_path(&home, &who);

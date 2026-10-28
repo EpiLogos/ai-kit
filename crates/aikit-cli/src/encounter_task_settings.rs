@@ -1,13 +1,23 @@
 //! An agent session's own settings, beside its bound task: how its track
 //! plays (Telemetry, Solo) and how its task launches, what follows it and how
-//! the agent works in it (name, colour, activator, output style, Launch, Then,
-//! Hand off to, Quantize, and the Effort and Autonomy envelopes). The task
-//! record stays the admission's; these settings are the person's, kept under
-//! their own revision with every replaced reading in history. Task settings
-//! bind to the task they were written for (`task_ref`): a rebound session
-//! starts from the defaults and discloses the previous task's settings.
-//! Settings are intent. Nothing here selects a model, starts a turn or moves a
-//! task; the owners of those acts read these settings.
+//! the agent works in it (name, colour, activator, output style, Loop with its
+//! stop condition and cap, Launch mode, Then, Quantize, what a Repeat varies,
+//! and the Effort and Autonomy envelopes). The task record stays the
+//! admission's; these settings are the person's, kept under their own revision
+//! with every replaced reading in history. Task settings bind to the task they
+//! were written for (`task_ref`): a rebound session starts from the defaults
+//! and discloses the previous task's settings. Settings are intent. Nothing
+//! here selects a model, starts a turn or moves a task; the owners of those
+//! acts read these settings.
+//!
+//! The words are the manual's (DLW.md, Clip view: "The Clip panel" and "The
+//! Launch panel"): Launch mode Trigger · Gate · Toggle · Repeat, Then Next
+//! task · Again · Stop, Loop Off or On with its stop condition (Task done,
+//! Test pass) and its cap, and for Repeat its Variable, Levels, Repeats and
+//! Stop when. Hand off to and Then's handoff are retired: "To hand the work to
+//! another session, drag the task onto that session's track" — the drag sends
+//! the task to that session through its encounter's own Draft and Prompt.
+//! Settings stored in the earlier words read in these (`migrate`).
 use super::{error, read as read_task_record};
 use crate::encounter_service::EncounterService;
 use aikit_core::{ResourceRef, Result, SourceRevision};
@@ -25,8 +35,27 @@ const MAX_SECONDS: f64 = 7.0 * 24.0 * 3600.0;
 
 const REGISTERS: &[&str] = &["plain", "warm", "terse"];
 const FORMS: &[&str] = &["technical", "narrative", "list"];
-const LAUNCHES: &[&str] = &["once", "hold", "loop"];
-const THENS: &[&str] = &["next", "handoff", "stop"];
+const LAUNCHES: &[&str] = &["trigger", "gate", "toggle", "repeat"];
+const THENS: &[&str] = &["next", "again", "stop"];
+/// Loop's stop condition: Task done, Test pass.
+const LOOP_UNTILS: &[&str] = &["done", "pass"];
+/// The most runs a loop makes, its first launch included.
+const MAX_LOOP_CAP: u64 = 1000;
+/// Repeat's Variable, its Stop when, and the bounds the manual sets on its
+/// Levels (1–3 values) and Repeats (1–32).
+const VARIABLES: &[&str] = &[
+    "condition",
+    "model",
+    "effort",
+    "skillset",
+    "budget",
+    "autonomy",
+];
+const REPEAT_STOPS: &[&str] = &["turns", "time", "done", "pass"];
+const MAX_LEVELS: usize = 3;
+const MAX_LEVEL_CHARS: usize = 64;
+const MAX_REPEATS: u64 = 32;
+const HANDOFF_RETIRED: &str = "Then's handoff and Hand off to are retired: to hand the work to another session, drag the task onto that session's track";
 const QUANTIZES: &[&str] = &["global", "now", "next-tool", "next-turn"];
 const MODES: &[&str] = &["automation", "modulation"];
 const EFFORTS: &[&str] = &["inherit", "low", "medium", "high", "max"];
@@ -110,7 +139,37 @@ fn read_record(home: &AikitHome, session: &ResourceRef) -> Result<Option<Setting
             "Session settings belong to another schema or session",
         ));
     }
+    let mut record = record;
+    if let Some(task) = record.task.as_mut() {
+        migrate(&mut task.set);
+    }
     Ok(Some(record))
+}
+
+/// Settings stored in the earlier words read in the manual's. Launch `once`
+/// is Trigger. `hold` and `loop` both ran the task again after each finish
+/// while it was active: `hold` is Gate and `loop` is Trigger, each with Loop
+/// on. Then's `handoff` took the work off this track, so nothing followed on
+/// it: Stop. Hand off to is retired with it. The record on disk keeps its
+/// words until the next write publishes these, the replaced reading going to
+/// history as every write's does.
+fn migrate(set: &mut Map<String, Value>) {
+    let (launch, looped) = match set.get("launch").and_then(Value::as_str) {
+        Some("once") => ("trigger", false),
+        Some("hold") => ("gate", true),
+        Some("loop") => ("trigger", true),
+        _ => ("", false),
+    };
+    if !launch.is_empty() {
+        set.insert("launch".into(), json!(launch));
+    }
+    if looped {
+        set.entry("loop").or_insert(json!(true));
+    }
+    if set.get("then").and_then(Value::as_str) == Some("handoff") {
+        set.insert("then".into(), json!("stop"));
+    }
+    set.remove("handoff_to");
 }
 
 /// Publish by atomic replacement, keeping the replaced reading in history.
@@ -161,6 +220,83 @@ fn one_of(field: &str, value: &Value, words: &[&str]) -> Result<Value> {
         Some(word) if words.contains(&word) => Ok(json!(word)),
         _ => Err(error(format!("{field} takes one of {}", words.join(", ")))),
     }
+}
+
+/// Launch mode and Then, with what became of an earlier word said where one
+/// is sent.
+fn launch_word(value: &Value) -> Result<Value> {
+    one_of("Launch", value, LAUNCHES).map_err(|refused| match value.as_str() {
+        Some("once" | "hold" | "loop") => error(format!(
+            "{refused}: once is now trigger and hold is gate; loop is the task's own Loop (loop: true)"
+        )),
+        _ => refused,
+    })
+}
+
+fn then_word(value: &Value) -> Result<Value> {
+    one_of("Then", value, THENS).map_err(|refused| match value.as_str() {
+        Some("handoff") => error(format!("{refused}. {HANDOFF_RETIRED}")),
+        _ => refused,
+    })
+}
+
+fn count(field: &str, value: &Value, max: u64) -> Result<Value> {
+    value
+        .as_u64()
+        .filter(|n| (1..=max).contains(n))
+        .map(|n| json!(n))
+        .ok_or_else(|| error(format!("{field} is a whole number from 1 to {max}")))
+}
+
+/// Repeat's Levels: the values the variable takes, each one group of takes.
+fn levels(value: &Value) -> Result<Value> {
+    let refused = || {
+        error(format!(
+            "Repeat's levels are 1 to {MAX_LEVELS} distinct values, each text of 1 to {MAX_LEVEL_CHARS} characters"
+        ))
+    };
+    let rows = value
+        .as_array()
+        .filter(|rows| (1..=MAX_LEVELS).contains(&rows.len()))
+        .ok_or_else(refused)?;
+    let mut kept = Vec::with_capacity(rows.len());
+    for row in rows {
+        let level = words("A level", row, MAX_LEVEL_CHARS).map_err(|_| refused())?;
+        if kept.contains(&level) {
+            return Err(refused());
+        }
+        kept.push(level);
+    }
+    Ok(Value::Array(kept))
+}
+
+/// Repeat's Levels are values of its Variable: where AIKit keeps the
+/// variable's words (Effort, Autonomy), each level is one of them. A
+/// condition, a model, a skillset and a budget are their own owners' values,
+/// which the run that applies them judges; AIKit keeps no copy of them.
+fn check_repeat(set: &Map<String, Value>) -> Result<()> {
+    let variable = set
+        .get("repeat_variable")
+        .and_then(Value::as_str)
+        .unwrap_or("condition");
+    let words = match variable {
+        "effort" => EFFORTS,
+        "autonomy" => AUTONOMIES,
+        _ => return Ok(()),
+    };
+    let Some(levels) = set.get("repeat_levels").and_then(Value::as_array) else {
+        return Ok(());
+    };
+    if levels
+        .iter()
+        .all(|level| level.as_str().is_some_and(|level| words.contains(&level)))
+    {
+        return Ok(());
+    }
+    Err(error(format!(
+        "With {variable} varied, each of Repeat's levels is one of {}; send the levels with the variable",
+        words.join(", ")
+    )))
 }
 
 fn flag(field: &str, value: &Value) -> Result<Value> {
@@ -261,41 +397,36 @@ fn validate_track(changes: &Map<String, Value>) -> Result<Map<String, Value>> {
 }
 
 /// Validate each changed task field on its own; the envelope points are
-/// checked against the merged mode afterwards.
-fn validate_task(
-    session: &ResourceRef,
-    changes: &Map<String, Value>,
-) -> Result<Map<String, Value>> {
+/// checked against the merged mode, and Repeat's levels against the merged
+/// variable, afterwards.
+fn validate_task(changes: &Map<String, Value>) -> Result<Map<String, Value>> {
     let mut kept = Map::new();
     for (key, value) in changes {
         let value = match (key.as_str(), value) {
+            ("handoff_to", _) => return Err(error(HANDOFF_RETIRED)),
             (_, Value::Null) => Value::Null,
             ("name", value) => words("Name", value, 200)?,
             ("colour", value) => words("Colour", value, 64)?,
             ("active", value) => flag("The clip activator", value)?,
             ("register", value) => one_of("Register", value, REGISTERS)?,
             ("form", value) => one_of("Form", value, FORMS)?,
-            ("launch", value) => one_of("Launch", value, LAUNCHES)?,
-            ("then", value) => one_of("Then", value, THENS)?,
-            ("handoff_to", value) => {
-                let target = value
-                    .as_str()
-                    .map(ResourceRef::parse)
-                    .transpose()?
-                    .ok_or_else(|| error("Hand off to names an agent session"))?;
-                if &target == session {
-                    return Err(error("A task cannot hand off to its own session"));
-                }
-                json!(target.as_str())
-            }
+            ("loop", value) => flag("Loop", value)?,
+            ("loop_until", value) => one_of("Loop's stop condition", value, LOOP_UNTILS)?,
+            ("loop_cap", value) => count("Loop's cap", value, MAX_LOOP_CAP)?,
+            ("launch", value) => launch_word(value)?,
+            ("then", value) => then_word(value)?,
             ("quantize", value) => one_of("Quantize", value, QUANTIZES)?,
+            ("repeat_variable", value) => one_of("Repeat's variable", value, VARIABLES)?,
+            ("repeat_levels", value) => levels(value)?,
+            ("repeat_repeats", value) => count("Repeat's repeats", value, MAX_REPEATS)?,
+            ("repeat_stop", value) => one_of("Repeat's stop condition", value, REPEAT_STOPS)?,
             ("envelope_mode", value) => one_of("The envelope mode", value, MODES)?,
             ("envelope_linked", value) => flag("The envelope link", value)?,
             // Checked against the merged mode once every change is in.
             ("effort", value) | ("autonomy", value) => value.clone(),
             (other, _) => {
                 return Err(error(format!(
-                    "A task has no setting {other}; it takes name, colour, active, register, form, launch, then, handoff_to, quantize, envelope_mode, envelope_linked, effort and autonomy"
+                    "A task has no setting {other}; it takes name, colour, active, register, form, loop, loop_until, loop_cap, launch, then, quantize, repeat_variable, repeat_levels, repeat_repeats, repeat_stop, envelope_mode, envelope_linked, effort and autonomy"
                 )))
             }
         };
@@ -346,10 +477,16 @@ fn reading(
             "active": value("active", json!(true)),
             "register": value("register", json!("plain")),
             "form": value("form", json!("technical")),
-            "launch": value("launch", json!("once")),
+            "loop": value("loop", json!(false)),
+            "loop_until": value("loop_until", json!("done")),
+            "loop_cap": value("loop_cap", Value::Null),
+            "launch": value("launch", json!("trigger")),
             "then": value("then", json!("next")),
-            "handoff_to": value("handoff_to", Value::Null),
             "quantize": value("quantize", json!("global")),
+            "repeat_variable": value("repeat_variable", json!("condition")),
+            "repeat_levels": value("repeat_levels", json!([])),
+            "repeat_repeats": value("repeat_repeats", json!(3)),
+            "repeat_stop": value("repeat_stop", json!("done")),
             "envelope_mode": value("envelope_mode", json!("automation")),
             "envelope_linked": value("envelope_linked", json!(true)),
             "effort": value("effort", json!([])),
@@ -367,7 +504,7 @@ fn reading(
         "track": track,
         "task": task,
         "previous_task": previous,
-        "standing": "The person's settings for this session and its bound task: intent the owners of launch, model and delivery read. Colour null takes the session's colour; an empty envelope inherits the session's value.",
+        "standing": "The person's settings for this session and its bound task: intent the owners of launch, model and delivery read. Colour null takes the session's colour; an empty envelope inherits the session's value; a null loop cap sets no cap; Repeat's levels stay empty until chosen.",
     })
 }
 
@@ -389,7 +526,7 @@ fn apply(
     let task_changes = request
         .task
         .as_ref()
-        .map(|task| validate_task(session, &task.set).map(|set| (task.task_ref.clone(), set)))
+        .map(|task| validate_task(&task.set).map(|set| (task.task_ref.clone(), set)))
         .transpose()?;
     if track_changes.as_ref().is_none_or(Map::is_empty)
         && task_changes.as_ref().is_none_or(|(_, set)| set.is_empty())
@@ -420,6 +557,7 @@ fn apply(
             .unwrap_or_default();
         merge(&mut set, &changes);
         check_envelopes(&mut set)?;
+        check_repeat(&set)?;
         task = Some(TaskSettings { task_ref, set });
     }
     Ok(SettingsRecord {
@@ -520,8 +658,20 @@ mod tests {
         assert_eq!(read["track"]["telemetry"], true);
         assert_eq!(read["track"]["solo"], false);
         assert_eq!(read["task"]["name"], "Write the hand-off fixtures");
-        assert_eq!(read["task"]["launch"], "once");
+        // REPLACED (#787): Launch's default was `once`; the manual's Trigger is the same press.
+        assert_eq!(read["task"]["launch"], "trigger");
         assert_eq!(read["task"]["then"], "next");
+        assert_eq!(read["task"]["loop"], false);
+        assert_eq!(read["task"]["loop_until"], "done");
+        assert_eq!(read["task"]["loop_cap"], Value::Null);
+        assert_eq!(read["task"]["repeat_variable"], "condition");
+        assert_eq!(read["task"]["repeat_levels"], json!([]));
+        assert_eq!(read["task"]["repeat_repeats"], 3);
+        assert_eq!(read["task"]["repeat_stop"], "done");
+        assert!(
+            read["task"].get("handoff_to").is_none(),
+            "Hand off to is retired"
+        );
         assert_eq!(read["task"]["quantize"], "global");
         assert_eq!(read["task"]["envelope_mode"], "automation");
         assert_eq!(read["task"]["effort"], json!([]));
@@ -537,17 +687,20 @@ mod tests {
             &session(),
             None,
             Some(&task),
+            // REPLACED (#787): the change said launch loop, then handoff and handoff_to; Loop is
+            // its own setting now and the handoff is retired.
             json!({"track": {"telemetry": false},
-                   "task": {"task_ref": "task:fixtures", "set": {"name": "Fixtures", "launch": "loop", "then": "handoff",
-                            "handoff_to": "agent-session/tests", "quantize": "next-tool"}}}),
+                   "task": {"task_ref": "task:fixtures", "set": {"name": "Fixtures", "launch": "gate", "loop": true,
+                            "then": "again", "quantize": "next-tool"}}}),
             None,
         )
         .unwrap();
         let read = reading(&session(), Some(&first), Some(&task));
         assert_eq!(read["track"]["telemetry"], false);
         assert_eq!(read["task"]["name"], "Fixtures");
-        assert_eq!(read["task"]["launch"], "loop");
-        assert_eq!(read["task"]["handoff_to"], "agent-session/tests");
+        assert_eq!(read["task"]["launch"], "gate");
+        assert_eq!(read["task"]["loop"], true);
+        assert_eq!(read["task"]["then"], "again");
         assert_eq!(read["task"]["quantize"], "next-tool");
         let second = apply(
             &session(),
@@ -560,7 +713,8 @@ mod tests {
         assert_ne!(second.revision, first.revision);
         let read = reading(&session(), Some(&second), Some(&task));
         assert_eq!(read["task"]["name"], "Write the hand-off fixtures");
-        assert_eq!(read["task"]["launch"], "loop", "the other fields stand");
+        assert_eq!(read["task"]["launch"], "gate", "the other fields stand");
+        assert_eq!(read["task"]["loop"], true, "the other fields stand");
         assert_eq!(read["track"]["telemetry"], false, "the track stands");
     }
 
@@ -588,7 +742,7 @@ mod tests {
             &session(),
             Some(first.clone()),
             Some(&task),
-            json!({"task": {"task_ref": "task:other", "set": {"launch": "hold"}}}),
+            json!({"task": {"task_ref": "task:other", "set": {"launch": "gate"}}}),
             Some(&first.revision),
         )
         .unwrap_err();
@@ -600,7 +754,7 @@ mod tests {
             &session(),
             None,
             None,
-            json!({"task": {"task_ref": "task:fixtures", "set": {"launch": "hold"}}}),
+            json!({"task": {"task_ref": "task:fixtures", "set": {"launch": "gate"}}}),
             None,
         )
         .unwrap_err();
@@ -613,14 +767,16 @@ mod tests {
     #[test]
     fn words_outside_the_manuals_values_are_refused_in_words() {
         let task = bound("task:fixtures");
+        // REPLACED (#787): Launch was once · hold · loop and Then next · handoff · stop; a
+        // task handed off to its own session was refused, and Hand off to is retired whole.
         for (set, said) in [
             (
                 json!({"launch": "twice"}),
-                "Launch takes one of once, hold, loop",
+                "Launch takes one of trigger, gate, toggle, repeat",
             ),
             (
                 json!({"then": "next task"}),
-                "Then takes one of next, handoff, stop",
+                "Then takes one of next, again, stop",
             ),
             (json!({"quantize": "bar"}), "Quantize takes one of"),
             (
@@ -628,9 +784,33 @@ mod tests {
                 "Register takes one of plain, warm, terse",
             ),
             (json!({"active": "yes"}), "on or off"),
+            (json!({"loop": "on"}), "Loop is on or off"),
             (
-                json!({"handoff_to": "agent-session/settings-test"}),
-                "cannot hand off to its own session",
+                json!({"loop_until": "never"}),
+                "Loop's stop condition takes one of done, pass",
+            ),
+            (json!({"loop_cap": 0}), "Loop's cap is a whole number from 1 to"),
+            (json!({"loop_cap": 2.5}), "Loop's cap is a whole number from 1 to"),
+            (
+                json!({"repeat_variable": "temperature"}),
+                "Repeat's variable takes one of condition, model, effort, skillset, budget, autonomy",
+            ),
+            (
+                json!({"repeat_repeats": 33}),
+                "Repeat's repeats is a whole number from 1 to 32",
+            ),
+            (
+                json!({"repeat_stop": "forever"}),
+                "Repeat's stop condition takes one of turns, time, done, pass",
+            ),
+            (json!({"repeat_levels": []}), "Repeat's levels are 1 to 3"),
+            (
+                json!({"repeat_levels": ["a", "b", "c", "d"]}),
+                "Repeat's levels are 1 to 3",
+            ),
+            (
+                json!({"repeat_levels": ["opus", "opus"]}),
+                "Repeat's levels are 1 to 3 distinct values",
             ),
             (json!({"tempo": 120}), "A task has no setting tempo"),
             (json!({"name": "  "}), "Name is text of 1 to 200"),
@@ -722,16 +902,19 @@ mod tests {
             &session(),
             None,
             Some(&first_task),
-            json!({"task": {"task_ref": "task:fixtures", "set": {"launch": "loop"}}}),
+            // REPLACED (#787): the first task's launch was loop; Loop is its own setting now.
+            json!({"task": {"task_ref": "task:fixtures", "set": {"launch": "toggle", "loop": true}}}),
             None,
         )
         .unwrap();
         let second_task = bound("task:docs");
         let read = reading(&session(), Some(&first), Some(&second_task));
         assert_eq!(read["task"]["task_ref"], "task:docs");
-        assert_eq!(read["task"]["launch"], "once");
+        assert_eq!(read["task"]["launch"], "trigger");
+        assert_eq!(read["task"]["loop"], false);
         assert_eq!(read["previous_task"]["task_ref"], "task:fixtures");
-        assert_eq!(read["previous_task"]["set"]["launch"], "loop");
+        assert_eq!(read["previous_task"]["set"]["launch"], "toggle");
+        assert_eq!(read["previous_task"]["set"]["loop"], true);
         let rebound = apply(
             &session(),
             Some(first.clone()),
@@ -743,9 +926,10 @@ mod tests {
         let read = reading(&session(), Some(&rebound), Some(&second_task));
         assert_eq!(read["task"]["then"], "stop");
         assert_eq!(
-            read["task"]["launch"], "once",
+            read["task"]["launch"], "trigger",
             "nothing carries over from the old task"
         );
+        assert_eq!(read["task"]["loop"], false);
         assert_eq!(read["previous_task"], Value::Null);
     }
 
@@ -778,5 +962,235 @@ mod tests {
         assert!(back.track.is_empty());
         let history = path(&home, &session()).parent().unwrap().join("history");
         assert_eq!(fs::read_dir(history).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn the_launch_panel_and_loop_take_and_return_the_manuals_words() {
+        let task = bound("task:fixtures");
+        for launch in ["trigger", "gate", "toggle", "repeat"] {
+            let made = apply(
+                &session(),
+                None,
+                Some(&task),
+                json!({"task": {"task_ref": "task:fixtures", "set": {"launch": launch}}}),
+                None,
+            )
+            .unwrap();
+            assert_eq!(
+                reading(&session(), Some(&made), Some(&task))["task"]["launch"],
+                launch
+            );
+        }
+        for then in ["next", "again", "stop"] {
+            let made = apply(
+                &session(),
+                None,
+                Some(&task),
+                json!({"task": {"task_ref": "task:fixtures", "set": {"then": then}}}),
+                None,
+            )
+            .unwrap();
+            assert_eq!(
+                reading(&session(), Some(&made), Some(&task))["task"]["then"],
+                then
+            );
+        }
+        let looped = apply(
+            &session(),
+            None,
+            Some(&task),
+            json!({"task": {"task_ref": "task:fixtures", "set": {"loop": true, "loop_until": "pass", "loop_cap": 5}}}),
+            None,
+        )
+        .unwrap();
+        let read = reading(&session(), Some(&looped), Some(&task));
+        assert_eq!(read["task"]["loop"], true);
+        assert_eq!(read["task"]["loop_until"], "pass");
+        assert_eq!(read["task"]["loop_cap"], 5);
+        let repeat = apply(
+            &session(),
+            Some(looped.clone()),
+            Some(&task),
+            json!({"task": {"task_ref": "task:fixtures", "set": {"launch": "repeat", "repeat_variable": "model",
+                   "repeat_levels": [" opus ", "sonnet", "haiku"], "repeat_repeats": 4, "repeat_stop": "turns", "loop_cap": null}}}),
+            Some(&looped.revision),
+        )
+        .unwrap();
+        let read = reading(&session(), Some(&repeat), Some(&task));
+        assert_eq!(read["task"]["launch"], "repeat");
+        assert_eq!(read["task"]["repeat_variable"], "model");
+        assert_eq!(
+            read["task"]["repeat_levels"],
+            json!(["opus", "sonnet", "haiku"])
+        );
+        assert_eq!(read["task"]["repeat_repeats"], 4);
+        assert_eq!(read["task"]["repeat_stop"], "turns");
+        assert_eq!(
+            read["task"]["loop_cap"],
+            Value::Null,
+            "null returns the cap to none"
+        );
+        assert_eq!(read["task"]["loop_until"], "pass", "the loop stands");
+    }
+
+    #[test]
+    fn the_handoff_is_retired_naming_the_drag_that_replaces_it() {
+        let task = bound("task:fixtures");
+        for set in [
+            json!({"then": "handoff"}),
+            json!({"handoff_to": "agent-session/tests"}),
+        ] {
+            let refused = apply(
+                &session(),
+                None,
+                Some(&task),
+                json!({"task": {"task_ref": "task:fixtures", "set": set}}),
+                None,
+            )
+            .unwrap_err()
+            .to_string();
+            assert!(
+                refused.contains("drag the task onto that session's track"),
+                "{refused}"
+            );
+        }
+        for (old, new) in [("once", "trigger"), ("hold", "gate"), ("loop", "Loop")] {
+            let refused = apply(
+                &session(),
+                None,
+                Some(&task),
+                json!({"task": {"task_ref": "task:fixtures", "set": {"launch": old}}}),
+                None,
+            )
+            .unwrap_err()
+            .to_string();
+            assert!(
+                refused.contains(new),
+                "{old}: the refusal names {new}: {refused}"
+            );
+        }
+    }
+
+    #[test]
+    fn settings_stored_in_the_old_words_read_in_the_manuals_and_a_write_publishes_them() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = AikitHome::at(dir.path().canonicalize().unwrap().join("home"));
+        let task = bound("task:fixtures");
+        let stored = |launch: &str, then: &str| {
+            let record = json!({"schema": RECORD_SCHEMA, "agent_session": session().as_str(),
+                "revision": "session-settings/01OLD", "track": {},
+                "task": {"task_ref": "task:fixtures", "set": {"launch": launch, "then": then,
+                         "handoff_to": "agent-session/tests", "quantize": "now"}}});
+            let target = path(&home, &session());
+            fs::create_dir_all(target.parent().unwrap()).unwrap();
+            fs::write(&target, serde_json::to_vec(&record).unwrap()).unwrap();
+            read_record(&home, &session()).unwrap().unwrap()
+        };
+        for (launch, then, now_launch, now_loop, now_then) in [
+            ("once", "next", "trigger", None, "next"),
+            ("hold", "stop", "gate", Some(true), "stop"),
+            ("loop", "handoff", "trigger", Some(true), "stop"),
+        ] {
+            let record = stored(launch, then);
+            let read = reading(&session(), Some(&record), Some(&task));
+            assert_eq!(read["task"]["launch"], now_launch, "{launch}");
+            assert_eq!(
+                read["task"]["loop"],
+                now_loop.unwrap_or(false),
+                "{launch}: loop"
+            );
+            assert_eq!(read["task"]["then"], now_then, "{then}");
+            assert!(read["task"].get("handoff_to").is_none());
+            assert_eq!(read["task"]["quantize"], "now", "the rest stands");
+            let mut set: Vec<&str> = read["task"]["set"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|key| key.as_str().unwrap())
+                .collect();
+            set.sort();
+            let mut expected = vec!["launch", "quantize", "then"];
+            if now_loop.is_some() {
+                expected.push("loop");
+                expected.sort();
+            }
+            assert_eq!(set, expected, "{launch}: what the person set");
+        }
+        // The next write publishes the migrated words; the replaced reading stays in history.
+        let record = stored("hold", "handoff");
+        let written = apply(
+            &session(),
+            Some(record.clone()),
+            Some(&task),
+            json!({"task": {"task_ref": "task:fixtures", "set": {"loop_cap": 3}}}),
+            Some(&record.revision),
+        )
+        .unwrap();
+        publish(&home, &session(), &written).unwrap();
+        let file: Value =
+            serde_json::from_slice(&fs::read(path(&home, &session())).unwrap()).unwrap();
+        assert_eq!(
+            file["task"]["set"],
+            json!({"launch": "gate", "loop": true, "then": "stop", "quantize": "now", "loop_cap": 3})
+        );
+        let history = path(&home, &session()).parent().unwrap().join("history");
+        assert_eq!(fs::read_dir(history).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn repeat_levels_are_the_variables_words_where_aikit_keeps_them() {
+        let task = bound("task:fixtures");
+        let effort = apply(
+            &session(),
+            None,
+            Some(&task),
+            json!({"task": {"task_ref": "task:fixtures", "set": {"repeat_variable": "effort", "repeat_levels": ["low", "max"]}}}),
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            reading(&session(), Some(&effort), Some(&task))["task"]["repeat_levels"],
+            json!(["low", "max"])
+        );
+        let wrong = apply(
+            &session(),
+            None,
+            Some(&task),
+            json!({"task": {"task_ref": "task:fixtures", "set": {"repeat_variable": "autonomy", "repeat_levels": ["opus"]}}}),
+            None,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            wrong.contains("each of Repeat's levels is one of inherit, suggest, review, auto"),
+            "{wrong}"
+        );
+        // Switching the variable alone would leave Effort's words as Autonomy's levels.
+        let moved = apply(
+            &session(),
+            Some(effort.clone()),
+            Some(&task),
+            json!({"task": {"task_ref": "task:fixtures", "set": {"repeat_variable": "autonomy"}}}),
+            Some(&effort.revision),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            moved.contains("send the levels with the variable"),
+            "{moved}"
+        );
+        // Condition, Model, Skillset and Budget name their own owners' values: AIKit keeps no copy.
+        let condition = apply(
+            &session(),
+            Some(effort.clone()),
+            Some(&task),
+            json!({"task": {"task_ref": "task:fixtures", "set": {"repeat_variable": "condition", "repeat_levels": ["classic", "ql-direct"]}}}),
+            Some(&effort.revision),
+        )
+        .unwrap();
+        assert_eq!(
+            reading(&session(), Some(&condition), Some(&task))["task"]["repeat_variable"],
+            "condition"
+        );
     }
 }
