@@ -86,6 +86,29 @@ A complete protected-process task request is:
 }
 ```
 
+A short request names only what is the task's own, and the owner derives the
+rest from the session's standing (`encounter_task_derive.rs`):
+
+```json
+{"purpose": "The bounded work to perform", "source": "wiki:anchor:example", "task_ref": "task:example"}
+```
+
+`source` and `task_ref` are optional (a missing ref is the purpose, slugged, and
+a ULID). The participant is the Agent the session's Agency binding names; the
+authority is the one authority its admitted determination holds; `ctrl_bin` is
+the selected Central (`CENTRAL_CTRL_BIN`, `OI_CENTRAL_CTRL_BIN`, else `ctrl` on
+PATH, pinned to its target); `central_root` and `project` are the World whose
+`Work` tree holds the session's working directory (`CENTRAL_ROOT`, else
+`~/Central`); the provider is the configured row the session last opened on,
+`cwd` where it opened; no directory beyond the task's own NOW is selected,
+since nothing in the session's standing names one (the place it opened is most
+often a repository root, which Central refuses as a write grant); the boundary
+is the one beside the selected `workcell`, else `workcell-write-boundary` on
+PATH. Each
+fact that cannot be derived is named in one refusal. A short request cannot
+carry any other field, so it can never name an authority, participant or
+directory; the completed request passes the same admission as a complete one.
+
 `EncounterProvider.required_context` may also be supplied. Agent context is still
 materialised from the exact source/digest admission; `source_refs` alone do not
 deliver bytes or authorise private retrieval. The task adds actual NOW/output/cwd/
