@@ -6,7 +6,7 @@
 //! link to that owned payload. Undo restores the original bytes and links from
 //! the Procedure journal.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Component, Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -220,6 +220,65 @@ pub fn records(home: &AikitHome) -> Result<Vec<AdoptionRecord>> {
     }
     records.sort_by(|left, right| left.namespace.cmp(&right.namespace));
     Ok(records)
+}
+
+/// Who owns a skill root AIKit discovers: a native generation projected into
+/// it, an adoption that moved it into AIKit, or neither.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RootOwnership {
+    /// Indexed, not owned.
+    Foreign,
+    /// Moved into the personal registry by this adoption Procedure.
+    Adopted { procedure: String },
+    /// Projected from this native generation.
+    Generated { generation: String },
+}
+
+impl RootOwnership {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Foreign => "foreign",
+            Self::Adopted { .. } => "adopted",
+            Self::Generated { .. } => "generated",
+        }
+    }
+}
+
+/// The adoption records by their canonical source root, read once for a
+/// survey of every discovered root (`aikit init`, the tree's registries).
+pub struct RootOwnerships<'a> {
+    home: &'a AikitHome,
+    adopted: BTreeMap<PathBuf, AdoptionRecord>,
+}
+
+impl<'a> RootOwnerships<'a> {
+    /// A malformed adoption record is an authority-state error, never a root
+    /// relabelled foreign.
+    pub fn read(home: &'a AikitHome) -> Result<Self> {
+        let adopted = records(home)?
+            .into_iter()
+            .map(|record| (record.source.clone(), record))
+            .collect();
+        Ok(Self { home, adopted })
+    }
+
+    /// A projected generation stands over an adoption record: a cutover
+    /// replaces the adopted tree with the generation's projection. Records
+    /// name canonical roots, so the root is canonicalised before it is looked up.
+    pub fn of(&self, root: &Path) -> RootOwnership {
+        if let Some(generation) = crate::foreign::projected_generation(self.home, root) {
+            return RootOwnership::Generated {
+                generation: generation.generation_id.to_string(),
+            };
+        }
+        let canonical = std::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
+        match self.adopted.get(&canonical) {
+            Some(record) => RootOwnership::Adopted {
+                procedure: record.procedure.clone(),
+            },
+            None => RootOwnership::Foreign,
+        }
+    }
 }
 
 fn read_json_record<T: serde::de::DeserializeOwned>(

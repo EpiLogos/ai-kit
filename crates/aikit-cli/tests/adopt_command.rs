@@ -467,6 +467,75 @@ fn the_tree_reports_an_adopted_root_as_adopted_not_foreign() {
     assert!(!claude["summary"].as_str().unwrap().contains("foreign"));
 }
 
+/// `aikit init` says who owns each root it discovers — the same standing the
+/// tree's registries give it — so a reader needs no second command and no
+/// summary text to learn it.
+#[test]
+fn init_reports_a_root_foreign_before_adoption_and_adopted_with_its_procedure_after() {
+    let home = TempDir::new().unwrap();
+    let project = TempDir::new().unwrap();
+    write(&project.path().join(".aikit/profile.toml"), "schema = 1\n");
+    let root = home.path().join(".claude/skills");
+    write(
+        &root.join("deep-review/SKILL.md"),
+        "---\nname: deep-review\ndescription: Review the whole change.\n---\n",
+    );
+    let claude = |init: &Value| -> Value {
+        init["data"]["roots"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["label"] == "@claude")
+            .expect("the default Claude root is discovered")
+            .clone()
+    };
+
+    let before = successful(home.path(), project.path(), &["init"]);
+    let row = claude(&before);
+    assert_eq!(row["ownership"], "foreign", "{row}");
+    assert!(row.get("procedure").is_none(), "{row}");
+    assert!(row.get("generation").is_none(), "{row}");
+
+    let preview = successful(
+        home.path(),
+        project.path(),
+        &["adopt", root.to_str().unwrap(), "--namespace", "claude"],
+    );
+    let adopted = successful(
+        home.path(),
+        project.path(),
+        &[
+            "adopt",
+            root.to_str().unwrap(),
+            "--namespace",
+            "claude",
+            "--yes",
+            "--expect-digest",
+            preview["data"]["review_digest"].as_str().unwrap(),
+        ],
+    );
+
+    let after = successful(home.path(), project.path(), &["init"]);
+    let row = claude(&after);
+    assert_eq!(row["ownership"], "adopted", "{row}");
+    assert_eq!(row["procedure"], adopted["data"]["procedure"], "{row}");
+    assert!(row.get("generation").is_none(), "{row}");
+    assert_eq!(row["skills"], 1, "the root still keeps its skill: {row}");
+
+    // Undo hands the root back: init reads it foreign again.
+    successful(
+        home.path(),
+        project.path(),
+        &[
+            "procedure",
+            "undo",
+            adopted["data"]["procedure"].as_str().unwrap(),
+        ],
+    );
+    let undone = successful(home.path(), project.path(), &["init"]);
+    assert_eq!(claude(&undone)["ownership"], "foreign");
+}
+
 #[test]
 fn authority_record_refuses_a_journal_from_an_unrelated_procedure_kind() {
     let (home, project, foreign) = fixture();
@@ -940,6 +1009,23 @@ fn control_cutover_uses_a_real_generation_and_undo_restores_the_original_tree() 
         .as_str()
         .unwrap()
         .starts_with("generated ·"));
+    // init gives the same standing, with the generation the tree names.
+    let init = successful(home.path(), project.path(), &["init"]);
+    let agents_root = init["data"]["roots"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["label"] == "@agents")
+        .unwrap();
+    assert_eq!(agents_root["ownership"], "generated", "{agents_root}");
+    assert!(
+        agents["summary"].as_str().unwrap().contains(&format!(
+            "· generation {}",
+            agents_root["generation"].as_str().unwrap()
+        )),
+        "{agents_root} {agents}"
+    );
+    assert!(agents_root.get("procedure").is_none(), "{agents_root}");
     assert!(!foreign.as_path().join("retired/SKILL.md").exists());
     assert!(ground.join("retired/SKILL.md").is_file());
     let procedure = confirmed["data"]["procedure"].as_str().unwrap();
