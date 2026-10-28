@@ -565,4 +565,32 @@ mod tests {
             "edge:source"
         );
     }
+
+    #[test]
+    fn a_reading_through_a_lens_is_kept_on_the_constellation_as_a_proposal_and_replaced_by_its_ref() {
+        let created = apply(&initial(), &create("wiki:read", "wiki:read-anchor")).unwrap();
+        let reading = |sublens: Value, basis: u64| json!({"change":"reading_put","reading":{"reading_ref":"ql-mef:reading:registry:wiki-read-anchor:L1",
+            "lens_ref":"mef:lens:L1@1","sublens_ref":sublens,"disclosure":"Causal / Efficient cause refractive reading of wiki:read-anchor",
+            "result_class":"deterministic","provider_ref":"ql-mef:provider:registry-disclosure","basis_revision":basis,"standing":"proposed"}});
+        let kept = apply(&created.content, &request("wiki:read", 1, "operation:read-1", json!([reading(json!("mef:sublens:L1.2@1"), 1)]))).unwrap();
+        let view = frame(&kept.content, "wiki:read");
+        let readings = &view["construction"]["readings"];
+        assert_eq!(readings.as_array().unwrap().len(), 1);
+        assert_eq!(readings[0]["sublens_ref"], "mef:sublens:L1.2@1");
+        assert_eq!(readings[0]["standing"], "proposed");
+        let again = apply(&kept.content, &request("wiki:read", 2, "operation:read-2", json!([reading(Value::Null, 2)]))).unwrap();
+        let readings = frame(&again.content, "wiki:read")["construction"]["readings"].clone();
+        assert_eq!(readings.as_array().unwrap().len(), 1, "the same reading ref is replaced, not added");
+        assert!(readings[0].get("sublens_ref").is_none(), "read through the whole lens");
+        for (bad, why) in [
+            (reading(json!("mef:sublens:L2.2@1"), 1), "sublens of another lens"),
+            (reading(Value::Null, 0), "a stale basis"),
+            (json!({"change":"reading_put","reading":{"reading_ref":"ql-mef:reading:x","lens_ref":"mef:lens:L9@1","disclosure":"x","result_class":"d","provider_ref":"p","basis_revision":1,"standing":"proposed"}}), "not a lens"),
+            (json!({"change":"reading_put","reading":{"reading_ref":"ql-mef:reading:x","lens_ref":"mef:lens:L1@1","disclosure":"x","result_class":"d","provider_ref":"p","basis_revision":1,"standing":"asserted"}}), "an assertion"),
+        ] {
+            assert!(apply(&created.content, &request("wiki:read", 1, "operation:bad", json!([bad]))).is_err(), "{why} is refused");
+        }
+        let plain = frame(&created.content, "wiki:read");
+        assert!(plain["construction"].get("readings").is_none(), "a construction with no reading writes no readings field");
+    }
 }

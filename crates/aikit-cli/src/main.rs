@@ -4128,6 +4128,7 @@ fn cmd_knowledge(cwd: &std::path::Path, c: KnowledgeCmd) -> Result<Reply> {
                     read_seam(&a.law, "knowledge.reflection_law_unreadable")?;
                 jval!(service.reflection_verdict(&law)?)
             }
+            KnowledgeReflectionSub::Laws => jval!(service.reflection_laws()?),
         },
         KnowledgeSub::Forget(a) => {
             let scope = match a.command {

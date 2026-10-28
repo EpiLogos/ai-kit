@@ -1,8 +1,9 @@
-//! `aikit knowledge impact` and `aikit knowledge reflection verify`: the
-//! library's own deterministic Living Knowledge closure and reflection-law
-//! verdict, asked for readings and for a supplied law. Nothing is recorded,
-//! no Agent or model is invoked, and the horizon and the law are owner seams
-//! the caller supplies.
+//! `aikit knowledge impact`, `aikit knowledge reflection verify` and `aikit
+//! knowledge reflection laws`: the library's own deterministic Living
+//! Knowledge closure and reflection-law verdict, asked for readings and for a
+//! supplied law, and the reflection laws a project declares. Nothing is
+//! recorded, no Agent or model is invoked, and the horizon and the law are
+//! owner seams the caller supplies or the project writes.
 
 use std::fs;
 use std::io::Write;
@@ -268,4 +269,125 @@ fn the_binary_reads_the_horizon_and_the_law_from_stdin() {
     );
     assert!(!ok);
     assert_eq!(envelope["error"]["code"], "knowledge.horizon_unreadable");
+}
+
+/// A law the project writes in its own `.aikit/reflection-laws/` (O-I #786):
+/// the meaning a source names, the code that holds it, and the source
+/// revision the law was last read against the work at.
+fn declared_law(id: &str) -> Value {
+    json!({
+        "id": id,
+        "source": "central:source:project:test:ProjectCentral/docs/2-design/impact.md",
+        "source_revision": "central.content-fnv1a64/v1:12:0000000000000001",
+        "unique_implementation": true,
+        "mappings": [{
+            "coordinate": "subject",
+            "semantic": NODE,
+            "implementation": "code:symbol:impact::subject",
+            "relation": "implemented-by"
+        }],
+        "constitutive_relations": []
+    })
+}
+
+#[test]
+fn a_project_lists_the_reflection_laws_it_declares_and_names_each_it_cannot_read() {
+    let temp = TempDir::new().unwrap();
+    let (home, project) = project(&temp);
+    let service = Service::open(AikitHome::at(home.clone()), &project, |_| None).unwrap();
+    let none = service.reflection_laws().unwrap();
+    assert_eq!(none.version, "aikit.reflection-laws/v1");
+    assert_eq!(none.declared_in, ".aikit/reflection-laws");
+    assert!(
+        none.laws.is_empty() && none.unreadable.is_empty(),
+        "a project that declares none lists none"
+    );
+
+    let laws = project.join(".aikit/reflection-laws");
+    write(
+        &laws.join("b-impact.json"),
+        &declared_law("law/impact-subject").to_string(),
+    );
+    write(
+        &laws.join("a-second.json"),
+        &declared_law("law/second").to_string(),
+    );
+    write(&laws.join("c-broken.json"), "{not json");
+    write(
+        &laws.join("d-again.json"),
+        &declared_law("law/impact-subject").to_string(),
+    );
+    write(&laws.join("notes.md"), "Not a law.\n");
+    let service = Service::open(AikitHome::at(home), &project, |_| None).unwrap();
+    let listing = service.reflection_laws().unwrap();
+    let paths = listing
+        .laws
+        .iter()
+        .map(|row| row.path.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        paths,
+        [
+            ".aikit/reflection-laws/a-second.json",
+            ".aikit/reflection-laws/b-impact.json"
+        ],
+        "by path; only .json files"
+    );
+    assert_eq!(listing.laws[1].law.id, "law/impact-subject");
+    assert_eq!(
+        listing.laws[1].law.source_revision.as_deref(),
+        Some("central.content-fnv1a64/v1:12:0000000000000001"),
+        "the revision the source was last read against the work at"
+    );
+    let unreadable = listing
+        .unreadable
+        .iter()
+        .map(|row| (row.path.as_str(), row.error.as_str()))
+        .collect::<Vec<_>>();
+    assert_eq!(unreadable.len(), 2, "{unreadable:?}");
+    assert_eq!(unreadable[0].0, ".aikit/reflection-laws/c-broken.json");
+    assert_eq!(unreadable[1].0, ".aikit/reflection-laws/d-again.json");
+    assert!(
+        unreadable[1].1.contains("b-impact.json"),
+        "a second law of the same id names the first: {}",
+        unreadable[1].1
+    );
+    assert!(!listing.automatic_agent_or_model_invocation);
+    // Each law listed is one the verdict takes as it stands.
+    let verdict = service.reflection_verdict(&listing.laws[1].law).unwrap();
+    assert_eq!(verdict.law, "law/impact-subject");
+    assert!(!verdict.verification.passed);
+}
+
+#[test]
+fn the_binary_lists_the_declared_laws_and_verifies_one_as_listed() {
+    let temp = TempDir::new().unwrap();
+    let (home, project) = project(&temp);
+    write(
+        &project.join(".aikit/reflection-laws/impact.json"),
+        &declared_law("law/impact-subject").to_string(),
+    );
+    let (ok, envelope, stderr) = aikit(&home, &project, &["knowledge", "reflection", "laws"], "");
+    assert!(ok, "{envelope} {stderr}");
+    let data = &envelope["data"];
+    assert_eq!(data["version"], "aikit.reflection-laws/v1");
+    assert_eq!(data["declared_in"], ".aikit/reflection-laws");
+    assert_eq!(
+        data["laws"][0]["path"],
+        ".aikit/reflection-laws/impact.json"
+    );
+    assert_eq!(data["laws"][0]["law"]["id"], "law/impact-subject");
+    assert_eq!(data["unreadable"], json!([]));
+    let (ok, envelope, _) = aikit(
+        &home,
+        &project,
+        &["knowledge", "reflection", "verify", "-"],
+        &data["laws"][0]["law"].to_string(),
+    );
+    assert!(ok, "{envelope}");
+    assert_eq!(envelope["data"]["law"], "law/impact-subject");
+    assert_eq!(
+        envelope["data"]["verification"]["issues"][0]["kind"],
+        "missing"
+    );
 }

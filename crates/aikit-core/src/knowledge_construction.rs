@@ -110,6 +110,24 @@ pub struct CompositionReference {
     #[serde(default)]
     pub derivation_refs: Vec<ResourceRef>,
 }
+/// A reading of the constellation through a QL-MEF lens (O-I #769, the DLW pool's Commit): QL's
+/// WikiReading as its provider disclosed it, kept on the constellation for every mode to find. A
+/// reading is a proposal (`standing`), never an assertion about the members; the lens and sublens
+/// are QL-MEF's canonical refs, the reading ref is QL's own.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct KeptReading {
+    pub reading_ref: ResourceRef,
+    pub lens_ref: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sublens_ref: Option<String>,
+    pub disclosure: String,
+    pub result_class: String,
+    pub provider_ref: String,
+    /// The construction revision the reading read.
+    pub basis_revision: u64,
+    pub standing: String,
+}
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AppliedOperation {
@@ -134,6 +152,8 @@ pub struct Construction {
     pub variant_of: Option<WholeReference>,
     #[serde(default)]
     pub compositions: Vec<CompositionReference>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub readings: Vec<KeptReading>,
     #[serde(default)]
     pub applied: BTreeMap<String, AppliedOperation>,
 }
@@ -188,6 +208,10 @@ pub enum Change {
     },
     CompositionAttach {
         composition: CompositionReference,
+    },
+    /// Keep a reading through a lens on the constellation, replacing one with the same reading ref.
+    ReadingPut {
+        reading: KeptReading,
     },
     PlaceSet {
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -508,6 +532,7 @@ pub fn apply(input: &str, request: &Request) -> Result<Applied> {
                 alternatives: vec![],
                 variant_of: variant_of.clone(),
                 compositions: vec![],
+                readings: vec![],
                 applied: BTreeMap::new(),
             };
             frame = WikiFrame {
@@ -774,6 +799,52 @@ pub fn apply(input: &str, request: &Request) -> Result<Applied> {
                 }
                 Change::AlternativeRemove { whole_ref } => {
                     meta.alternatives.retain(|r| &r.whole_ref != whole_ref)
+                }
+                Change::ReadingPut { reading } => {
+                    ResourceRef::parse(reading.reading_ref.as_str())?;
+                    let lens = reading
+                        .lens_ref
+                        .strip_prefix("mef:lens:")
+                        .and_then(|rest| rest.strip_suffix("@1"))
+                        .filter(|code| {
+                            let b = code.as_bytes();
+                            (b.len() == 2 || (b.len() == 3 && b[2] == b'\''))
+                                && b[0] == b'L'
+                                && (b'0'..=b'5').contains(&b[1])
+                        })
+                        .ok_or_else(|| err("reading lens is not a canonical QL-MEF LensRef"))?;
+                    if let Some(sublens) = &reading.sublens_ref {
+                        let ok = sublens
+                            .strip_prefix("mef:sublens:")
+                            .and_then(|rest| rest.strip_suffix("@1"))
+                            .and_then(|rest| rest.rsplit_once('.'))
+                            .is_some_and(|(parent, index)| {
+                                parent == lens && matches!(index, "0" | "1" | "2" | "3" | "4" | "5")
+                            });
+                        if !ok {
+                            return Err(err("reading sublens does not belong to its lens"));
+                        }
+                    }
+                    text(&reading.disclosure, "reading disclosure", LIMIT)?;
+                    text(&reading.result_class, "reading result class", 256)?;
+                    text(&reading.provider_ref, "reading provider", 1024)?;
+                    if reading.standing != "proposed" {
+                        return Err(err("a kept reading stands as a proposal"));
+                    }
+                    if reading.basis_revision != request.expected_revision {
+                        return Err(err(
+                            "a reading keeps the construction revision it read; read again and commit",
+                        ));
+                    }
+                    if let Some(i) = meta
+                        .readings
+                        .iter()
+                        .position(|r| r.reading_ref == reading.reading_ref)
+                    {
+                        meta.readings[i] = reading.clone();
+                    } else {
+                        meta.readings.push(reading.clone());
+                    }
                 }
                 Change::CompositionAttach { composition } => {
                     if !["expression", "journey", "palace", "artifact"]
