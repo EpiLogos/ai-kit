@@ -3200,9 +3200,12 @@ fn cmd_procedure(cwd: &std::path::Path, c: ProcedureCmd) -> Result<Reply> {
 
 /// `aikit init` — discover the foreign skill roots already on the machine and
 /// show them, read-only. It indexes what is there and reports counts (including
-/// the dead symlinks and unusable frontmatter a user cannot otherwise see); it
-/// asks nothing and writes nothing. Adoption — turning a foreign root into
-/// something AIKit owns — is a separate, explicitly confirmed Procedure.
+/// the dead symlinks and unusable frontmatter a user cannot otherwise see) and
+/// who owns each root — `foreign`, `adopted` (with its `procedure`) or
+/// `generated` (with its `generation`), the standing the tree's registries
+/// give it; it asks nothing and writes nothing. Adoption — turning a foreign
+/// root into something AIKit owns — is a separate, explicitly confirmed
+/// Procedure.
 fn cmd_init(cwd: &std::path::Path, a: InitArgs) -> Result<Reply> {
     use aikit_cli::foreign;
     let service = Service::discover(cwd)?;
@@ -3220,17 +3223,30 @@ fn cmd_init(cwd: &std::path::Path, a: InitArgs) -> Result<Reply> {
     }
 
     let found = foreign::discover(&roots);
+    let ownerships = aikit_cli::adopt::RootOwnerships::read(service.home())?;
     let rows: Vec<Value> = found
         .iter()
         .map(|r| {
-            jval!({
+            let ownership = ownerships.of(&r.path);
+            let mut row = jval!({
                 "label": r.label,
                 "path": r.path.display().to_string(),
                 "skills": r.skills,
                 "dead_symlinks": r.dead_symlinks,
                 "missing_frontmatter": r.missing_frontmatter,
                 "problems": r.problems(),
-            })
+                "ownership": ownership.as_str(),
+            });
+            match ownership {
+                aikit_cli::adopt::RootOwnership::Adopted { procedure } => {
+                    row["procedure"] = procedure.into();
+                }
+                aikit_cli::adopt::RootOwnership::Generated { generation } => {
+                    row["generation"] = generation.into();
+                }
+                aikit_cli::adopt::RootOwnership::Foreign => {}
+            }
+            row
         })
         .collect();
     let total_skills: usize = found.iter().map(|r| r.skills).sum();

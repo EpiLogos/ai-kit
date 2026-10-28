@@ -294,11 +294,7 @@ fn contexts_root(service: &Service) -> Result<Node> {
 /// `registries/` — where things came from, with each root's problems counted.
 fn registries_root(service: &Service) -> Result<Node> {
     let mut children = Vec::new();
-    let adopted: BTreeMap<std::path::PathBuf, crate::adopt::AdoptionRecord> =
-        crate::adopt::records(service.home())?
-            .into_iter()
-            .map(|record| (record.source.clone(), record))
-            .collect();
+    let ownerships = crate::adopt::RootOwnerships::read(service.home())?;
 
     // AIKit's own registries, from the catalogue.
     let mut owned: BTreeMap<String, usize> = BTreeMap::new();
@@ -324,21 +320,15 @@ fn registries_root(service: &Service) -> Result<Node> {
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|| std::path::PathBuf::from("."));
     for root in foreign::discover(&foreign::roots_for(&home, service.invocation_cwd())) {
-        let canonical_root =
-            std::fs::canonicalize(&root.path).unwrap_or_else(|_| root.path.clone());
-        let mut summary = match (
-            foreign::projected_generation(service.home(), &root.path),
-            adopted.get(&canonical_root),
-        ) {
-            (Some(generation), _) => format!(
-                "generated · {} skills · generation {}",
-                root.skills, generation.generation_id
+        let mut summary = match ownerships.of(&root.path) {
+            crate::adopt::RootOwnership::Generated { generation } => format!(
+                "generated · {} skills · generation {generation}",
+                root.skills
             ),
-            (None, Some(record)) => format!(
-                "adopted · {} skills · procedure {}",
-                root.skills, record.procedure
-            ),
-            (None, None) => format!("foreign · {} skills", root.skills),
+            crate::adopt::RootOwnership::Adopted { procedure } => {
+                format!("adopted · {} skills · procedure {procedure}", root.skills)
+            }
+            crate::adopt::RootOwnership::Foreign => format!("foreign · {} skills", root.skills),
         };
         if root.problems() > 0 {
             summary.push_str(&format!(
