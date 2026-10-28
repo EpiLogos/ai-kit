@@ -164,6 +164,36 @@ were written for: a rebound session starts its new task from the defaults and
 discloses the previous task's settings as `previous_task`. Settings are intent:
 nothing here selects a model, starts a turn or moves a task.
 
+A Repeat's takes start and end here, by whoever runs them (the shell's Repeat
+press, through Actuation's comparison run): "Once the first run starts, these
+do not change. A change starts a new set of takes" (DLW.md, The Launch panel).
+
+```json
+{"takes": {"start": {"task_ref": "task:example", "trace_ref": "takes:example-1"}}}
+{"takes": {"end": {"task_ref": "task:example", "trace_ref": "takes:example-1",
+  "outcome": "made", "takes": 9, "root": "/path/of/the/comparison"}}}
+```
+
+A start is refused unless the bound task's `launch` is `repeat`, and while
+another set runs; it keeps `repeat_variable`, `repeat_levels`, `repeat_repeats`
+and `repeat_stop` as they stand. While the set runs, a change to any of the four
+is refused in words (the same value is no change). An end names the running
+set's `trace_ref` and its `outcome` (made · failed · stopped), with the takes it
+made, where the run keeps them and why it ended when it did not make them. The
+reading's `task.takes` is the set that stands (`trace_ref`, `started_at_unix_ms`,
+`running`, the four fields as `variable`, `levels`, `repeats` and `stop`, and
+`ended`), null until a Repeat's takes start.
+
+A looping task's stop condition is read from its owners when its turn finishes:
+the latest attempt the task serves (below) and the Software Factory's reading of
+it, `factory attempt return STATE RUN ATTEMPT --json`
+(`factory.attempt-return-reading/v1`). Task done is an attempt whose readable
+Return Factory admitted; Test pass is an attempt whose latest verification
+passed. Met, the loop ends and Then follows. A task serving no attempt, or a
+Factory that does not answer, has no verdict: its loop runs on to its cap.
+Telemetry off mutes the session's events for readers; the executor that settles
+Loop and Again reads the owner's journal, so a muted track still settles them.
+
 ### The attempts a session's task serves
 
 A Software Factory attempt names the session it dispatched on, but a session
