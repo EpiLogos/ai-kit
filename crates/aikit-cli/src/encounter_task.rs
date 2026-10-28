@@ -54,6 +54,12 @@ struct TaskRequest {
     /// Exact child-specific A application retained by this task owner.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     repertoire: Option<TaskRepertoire>,
+    /// The constellation the task is made of (O-I manual §10.3, §19.1: a
+    /// constellation dropped on a session's track makes a task with it as its
+    /// source): the wiki ref of its whole. Its settings read it as `source`
+    /// until the person sets another. Omitted, the request is the one it was.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    source: Option<String>,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -946,6 +952,20 @@ fn isolate_task_identity(
         command.env("AIKIT_CONTEXT_ID", context.as_str());
     }
 }
+/// A task made of a constellation names it by the wiki ref of its whole, in
+/// the words its settings keep (`settings::constellation`); the source is the
+/// one it was made of, so preparing the task again keeps it.
+fn check_source(request: &TaskRequest, current: Option<&TaskRequest>) -> Result<()> {
+    if let Some(source) = &request.source {
+        settings::constellation(&json!(source))?;
+    }
+    if current.is_some_and(|current| current.source != request.source) {
+        return Err(error(
+            "A task's source is the constellation it was made of; set another through the task's settings (source)",
+        ));
+    }
+    Ok(())
+}
 impl EncounterService {
     pub fn task_repertoire_session_id(session: &ResourceRef) -> aikit_core::SessionId {
         task_session_id(session)
@@ -969,6 +989,7 @@ impl EncounterService {
         expected: Option<&SourceRevision>,
     ) -> Result<Value> {
         let request: TaskRequest = serde_json::from_value(input).map_err(error)?;
+        check_source(&request, None)?;
         validate_task_repertoire(home, session, &request)?;
         crate::encounter_profile_provider::ensure_connection_facts_reachable(&request.provider)?;
         // Resolve and validate the declared body before journalling a pending
@@ -1037,6 +1058,7 @@ impl EncounterService {
                 "A session cannot silently become another task or Candidate",
             ));
         }
+        check_source(&request, current.as_ref().map(|c| &c.request))?;
         if current.as_ref().is_some_and(|c| {
             !c.ready && serde_json::to_value(&c.request).ok() != serde_json::to_value(&request).ok()
         }) {
@@ -1621,6 +1643,46 @@ mod profile_task_tests {
         explicit_empty["additional_protected_directories"] = json!([]);
         let parsed: TaskRequest = serde_json::from_value(explicit_empty).unwrap();
         assert_eq!(serde_json::to_value(parsed).unwrap(), legacy);
+    }
+
+    #[test]
+    fn a_task_is_made_of_the_constellation_its_request_names() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().canonicalize().unwrap();
+        let raw = raw_task_request(&root);
+        let legacy: TaskRequest = serde_json::from_value(raw.clone()).unwrap();
+        assert!(
+            serde_json::to_value(legacy)
+                .unwrap()
+                .get("source")
+                .is_none(),
+            "a task made of no constellation keeps the request it had"
+        );
+        let mut made = raw.clone();
+        made["source"] = json!("wiki:anchor:lived-in");
+        let parsed: TaskRequest = serde_json::from_value(made).unwrap();
+        assert_eq!(
+            serde_json::to_value(&parsed).unwrap()["source"],
+            "wiki:anchor:lived-in"
+        );
+        check_source(&parsed, None).unwrap();
+        check_source(&parsed, Some(&parsed)).unwrap();
+        let moved = check_source(&parsed, Some(&legacy_of(&raw))).unwrap_err();
+        assert!(
+            moved
+                .to_string()
+                .contains("the constellation it was made of"),
+            "{moved}"
+        );
+        let mut wrong = raw.clone();
+        wrong["source"] = json!("Lived-in");
+        let wrong: TaskRequest = serde_json::from_value(wrong).unwrap();
+        let refused = check_source(&wrong, None).unwrap_err();
+        assert!(refused.to_string().contains("wiki ref"), "{refused}");
+    }
+
+    fn legacy_of(raw: &Value) -> TaskRequest {
+        serde_json::from_value(raw.clone()).unwrap()
     }
 
     #[test]

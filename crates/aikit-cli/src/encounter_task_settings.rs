@@ -2,7 +2,8 @@
 //! plays (Telemetry, Solo) and how its task launches, what follows it and how
 //! the agent works in it (name, colour, activator, output style, Loop with its
 //! stop condition and cap, Launch mode, Then, Quantize, what a Repeat varies,
-//! and the Effort and Autonomy envelopes). The task record stays the
+//! the Effort and Autonomy envelopes, and its source: the constellation it was
+//! made of). The task record stays the
 //! admission's; these settings are the person's, kept under their own revision
 //! with every replaced reading in history. Task settings bind to the task they
 //! were written for (`task_ref`): a rebound session starts from the defaults
@@ -101,12 +102,14 @@ struct TaskRequest {
     set: Map<String, Value>,
 }
 
-/// The bound task as the settings see it: its identity and its purpose (the
-/// name a task has before the person names it).
+/// The bound task as the settings see it: its identity, its purpose (the
+/// name a task has before the person names it) and the constellation it was
+/// made of (its source before the person sets another).
 #[derive(Debug, Clone, PartialEq)]
 struct BoundTask {
     task_ref: ResourceRef,
     purpose: String,
+    source: Option<String>,
 }
 
 fn path(home: &AikitHome, session: &ResourceRef) -> PathBuf {
@@ -299,6 +302,31 @@ fn check_repeat(set: &Map<String, Value>) -> Result<()> {
     )))
 }
 
+/// The longest wiki ref a task keeps as its source.
+const MAX_SOURCE_CHARS: usize = 1024;
+
+/// The constellation a task was made of (O-I manual §19.1 The Clip panel:
+/// "Constellation — The one the task was made of — The task's source"; O-I
+/// #709, #768): the wiki ref of its whole, as the Wiki names it (`wiki:…`).
+/// It is the task's source, as a sample is an audio clip's: nothing here
+/// reads the wiki, and the task's work leaves the constellation as it is.
+pub(super) fn constellation(value: &Value) -> Result<Value> {
+    match value.as_str() {
+        Some(r)
+            if r.len() > "wiki:".len()
+                && r.starts_with("wiki:")
+                && r.chars().count() <= MAX_SOURCE_CHARS
+                && r == r.trim()
+                && !r.chars().any(char::is_control) =>
+        {
+            Ok(json!(r))
+        }
+        _ => Err(error(format!(
+            "A task's source is the wiki ref of the constellation it was made of (wiki:…), at most {MAX_SOURCE_CHARS} characters"
+        ))),
+    }
+}
+
 fn flag(field: &str, value: &Value) -> Result<Value> {
     value
         .as_bool()
@@ -422,11 +450,12 @@ fn validate_task(changes: &Map<String, Value>) -> Result<Map<String, Value>> {
             ("repeat_stop", value) => one_of("Repeat's stop condition", value, REPEAT_STOPS)?,
             ("envelope_mode", value) => one_of("The envelope mode", value, MODES)?,
             ("envelope_linked", value) => flag("The envelope link", value)?,
+            ("source", value) => constellation(value)?,
             // Checked against the merged mode once every change is in.
             ("effort", value) | ("autonomy", value) => value.clone(),
             (other, _) => {
                 return Err(error(format!(
-                    "A task has no setting {other}; it takes name, colour, active, register, form, loop, loop_until, loop_cap, launch, then, quantize, repeat_variable, repeat_levels, repeat_repeats, repeat_stop, envelope_mode, envelope_linked, effort and autonomy"
+                    "A task has no setting {other}; it takes name, colour, active, register, form, loop, loop_until, loop_cap, launch, then, quantize, repeat_variable, repeat_levels, repeat_repeats, repeat_stop, envelope_mode, envelope_linked, source, effort and autonomy"
                 )))
             }
         };
@@ -449,6 +478,7 @@ fn bound_task(home: &AikitHome, session: &ResourceRef) -> Result<Option<BoundTas
     Ok(read_task_record(home, session)?.map(|record| BoundTask {
         task_ref: record.request.central.task_ref.clone(),
         purpose: record.request.central.purpose.clone(),
+        source: record.request.source.clone(),
     }))
 }
 
@@ -489,6 +519,8 @@ fn reading(
             "repeat_stop": value("repeat_stop", json!("done")),
             "envelope_mode": value("envelope_mode", json!("automation")),
             "envelope_linked": value("envelope_linked", json!(true)),
+            // The constellation the task was made of, until the person sets another.
+            "source": value("source", bound.source.as_ref().map_or(Value::Null, |source| json!(source))),
             "effort": value("effort", json!([])),
             "autonomy": value("autonomy", json!([])),
             "set": set.keys().collect::<Vec<_>>(),
@@ -504,7 +536,7 @@ fn reading(
         "track": track,
         "task": task,
         "previous_task": previous,
-        "standing": "The person's settings for this session and its bound task: intent the owners of launch, model and delivery read. Colour null takes the session's colour; an empty envelope inherits the session's value; a null loop cap sets no cap; Repeat's levels stay empty until chosen.",
+        "standing": "The person's settings for this session and its bound task: intent the owners of launch, model and delivery read. Colour null takes the session's colour; an empty envelope inherits the session's value; a null loop cap sets no cap; Repeat's levels stay empty until chosen; the source is the constellation the task was made of until another is set, and null when it was made of none.",
     })
 }
 
@@ -646,6 +678,7 @@ mod tests {
         BoundTask {
             task_ref: ResourceRef::parse(task).unwrap(),
             purpose: "Write the hand-off fixtures".into(),
+            source: None,
         }
     }
 
@@ -678,6 +711,83 @@ mod tests {
         assert_eq!(read["task"]["set"], json!([]));
         let untasked = reading(&session(), None, None);
         assert_eq!(untasked["task"], Value::Null);
+    }
+
+    #[test]
+    fn a_task_keeps_the_constellation_it_was_made_of_as_its_source() {
+        let task = bound("task:fixtures");
+        assert_eq!(
+            reading(&session(), None, Some(&task))["task"].get("source"),
+            Some(&Value::Null),
+            "a task made of no constellation reads null"
+        );
+        let made = apply(
+            &session(),
+            None,
+            Some(&task),
+            json!({"task": {"task_ref": "task:fixtures", "set": {"source": "wiki:anchor:lived-in"}}}),
+            None,
+        )
+        .unwrap();
+        let read = reading(&session(), Some(&made), Some(&task));
+        assert_eq!(read["task"]["source"], "wiki:anchor:lived-in");
+        assert_eq!(read["task"]["set"], json!(["source"]));
+        for refused in [
+            json!("Lived-in"),
+            json!("wiki:"),
+            json!(7),
+            json!("wiki:anchor:\u{7}"),
+        ] {
+            let said = apply(
+                &session(),
+                None,
+                Some(&task),
+                json!({"task": {"task_ref": "task:fixtures", "set": {"source": refused}}}),
+                None,
+            )
+            .unwrap_err();
+            assert!(
+                said.to_string()
+                    .contains("the wiki ref of the constellation it was made of"),
+                "{said}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_task_made_of_a_constellation_reads_it_as_its_source_until_another_is_set() {
+        let task = BoundTask {
+            source: Some("wiki:anchor:lived-in".into()),
+            ..bound("task:fixtures")
+        };
+        let read = reading(&session(), None, Some(&task));
+        assert_eq!(read["task"]["source"], "wiki:anchor:lived-in");
+        assert_eq!(read["task"]["set"], json!([]), "the person set nothing");
+        let other = apply(
+            &session(),
+            None,
+            Some(&task),
+            json!({"task": {"task_ref": "task:fixtures", "set": {"source": "wiki:frame:hand-off"}}}),
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            reading(&session(), Some(&other), Some(&task))["task"]["source"],
+            "wiki:frame:hand-off"
+        );
+        let back = apply(
+            &session(),
+            Some(other.clone()),
+            Some(&task),
+            json!({"task": {"task_ref": "task:fixtures", "set": {"source": null}}}),
+            Some(&other.revision),
+        )
+        .unwrap();
+        assert_eq!(
+            reading(&session(), Some(&back), Some(&task))["task"]["source"],
+            "wiki:anchor:lived-in",
+            "null returns the task to the constellation it was made of"
+        );
     }
 
     #[test]

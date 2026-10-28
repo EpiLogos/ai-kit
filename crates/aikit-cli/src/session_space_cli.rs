@@ -121,6 +121,8 @@ enum Command {
         child_message_dir: Option<String>,
     },
     /// Prepare a Central task and an exact Workcell boundary for this session.
+    /// The request may name `source`: the constellation the task is made of
+    /// (a wiki ref), which its settings read as the task's source.
     EncounterTaskConfigure {
         #[arg(long)]
         agent_session: String,
@@ -149,7 +151,8 @@ enum Command {
     },
     /// Read or change this session's settings and its bound task's: the
     /// track's Telemetry and Solo; the task's name, colour, activator, output
-    /// style, Loop, Launch mode, Then, Quantize, Repeat and envelopes. Without
+    /// style, Loop, Launch mode, Then, Quantize, Repeat, envelopes and source
+    /// (the constellation the task was made of, a wiki ref). Without
     /// --request-json it reads; several --agent-session read each at once.
     EncounterSessionSettings {
         #[arg(long, required = true)]
