@@ -146,7 +146,8 @@ enum Command {
     },
     /// Read or change this session's settings and its bound task's: the
     /// track's Telemetry and Solo; the task's name, colour, activator, output
-    /// style, Loop, Launch mode, Then, Quantize, Repeat and envelopes. Without
+    /// style, Loop, Launch mode, Then, Quantize, Repeat, envelopes and source
+    /// (the constellation the task was made of, a wiki ref). Without
     /// --request-json it reads; several --agent-session read each at once.
     EncounterSessionSettings {
         #[arg(long, required = true)]
