@@ -162,6 +162,23 @@ enum Command {
         #[arg(long)]
         expected_revision: Option<String>,
     },
+    /// Run this session's own agent as the body of a Repeat's take: Actuation's
+    /// agent-jsonl protocol on stdin and stdout (preflight, turn, complete,
+    /// finalize). Each take is a fresh resident of the session's agent, opened
+    /// in the take's World on the resident encounter owner; the session's own
+    /// resident is never touched. Emits only the protocol's lines on stdout.
+    #[cfg(unix)]
+    EncounterTakeBody {
+        /// The session whose agent the take runs.
+        #[arg(long)]
+        session: String,
+        /// The resident encounter owner's socket; default, this home's.
+        #[arg(long)]
+        socket: Option<PathBuf>,
+        /// How long one turn may run before it is cancelled.
+        #[arg(long, default_value_t = 600)]
+        turn_timeout_secs: u64,
+    },
     /// Restore an exact prior ready task after failed unhosted preparation.
     /// Hosted pending work requires recovery of the same Workcell demand.
     EncounterTaskAbort {
@@ -643,6 +660,17 @@ fn run(cli: Cli) -> Result<()> {
                 }
             }
         }
+        #[cfg(unix)]
+        Command::EncounterTakeBody {
+            session,
+            socket,
+            turn_timeout_secs,
+        } => crate::encounter_take_body::serve(
+            home,
+            &aikit_core::ResourceRef::parse(session)?,
+            &socket.unwrap_or_else(|| crate::encounter_service::socket_path(home)),
+            std::time::Duration::from_secs(turn_timeout_secs),
+        ),
         Command::EncounterTaskAbort {
             agent_session,
             expected_revision,

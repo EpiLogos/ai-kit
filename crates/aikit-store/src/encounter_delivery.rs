@@ -442,6 +442,24 @@ impl EncounterStore {
         body.map(|b| serde_json::from_str(&b).map_err(failure))
             .transpose()
     }
+    /// The model the session's native body was last observed on: the latest
+    /// binding's observation or a later provider-confirmed model
+    /// configuration's, whichever came last. None before any observation.
+    pub fn last_model_observation(&self, session: &ResourceRef) -> Result<Option<Value>> {
+        validate(session)?;
+        let connection = self.connection.lock().map_err(failure)?;
+        let body: Option<String> = connection.query_row("SELECT event FROM encounter_events WHERE session=?1 AND (json_extract(event,'$.kind')='binding' OR json_extract(event,'$.event.Signal.kind.kind')='model-configured') ORDER BY cursor DESC LIMIT 1", [session.as_str()], |r|r.get(0)).optional().map_err(failure)?;
+        let Some(body) = body else {
+            return Ok(None);
+        };
+        let event: Value = serde_json::from_str(&body).map_err(failure)?;
+        let observation = if event["kind"] == "binding" {
+            event["model_observation"].clone()
+        } else {
+            event["event"]["Signal"]["kind"]["model_observation"].clone()
+        };
+        Ok((!observation.is_null()).then_some(observation))
+    }
     /// Reduce only the latest native-open generation to an unresolved recovery
     /// state. Current-process ownership is never reconstructed from the journal:
     /// an unmatched reservation requires native evidence, while a refusal whose

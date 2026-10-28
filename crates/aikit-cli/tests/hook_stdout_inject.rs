@@ -298,7 +298,17 @@ fn native_hook_bounds_nonreading_input_and_retires_inherited_or_closed_pipe_chil
                 }
             );
         }
-        let pid = fs::read_to_string(tmp.path().join("child.pid")).unwrap();
+        // The hook's background child writes its PID itself; under parallel
+        // load that write can trail the hook's own exit, so wait for it.
+        let pid_path = tmp.path().join("child.pid");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let pid = loop {
+            let read = fs::read_to_string(&pid_path).unwrap_or_default();
+            if !read.trim().is_empty() || std::time::Instant::now() >= deadline {
+                break read;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        };
         assert!(
             pid.trim().parse::<u32>().unwrap() > 0,
             "an actual child PID is required"

@@ -585,6 +585,32 @@ fn takes_reading(takes: Option<&TakesSet>) -> Value {
     })
 }
 
+/// The run a bound task's takes share, in Actuation's words
+/// (`encounter_take_body.rs` `take_run`): the task as a provided task and the
+/// session's own agent as an agent-jsonl body. The settings stay the
+/// person's; this is what a Repeat's press hands Actuation, or why it has
+/// nothing to hand.
+fn with_take_run(
+    home: &AikitHome,
+    session: &ResourceRef,
+    host: &Result<crate::encounter_take_body::TakeHost>,
+    mut reading: Value,
+) -> Value {
+    if !reading["task"].is_object() {
+        return reading;
+    }
+    let refused = |error: &aikit_core::AikitError| json!({"refused": format!("AIKit could not compose the takes' run: {}", error.message())});
+    let run = match (host, EncounterService::session_agent(home, session)) {
+        (Ok(host), Ok(agent)) => {
+            crate::encounter_take_body::take_run(host, session, &reading["task"], agent.as_ref())
+        }
+        (Err(error), _) => refused(error),
+        (_, Err(error)) => refused(&error),
+    };
+    reading["task"]["take_run"] = run;
+    reading
+}
+
 /// The reading: every value as it stands, defaults stated, what the person
 /// set listed, and a previous task's settings disclosed but not applied.
 fn reading(
@@ -640,7 +666,7 @@ fn reading(
         "track": track,
         "task": task,
         "previous_task": previous,
-        "standing": "The person's settings for this session and its bound task: intent the owners of launch, model and delivery read. Colour null takes the session's colour; an empty envelope inherits the session's value; a null loop cap sets no cap; Repeat's levels stay empty until chosen, and its variable, levels, repeats and stop when do not change while its takes run (a change starts a new set once they end); the source is the constellation the task was made of until another is set, and null when it was made of none.",
+        "standing": "The person's settings for this session and its bound task: intent the owners of launch, model and delivery read. Colour null takes the session's colour; an empty envelope inherits the session's value; a null loop cap sets no cap; Repeat's levels stay empty until chosen, and its variable, levels, repeats and stop when do not change while its takes run (a change starts a new set once they end); the source is the constellation the task was made of until another is set, and null when it was made of none. A bound task's take_run is the run a Repeat's takes share in Actuation's words — the task and the session's own agent as an agent-jsonl body — or why there is none.",
     })
 }
 
@@ -856,7 +882,13 @@ impl EncounterService {
         Self::new(home.clone())?.require_attached(session)?;
         let record = read_record(home, session)?;
         let bound = bound_task(home, session)?;
-        Ok(reading(session, record.as_ref(), bound.as_ref()))
+        let host = crate::encounter_take_body::TakeHost::of_this_process(home);
+        Ok(with_take_run(
+            home,
+            session,
+            &host,
+            reading(session, record.as_ref(), bound.as_ref()),
+        ))
     }
 
     /// Several sessions' readings at once (several `--agent-session`), in
@@ -869,6 +901,7 @@ impl EncounterService {
             )));
         }
         let spaces = SessionSpaceApplicationStore::new(home.clone()).list()?;
+        let host = crate::encounter_take_body::TakeHost::of_this_process(home);
         let mut readings = Vec::with_capacity(sessions.len());
         for session in sessions {
             if !spaces
@@ -881,7 +914,12 @@ impl EncounterService {
             }
             let record = read_record(home, session)?;
             let bound = bound_task(home, session)?;
-            readings.push(reading(session, record.as_ref(), bound.as_ref()));
+            readings.push(with_take_run(
+                home,
+                session,
+                &host,
+                reading(session, record.as_ref(), bound.as_ref()),
+            ));
         }
         Ok(json!({"schema": LIST_SCHEMA, "readings": readings}))
     }
@@ -912,7 +950,13 @@ impl EncounterService {
             expected,
         )?;
         publish(home, session, &record)?;
-        Ok(reading(session, Some(&record), bound.as_ref()))
+        let host = crate::encounter_take_body::TakeHost::of_this_process(home);
+        Ok(with_take_run(
+            home,
+            session,
+            &host,
+            reading(session, Some(&record), bound.as_ref()),
+        ))
     }
 }
 
@@ -1721,6 +1765,127 @@ mod tests {
         assert_eq!(
             reading(&session(), Some(&next), Some(&task))["task"]["takes"]["trace_ref"],
             "takes:t2"
+        );
+    }
+
+    /// A home whose session is attached and bound to a task, as the
+    /// admission leaves it (the task record's own shape, its owner effects
+    /// absent).
+    fn bound_home() -> (tempfile::TempDir, AikitHome) {
+        use aikit_core::session_space::SessionSpaceRef;
+        use aikit_core::session_space_application::{
+            SessionSpaceAgentAttachmentIntent, SessionSpaceMutation,
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let home = AikitHome::at(dir.path().canonicalize().unwrap().join("home"));
+        home.ensure_layout().unwrap();
+        let store = SessionSpaceApplicationStore::new(home.clone());
+        let space = SessionSpaceRef::parse("session-space/settings-test").unwrap();
+        let create = SessionSpaceMutation::Create {
+            id: space.clone(),
+            label: None,
+        };
+        store.apply(&store.stage(None, create).unwrap()).unwrap();
+        let attach = SessionSpaceMutation::AttachAgentSession {
+            attachment: SessionSpaceAgentAttachmentIntent {
+                agent_session: session(),
+                purpose: Some("settings take run".into()),
+                provenance: vec!["isolated settings test".into()],
+            },
+        };
+        store
+            .apply(&store.stage(Some(&space), attach).unwrap())
+            .unwrap();
+        let record = json!({"schema": "aikit.encounter-task/v1", "revision": "task-binding/fixture",
+            "request": {"central": {"ctrl_bin": "/unused/ctrl", "central_root": "/unused/central", "project": null,
+                "task_ref": "task:fixtures", "purpose": "Write the hand-off fixtures"},
+                "provider": {"id": "take-peer", "label": "the task's agent"}, "cwd": "/unused",
+                "selected_directories": [], "authority_ref": "authority/fixture"},
+            "agency_revision": "rev/fixture", "ready": true, "allocation": null, "requirements": null,
+            "inspection": null, "cwd_anchor": null, "launcher": {"id": "task-launcher", "label": "Workcell boundary"}});
+        let path = home.state().join("encounter-tasks").join(format!(
+            "{}.json",
+            blake3::hash(session().as_str().as_bytes()).to_hex()
+        ));
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, record.to_string()).unwrap();
+        (dir, home)
+    }
+
+    #[test]
+    fn a_bound_task_reads_the_run_its_takes_share_from_the_agent_its_session_opened_on() {
+        let (_dir, home) = bound_home();
+        // Never opened: no agent to run, and the reading says so.
+        let read = EncounterService::read_session_settings(&home, &session()).unwrap();
+        assert_eq!(read["task"]["task_ref"], "task:fixtures");
+        assert_eq!(
+            read["task"]["take_run"],
+            json!({"refused": crate::encounter_take_body::NEVER_OPENED})
+        );
+        // Opened on the task's Workcell launcher: the run's agent is the task's own.
+        let store = aikit_store::encounter::EncounterStore::open(&home).unwrap();
+        store
+            .append(
+                &session(),
+                &json!({"kind": "binding", "provider": "task-launcher",
+                    "model_observation": {"current_model_id": "test/a", "available_models": [], "standing": "fixture"}}),
+            )
+            .unwrap();
+        EncounterService::configure(
+            &home,
+            crate::encounter_service::EncounterProvider {
+                protocol: Default::default(),
+                id: "take-peer".into(),
+                label: "the task's agent".into(),
+                argv: vec!["/unused/peer".into()],
+                body_ref: None,
+                body_revision: None,
+                from_profile: None,
+                argv_fallback: Vec::new(),
+                env: Default::default(),
+                cwd: None,
+                required_context: None,
+                model_policy: None,
+                now_context: None,
+            },
+        )
+        .unwrap();
+        let read = EncounterService::read_session_settings(&home, &session()).unwrap();
+        let run = &read["task"]["take_run"];
+        assert_eq!(
+            run["run"]["task"],
+            json!({"id": "task:fixtures", "prompt": "Write the hand-off fixtures", "successConditions": []}),
+            "{run}"
+        );
+        assert_eq!(
+            run["run"]["body"]["configuration"],
+            json!({"provider": "take-peer", "model": "test/a", "agent": session().as_str()})
+        );
+        assert_eq!(run["run"]["body"]["protocol"], "agent-jsonl");
+        // A model the person selected since: the takes hold that one.
+        store
+            .append(
+                &session(),
+                &json!({"kind": "provider", "event": {"Signal": {"kind": {"kind": "model-configured",
+                    "model_observation": {"current_model_id": "test/b", "available_models": [], "standing": "fixture"}}}}}),
+            )
+            .unwrap();
+        let listed = EncounterService::read_sessions_settings(&home, &[session()]).unwrap();
+        assert_eq!(
+            listed["readings"][0]["task"]["take_run"]["run"]["body"]["configuration"]["model"],
+            "test/b"
+        );
+        // A change answers the reading with the run too.
+        let written = EncounterService::write_session_settings(
+            &home,
+            &session(),
+            json!({"track": {"solo": true}}),
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            written["task"]["take_run"]["run"]["body"]["configuration"]["model"],
+            "test/b"
         );
     }
 }

@@ -38,6 +38,8 @@ pub mod direct_agent_session;
 pub mod discover;
 pub mod doctor;
 pub mod domain_activation;
+pub mod encounter_resident_turn;
+pub mod encounter_take_body;
 pub mod env;
 pub mod file_context;
 pub mod foreign;

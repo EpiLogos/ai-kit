@@ -1119,6 +1119,39 @@ impl EncounterService {
         Self::configure(home, provider.clone())?;
         Ok(provider)
     }
+    /// The agent a session opens on, as its own journal recorded it: the
+    /// provider its native body last opened with — the bound task's own
+    /// agent where that provider is the task's Workcell launcher — and the
+    /// model it was last observed on. None for a session never opened.
+    pub(crate) fn session_agent(
+        home: &AikitHome,
+        session: &ResourceRef,
+    ) -> Result<Option<crate::encounter_take_body::SessionAgent>> {
+        let service = Self::new(home.clone())?;
+        let Some(binding) = service.store.last_native_binding(session)? else {
+            return Ok(None);
+        };
+        let Some(opened) = binding["provider"].as_str() else {
+            return Ok(None);
+        };
+        let provider = crate::encounter_take_body::agent_provider(
+            opened,
+            &Self::read_task(home, session)?,
+            |id| {
+                service
+                    .providers()
+                    .is_ok_and(|rows| rows.iter().any(|row| row.id == id))
+            },
+        );
+        let model = service
+            .store
+            .last_model_observation(session)?
+            .and_then(|observation| observation["current_model_id"].as_str().map(str::to_owned));
+        Ok(Some(crate::encounter_take_body::SessionAgent {
+            provider,
+            model,
+        }))
+    }
     pub(crate) fn providers(&self) -> Result<Vec<EncounterProvider>> {
         let root = self.home.state().join("encounter-providers");
         if !root.exists() {
