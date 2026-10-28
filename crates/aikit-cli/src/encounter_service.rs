@@ -1151,6 +1151,21 @@ impl EncounterService {
     fn resident(&self, session: &ResourceRef) -> Result<Arc<Resident>> {
         self.residents.lock().map_err(error)?.get(session).cloned().ok_or_else(||error("This canonical encounter has no resident native session; explicit owner open is required"))
     }
+    /// The owner's own page of a session's journal, whatever its Telemetry
+    /// says. Telemetry off mutes `Read`, which serves a reader's poll (the
+    /// tiles, the Ledger, other agents); the task executor settling the
+    /// session's own Loop and Again is the owner reading its journal, not a
+    /// reader, so a muted track keeps working and still settles its task
+    /// (O-I #795).
+    pub(crate) fn owner_events(
+        &self,
+        session: &ResourceRef,
+        after: u64,
+        limit: usize,
+    ) -> Result<Value> {
+        self.require_attached(session)?;
+        Ok(json!(self.store.events(session, after, limit)?))
+    }
     fn require_attached(&self, session: &ResourceRef) -> Result<()> {
         if SessionSpaceApplicationStore::new(self.home.clone())
             .list()?

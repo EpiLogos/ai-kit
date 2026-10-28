@@ -55,8 +55,11 @@
 //! 4. Telemetry off mutes `Read`'s own answer for that session (an edit in
 //!    `encounter_service.rs`, not here, because that is where a reader's
 //!    poll is served) — the session keeps working; its events stop
-//!    answering a read. Solo is this module's `solo_gate`: while any session
-//!    sharing a SessionSpace has `track.solo` on, every launch this executor
+//!    answering a read. This executor's own scan is not a reader's poll: it
+//!    reads the owner's journal (`EncounterService::owner_events`), so a
+//!    muted track still settles its Loop and Again. Solo is this module's
+//!    `solo_gate`: while any session sharing a SessionSpace has
+//!    `track.solo` on, every launch this executor
 //!    would otherwise make (a loop's run, an Again) on a sibling that
 //!    is not itself soloed is refused; a human's own `Prompt` is gated the
 //!    same way, in `encounter_service.rs`.
@@ -689,7 +692,9 @@ struct TurnEnd {
 }
 
 /// A turn's end scan over this session's own event page, from the cursor the
-/// last settle left off. Returns the highest `TurnEnded` seen, if any.
+/// last settle left off. Returns the highest `TurnEnded` seen, if any. It
+/// reads the owner's journal (`owner_events`), not a reader's poll: Telemetry
+/// off mutes `Read`, and a muted track still settles its Loop and Again.
 fn last_turn_end(
     service: &EncounterService,
     session: &ResourceRef,
@@ -698,11 +703,7 @@ fn last_turn_end(
     let mut after = after;
     let mut found: Option<(u64, bool)> = None;
     loop {
-        let page = service.apply(EncounterRequest::Read {
-            agent_session: session.clone(),
-            after,
-            limit: SCAN_LIMIT,
-        })?;
+        let page = service.owner_events(session, after, SCAN_LIMIT)?;
         let events = page["events"].as_array().cloned().unwrap_or_default();
         for row in &events {
             let cursor = row["cursor"].as_u64().unwrap_or(after);
@@ -992,6 +993,82 @@ mod tests {
         )
         .unwrap();
         assert_eq!(read_state(&home, &who).unwrap().unwrap().loop_runs, 0);
+    }
+
+    /// A home with `name` attached to a retained SessionSpace, as the owner's
+    /// own reads require.
+    fn attached(name: &str) -> (tempfile::TempDir, AikitHome, ResourceRef) {
+        use aikit_core::session_space::SessionSpaceRef;
+        use aikit_core::session_space_application::{
+            SessionSpaceAgentAttachmentIntent, SessionSpaceMutation,
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let home = AikitHome::at(dir.path().canonicalize().unwrap().join("home"));
+        home.ensure_layout().unwrap();
+        let owner = SessionSpaceApplicationStore::new(home.clone());
+        let space = SessionSpaceRef::parse(&format!("session-space/{name}")).unwrap();
+        let who = session(name);
+        let create = owner
+            .stage(
+                None,
+                SessionSpaceMutation::Create {
+                    id: space.clone(),
+                    label: None,
+                },
+            )
+            .unwrap();
+        owner.apply(&create).unwrap();
+        let attach = owner
+            .stage(
+                Some(&space),
+                SessionSpaceMutation::AttachAgentSession {
+                    attachment: SessionSpaceAgentAttachmentIntent {
+                        agent_session: who.clone(),
+                        purpose: Some("task executor regression".into()),
+                        provenance: vec!["isolated executor test".into()],
+                    },
+                },
+            )
+            .unwrap();
+        owner.apply(&attach).unwrap();
+        (dir, home, who)
+    }
+
+    #[test]
+    fn a_muted_track_still_settles_its_own_turn_ends() {
+        let (_dir, home, who) = attached("muted");
+        EncounterService::write_session_settings(
+            &home,
+            &who,
+            json!({"track": {"telemetry": false}}),
+            None,
+        )
+        .unwrap();
+        aikit_store::encounter::EncounterStore::open(&home)
+            .unwrap()
+            .append(
+                &who,
+                &json!({"event": {"TurnEnded": {"agent_session": who.as_str(),
+                    "stop": {"Completed": {"stop_reason": "end_turn"}}}}}),
+            )
+            .unwrap();
+        let service = EncounterService::new(home.clone()).unwrap();
+        // A reader's poll is muted: Telemetry off withholds the events.
+        let page = service
+            .apply(EncounterRequest::Read {
+                agent_session: who.clone(),
+                after: 0,
+                limit: 16,
+            })
+            .unwrap();
+        assert_eq!(page["events"], json!([]), "a reader hears nothing");
+        // The executor's own scan is the owner settling its task, not a
+        // reader's poll: a muted track still settles its Loop and Again.
+        let end = last_turn_end(&service, &who, 0)
+            .unwrap()
+            .expect("the muted session's turn end is seen");
+        assert!(end.finished);
+        assert!(end.cursor >= 1);
     }
 
     #[test]
