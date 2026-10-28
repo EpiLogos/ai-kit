@@ -116,6 +116,9 @@ enum Command {
         provider: String,
         #[arg(long)]
         expected_model_basis: String,
+        /// The owner's generation directory a Prime body receives at final exec.
+        #[arg(long)]
+        child_message_dir: Option<String>,
     },
     /// Prepare a Central task and an exact Workcell boundary for this session.
     EncounterTaskConfigure {
@@ -172,6 +175,9 @@ enum Command {
         agent_session: String,
         #[arg(long)]
         expected_revision: String,
+        /// The owner's generation directory a Prime body receives at final exec.
+        #[arg(long)]
+        child_message_dir: Option<String>,
     },
     /// Start the native resident owner once, independently of this CLI client.
     #[cfg(unix)]
@@ -516,11 +522,13 @@ fn run(cli: Cli) -> Result<()> {
             agent_session,
             provider,
             expected_model_basis,
+            child_message_dir,
         } => crate::encounter_service::EncounterService::exec_model(
             home,
             &aikit_core::ResourceRef::parse(agent_session)?,
             &provider,
             &expected_model_basis,
+            child_message_dir.as_deref(),
         ),
         Command::EncounterTaskConfigure {
             agent_session,
@@ -647,10 +655,12 @@ fn run(cli: Cli) -> Result<()> {
         Command::EncounterTaskExec {
             agent_session,
             expected_revision,
+            child_message_dir,
         } => crate::encounter_service::EncounterService::exec_task(
             home,
             &aikit_core::ResourceRef::parse(agent_session)?,
             &aikit_core::SourceRevision::parse(expected_revision)?,
+            child_message_dir.as_deref(),
         ),
         #[cfg(unix)]
         Command::EncounterStart => emit(&crate::encounter_service::start(home, &cwd)?),
@@ -1524,6 +1534,64 @@ mod epi_prime_cli_tests {
                 Cli::try_parse_from(argv).is_err(),
                 "{omitted} must be required"
             );
+        }
+    }
+
+    #[test]
+    fn a_prime_body_behind_the_model_or_task_launcher_still_starts() {
+        // The owner's selected-model and task launchers re-exec this CLI with
+        // their own typed arguments. Prime's context must reach them as one
+        // generation directory, never as a second --agent-session.
+        let root = tempfile::tempdir().unwrap();
+        let home = AikitHome::at(root.path());
+        let session = aikit_core::ResourceRef::parse("agent-session/prime").unwrap();
+        let dir = crate::encounter_service::prime_launch::generation_dir(
+            &home,
+            &session,
+            "01JBQ3Z8M6V2Y7K9T4R5W1X0AB",
+        )
+        .unwrap();
+        for wrapper in [
+            vec![
+                "aikit-session-space",
+                "encounter-model-exec",
+                "--agent-session",
+                "agent-session/prime",
+                "--provider",
+                "epi-prime-ql",
+                "--expected-model-basis",
+                "basis",
+            ],
+            vec![
+                "aikit-session-space",
+                "encounter-task-exec",
+                "--agent-session",
+                "agent-session/prime",
+                "--expected-revision",
+                "source-revision",
+            ],
+        ] {
+            let mut argv = wrapper.iter().map(|a| a.to_string()).collect::<Vec<_>>();
+            crate::encounter_service::prime_launch::place(&mut argv, &session, &dir, true).unwrap();
+            let cli = Cli::try_parse_from(&argv)
+                .unwrap_or_else(|failure| panic!("{argv:?} must parse: {failure}"));
+            let carried = match cli.command {
+                Command::EncounterModelExec {
+                    agent_session,
+                    child_message_dir,
+                    ..
+                }
+                | Command::EncounterTaskExec {
+                    agent_session,
+                    child_message_dir,
+                    ..
+                } => {
+                    assert_eq!(agent_session, "agent-session/prime");
+                    child_message_dir
+                }
+                other => panic!("unexpected command {other:?}"),
+            };
+            assert_eq!(carried.as_deref(), dir.to_str());
         }
     }
 }
