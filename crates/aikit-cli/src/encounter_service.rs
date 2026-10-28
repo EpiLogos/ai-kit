@@ -50,6 +50,11 @@ pub use agency::{
     EncounterGroupRecipient,
 };
 
+#[path = "encounter_prime_launch.rs"]
+pub(crate) mod prime_launch;
+#[path = "encounter_prime_resume.rs"]
+mod prime_resume;
+
 #[path = "encounter_addressing.rs"]
 mod encounter_addressing;
 pub use encounter_addressing::{
@@ -1841,6 +1846,8 @@ impl EncounterService {
             && previous.as_ref().is_some_and(|p| {
                 p["cwd"] != json!(cwd)
                     || p["protocol"] != json!(configured.protocol)
+                    || p["body_ref"] != json!(configured.body_ref)
+                    || p["body_revision"] != json!(configured.body_revision)
                     || p["provider_argv_digest"]
                         != json!(blake3::hash(
                             serde_json::to_string(&configured.argv)
@@ -1887,7 +1894,14 @@ impl EncounterService {
             blake3::hash(agent_session.as_str().as_bytes()).to_hex()
         ))
         .map_err(error)?;
-        if reconnect && configured.protocol != EncounterProtocol::Acp {
+        // ACP reconnect rides session/resume; Prime's rides the owner's
+        // resolution of the recorded native session file, then switch_session.
+        if reconnect
+            && !matches!(
+                configured.protocol,
+                EncounterProtocol::Acp | EncounterProtocol::PrimeRpc
+            )
+        {
             return Err(AikitError::new(
                 "encounter.reconnect_unsupported",
                 "This native provider does not publish a supported resume operation; ACP reconnect rides the capability-gated session/resume, and this protocol has no reconnect route through the encounter service; no replacement session was created",
@@ -1953,26 +1967,13 @@ impl EncounterService {
         // journal. It carries words, never effects; each file is one bounded
         // record the child wrote through its inherited skill, correlated to
         // the child's locus digest like every faculty receipt.
+        // AIKit's model/task wrappers carry their own typed arguments: they
+        // are told the generation directory and hand Prime its native context
+        // at their admitted final exec seam.
+        let through_wrapper = model.is_some() || task_bound;
         let child_message_dir = if configured.protocol == EncounterProtocol::PrimeRpc {
-            launch_argv.extend(["--agent-session".into(), agent_session.to_string()]);
-            let dir = self
-                .home
-                .state()
-                .join("encounter-child-messages")
-                .join(
-                    blake3::hash(agent_session.as_str().as_bytes())
-                        .to_hex()
-                        .to_string(),
-                )
-                .join(&generation);
-            std::fs::create_dir_all(&dir).map_err(error)?;
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700))
-                    .map_err(error)?;
-            }
-            launch_argv.extend(["--child-message-dir".into(), dir.display().to_string()]);
+            let dir = prime_launch::generation_dir(&self.home, &agent_session, &generation)?;
+            prime_launch::place(&mut launch_argv, &agent_session, &dir, through_wrapper)?;
             Some(dir)
         } else {
             None
@@ -1984,6 +1985,27 @@ impl EncounterService {
         // and take no environment from this spawn.
         let launch_environment = if model.is_none() && !task_bound {
             agency::model::profile_environment(&self.home, &agent_session, &configured)?
+        } else {
+            None
+        };
+        // Prime resume is the owner's: the recorded native session file is
+        // located through the installed body's own configuration before any
+        // replacement transport starts, and the adapter then switches to it.
+        let prime_resume_target = if reconnect && configured.protocol == EncounterProtocol::PrimeRpc
+        {
+            let native = previous
+                .as_ref()
+                .and_then(|p| p["native_session_id"].as_str())
+                .ok_or_else(|| error("Prior native session identity is missing"))?;
+            // Selected-model/task launchers re-exec AIKit and do not expose
+            // --prime-bin. Resolve their already-admitted native body through
+            // the same execution seam used at that final exec boundary.
+            let (native_argv, native_environment) =
+                agency::model::execution(&self.home, &agent_session, &body_provider)?;
+            Some((
+                native.to_owned(),
+                prime_resume::locate(&native_argv, native, &cwd, native_environment.as_ref())?,
+            ))
         } else {
             None
         };
@@ -2103,14 +2125,19 @@ impl EncounterService {
             for argv in &configured.argv_fallback {
                 let mut variant = configured.clone();
                 variant.argv = argv.clone();
-                launch_variants.push(crate::model_defaults::launch_argv(
+                let mut argv = crate::model_defaults::launch_argv(
                     &variant,
                     if task_bound {
                         None
                     } else {
                         launch_default.as_ref()
                     },
-                )?);
+                )?;
+                // A declared variant is the same launcher: the same context.
+                if let Some(dir) = &child_message_dir {
+                    prime_launch::place(&mut argv, &agent_session, dir, through_wrapper)?;
+                }
+                launch_variants.push(argv);
             }
         }
         let single_variant = launch_variants.len() == 1;
@@ -2168,6 +2195,12 @@ impl EncounterService {
                                 cwd.to_string_lossy().into_owned(),
                                 provenance.clone(),
                             );
+                            let adapter = match &prime_resume_target {
+                                Some((id, path)) => {
+                                    adapter.with_resume_target(id.clone(), path.clone())?
+                                }
+                                None => adapter,
+                            };
                             match &model {
                                 Some(model) => adapter.with_selected_model(
                                     &model.policy.native_provider,

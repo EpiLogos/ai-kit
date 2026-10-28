@@ -856,6 +856,7 @@ impl EncounterService {
         session: &ResourceRef,
         provider_id: &str,
         expected: &str,
+        child_message_dir: Option<&str>,
     ) -> Result<()> {
         let service = Self::new(home.clone())?;
         service.require_attached(session)?;
@@ -886,7 +887,14 @@ impl EncounterService {
                 }),
             )?;
         }
-        let (argv, environment) = (resolved.argv, resolved.environment);
+        let (mut argv, environment) = (resolved.argv, resolved.environment);
+        crate::encounter_service::prime_launch::final_exec(
+            provider.protocol,
+            home,
+            session,
+            child_message_dir,
+            &mut argv,
+        )?;
         let (program, args) = argv
             .split_first()
             .ok_or_else(|| error("Missing native model executable"))?;

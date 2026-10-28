@@ -1223,6 +1223,7 @@ impl EncounterService {
         home: &AikitHome,
         session: &ResourceRef,
         expected: &SourceRevision,
+        child_message_dir: Option<&str>,
     ) -> Result<()> {
         let record = read(home, session)?
             .ok_or_else(|| error("Task binding removed; refusing provider start"))?;
@@ -1299,6 +1300,13 @@ impl EncounterService {
         if resolved_body.protocol == EncounterProtocol::PiRpc {
             pin_task_pi_repertoire(home, session, &record.request, &mut model_argv)?;
         }
+        crate::encounter_service::prime_launch::final_exec(
+            resolved_body.protocol,
+            home,
+            session,
+            child_message_dir,
+            &mut model_argv,
+        )?;
         let codex_runtime = task_codex_runtime(&record, &resolved_body, &model_argv)?;
         // Only nonsecret routing/type facts enter this private immutable launch
         // source. It lives with the existing requirements owner, outside Task T.
