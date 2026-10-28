@@ -788,6 +788,7 @@ fn knowledge_route(command: &KnowledgeSub) -> &'static str {
         KnowledgeSub::Impact(_) => "cmd_knowledge_impact",
         KnowledgeSub::Reflection(c) => match &c.command {
             KnowledgeReflectionSub::Verify(_) => "cmd_knowledge_reflection_verify",
+            KnowledgeReflectionSub::Laws => "cmd_knowledge_reflection_laws",
         },
         KnowledgeSub::Forget(c) => match &c.command {
             KnowledgeForgetSub::Destination(_) => "cmd_knowledge_forget_destination",
@@ -3632,6 +3633,10 @@ pub enum KnowledgeReflectionSub {
     /// against the ProjectMap's explicit bindings: passed, and each issue
     /// (missing, wrong-relation, duplicate, stale, constitutive-flattening).
     Verify(KnowledgeReflectionVerifyArgs),
+    /// The reflection laws this project declares (one `ReflectionLaw` per
+    /// JSON file in its `.aikit/reflection-laws/`), each as written, and each
+    /// file there that is not a law with why. Reads no ProjectMap.
+    Laws,
 }
 
 #[derive(Debug, Args)]
@@ -3684,7 +3689,8 @@ pub enum KnowledgeSub {
     /// records nothing.
     Impact(KnowledgeImpactArgs),
     /// Verify a target-owned reflection law against the explicit bindings of
-    /// this project's ProjectMap. Records nothing.
+    /// this project's ProjectMap, or list the laws the project declares.
+    /// Records nothing.
     Reflection(KnowledgeReflectionCmd),
     Forget(KnowledgeForgetCmd),
     /// Call the GitNexus-backed code lens directly, with the same provenance
