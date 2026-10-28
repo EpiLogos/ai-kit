@@ -27,11 +27,16 @@
 //!    person stopped (the track's Stop, the Thread's) or that failed ends the
 //!    task where it stands, and the activator off launches nothing. After a
 //!    finish, Loop runs first: while it is on, the executor resubmits the
-//!    task's own name/purpose as a fresh turn, until the cap (the most runs,
-//!    the first launch included). Loop's stop condition (Task done, Test
-//!    pass) is kept with it, but no reading of a task's done or a test's pass
-//!    reaches this executor, so it judges neither: a loop ends at its cap, at
-//!    a turn that does not finish, or with the activator off. Once the loop
+//!    task's own name/purpose as a fresh turn, "until its stop condition or
+//!    the cap" (DLW.md, The Clip panel: Loop), the cap being the most runs,
+//!    the first launch included. The stop condition is read from its owners
+//!    (`loop_stop`): AIKit's record of the attempts the task serves names
+//!    the latest, and the Software Factory's reading of it
+//!    (`factory attempt return --json`) says Task done (Factory admitted
+//!    its readable Return) or Test pass (its latest verification passed).
+//!    A task that serves no attempt, or a Factory that does not answer, has
+//!    no verdict: its loop runs on to its cap. A loop also ends at a turn
+//!    that does not finish, or with the activator off. Once the loop
 //!    is spent (or off), Then follows: `again` launches the task afresh, its
 //!    loop counted over; `stop` does nothing further; and `next` — "the next
 //!    task" — is a no-op here: this record names one bound task, never a
@@ -298,12 +303,20 @@ enum AfterTurn {
 
 /// The task's own decision at a turn's end (see the module doc): `loop_runs`
 /// are the runs its loop has already launched, so with a cap the task has
-/// run `loop_runs + 1` times.
-fn after_turn(active: bool, task: &Value, finished: bool, loop_runs: u32) -> AfterTurn {
+/// run `loop_runs + 1` times. `stop_met` is Loop's stop condition as its
+/// owner reads it (`loop_stop`): once met, the loop ends and Then follows.
+fn after_turn(
+    active: bool,
+    task: &Value,
+    finished: bool,
+    loop_runs: u32,
+    stop_met: bool,
+) -> AfterTurn {
     if !active || !finished {
         return AfterTurn::Rest;
     }
     if task["loop"].as_bool() == Some(true)
+        && !stop_met
         && task["loop_cap"]
             .as_u64()
             .is_none_or(|cap| u64::from(loop_runs) + 1 < cap)
@@ -315,6 +328,110 @@ fn after_turn(active: bool, task: &Value, finished: bool, loop_runs: u32) -> Aft
         _ => AfterTurn::Rest,
     }
 }
+
+// ------------------------------------------------------------- Loop's stop condition
+
+/// Factory's reading of one attempt's Return, the contract Loop's stop
+/// condition is read from (`factory attempt return STATE RUN ATTEMPT --json`).
+const ATTEMPT_RETURN_READING: &str = "factory.attempt-return-reading/v1";
+
+/// Where Loop's stop condition is read: the Software Factory, which owns the
+/// attempts a task serves and their verdicts. AIKit's own record of the
+/// attempts the task serves (`encounter-task-attempts`) names which attempt,
+/// in which Run and Factory state; Factory says whether it is done or passed.
+pub(crate) trait LoopVerdicts {
+    /// Factory's reading of `attempt_ref`'s Return in `run_ref`.
+    fn attempt_return(&self, state_path: &str, run_ref: &str, attempt_ref: &str) -> Result<Value>;
+}
+
+/// Whether Factory's reading of an attempt meets Loop's stop condition:
+/// Task done when Factory has admitted the attempt's readable Return; Test
+/// pass when the attempt's latest verification passed. A reading that is not
+/// Factory's attempt Return meets neither.
+fn loop_condition_met(until: &str, reading: &Value) -> bool {
+    if reading["contract"] != ATTEMPT_RETURN_READING {
+        return false;
+    }
+    let record = &reading["attempt"]["record"];
+    match until {
+        "done" => record.get("readableReturn").is_some_and(Value::is_object),
+        "pass" => record["verifications"]
+            .as_array()
+            .and_then(|verdicts| verdicts.last())
+            .is_some_and(|latest| latest["outcome"] == "passed"),
+        _ => false,
+    }
+}
+
+/// Loop's stop condition for the bound task (`task.loop_until`), read from
+/// its owners: the latest attempt the task serves (`attempts`, AIKit's
+/// `encounter-task-attempts` reading) and Factory's verdict on it. `Ok(false)`
+/// when the task serves no attempt yet; `Err` when Factory did not answer.
+fn loop_stop(task: &Value, attempts: &Value, verdicts: &dyn LoopVerdicts) -> Result<bool> {
+    let until = task["loop_until"].as_str().unwrap_or("done");
+    // The record keeps the attempts in the order their dispatcher recorded
+    // them: the last is the one the task serves now.
+    let Some(latest) = attempts["attempts"].as_array().and_then(|rows| rows.last()) else {
+        return Ok(false);
+    };
+    let field = |key: &str| {
+        latest[key]
+            .as_str()
+            .filter(|text| !text.is_empty())
+            .ok_or_else(|| error(format!("The task's attempt names no {key}")))
+    };
+    let reading = verdicts.attempt_return(
+        field("state_path")?,
+        field("run_ref")?,
+        field("attempt_ref")?,
+    )?;
+    Ok(loop_condition_met(until, &reading))
+}
+
+/// The Software Factory installed here, asked through its own CLI with the
+/// suite's override (`FACTORY_BIN`, `OI_FACTORY_BIN`) before PATH.
+struct FactoryVerdicts {
+    factory: String,
+}
+
+impl FactoryVerdicts {
+    fn from_env() -> Self {
+        Self {
+            factory: crate::inhabitation::OwnerBins::from_env().factory,
+        }
+    }
+}
+
+impl LoopVerdicts for FactoryVerdicts {
+    fn attempt_return(&self, state_path: &str, run_ref: &str, attempt_ref: &str) -> Result<Value> {
+        use aikit_adapters::runner::SystemRunner;
+        let mut command = std::process::Command::new(&self.factory);
+        command.args([
+            "attempt",
+            "return",
+            state_path,
+            run_ref,
+            attempt_ref,
+            "--json",
+        ]);
+        let output = SystemRunner::new()
+            .with_timeout(FACTORY_READ_LIMIT)
+            .with_output_limit_bytes(4 * 1024 * 1024)
+            .capture_command(&mut command)?;
+        if !output.ok() {
+            return Err(error(format!(
+                "Factory did not read attempt {attempt_ref}: {}",
+                output.stderr.trim()
+            )));
+        }
+        serde_json::from_str(&output.stdout)
+            .map_err(|e| error(format!("Factory's attempt reading is unreadable: {e}")))
+    }
+}
+
+/// Factory answers a reading of its own state; the bound is for a Factory
+/// that never answers, not a pace.
+const FACTORY_READ_LIMIT: Duration = Duration::from_secs(15);
 
 /// A turn's end is a finish when it completed; a cancelled or failed turn is
 /// not (`aikit_store` encounter.rs reads the same `TurnEnded` stop).
@@ -408,10 +525,11 @@ pub fn solo_gate(home: &AikitHome, session: &ResourceRef) -> Result<()> {
 /// state: every act here goes through `EncounterService::apply` alone.
 pub fn spawn_worker(service: &Arc<EncounterService>, home: AikitHome) {
     let weak = Arc::downgrade(service);
+    let verdicts = FactoryVerdicts::from_env();
     std::thread::spawn(move || loop {
         std::thread::sleep(SWEEP_INTERVAL);
         let Some(service) = weak.upgrade() else { break };
-        sweep(&service, &home);
+        sweep(&service, &home, &verdicts);
     });
 }
 
@@ -426,14 +544,14 @@ fn known_sessions(home: &AikitHome) -> Result<Vec<ResourceRef>> {
     Ok(sessions)
 }
 
-fn sweep(service: &EncounterService, home: &AikitHome) {
+fn sweep(service: &EncounterService, home: &AikitHome, verdicts: &dyn LoopVerdicts) {
     let Ok(sessions) = known_sessions(home) else {
         return;
     };
     for session in sessions {
         // Idempotent and self-contained: a failure here (not resident, no
         // task bound, a refused native call) is simply retried next sweep.
-        let _ = settle_session(service, home, &session);
+        let _ = settle_session(service, home, &session, verdicts);
     }
 }
 
@@ -441,6 +559,7 @@ fn settle_session(
     service: &EncounterService,
     home: &AikitHome,
     session: &ResourceRef,
+    verdicts: &dyn LoopVerdicts,
 ) -> Result<()> {
     let reading = EncounterService::read_session_settings(home, session)?;
     let Some(task) = reading.get("task").filter(|t| !t.is_null()) else {
@@ -497,7 +616,7 @@ fn settle_session(
     if active {
         play_envelopes(service, session, task, &identity, &mut state);
     }
-    settle_turn_end(service, home, session, task, active, &mut state)?;
+    settle_turn_end(service, home, session, task, active, verdicts, &mut state)?;
     publish_state(home, session, &state)
 }
 
@@ -728,6 +847,7 @@ fn settle_turn_end(
     session: &ResourceRef,
     task: &Value,
     active: bool,
+    verdicts: &dyn LoopVerdicts,
     state: &mut ExecutorState,
 ) -> Result<()> {
     let Some(turn_end) = last_turn_end(service, session, state.settled_through_cursor)? else {
@@ -743,7 +863,16 @@ fn settle_turn_end(
     state.settled_through_cursor = turn_end.scanned_through;
 
     let name = task["name"].as_str().unwrap_or("this task");
-    let after = after_turn(active, task, turn_end.finished, state.loop_runs);
+    // Loop's stop condition is read only where it decides anything: a looping
+    // task's finish. Factory not answering reads as not met, so the loop runs
+    // on to its cap, as every loop did before a verdict reached it.
+    let stop_met = active
+        && turn_end.finished
+        && task["loop"].as_bool() == Some(true)
+        && EncounterService::read_task_attempts(home, session)
+            .and_then(|attempts| loop_stop(task, &attempts, verdicts))
+            .unwrap_or(false);
+    let after = after_turn(active, task, turn_end.finished, state.loop_runs, stop_met);
     let launched = after != AfterTurn::Rest
         && solo_gate(home, session).is_ok()
         && resubmit(service, session, name).is_ok();
@@ -860,49 +989,200 @@ mod tests {
         };
         // Loop on, no cap: each finish runs the task again while the activator is on.
         let looped = task(json!({"loop": true}));
-        assert_eq!(after_turn(true, &looped, true, 0), AfterTurn::Loop);
-        assert_eq!(after_turn(true, &looped, true, 500), AfterTurn::Loop);
+        assert_eq!(after_turn(true, &looped, true, 0, false), AfterTurn::Loop);
+        assert_eq!(after_turn(true, &looped, true, 500, false), AfterTurn::Loop);
         // The cap is the most runs, the first launch included: cap 3 runs the loop twice more.
         let capped = task(json!({"loop": true, "loop_cap": 3}));
-        assert_eq!(after_turn(true, &capped, true, 0), AfterTurn::Loop);
-        assert_eq!(after_turn(true, &capped, true, 1), AfterTurn::Loop);
-        assert_eq!(after_turn(true, &capped, true, 2), AfterTurn::Rest);
+        assert_eq!(after_turn(true, &capped, true, 0, false), AfterTurn::Loop);
+        assert_eq!(after_turn(true, &capped, true, 1, false), AfterTurn::Loop);
+        assert_eq!(after_turn(true, &capped, true, 2, false), AfterTurn::Rest);
         assert_eq!(
-            after_turn(true, &task(json!({"loop": true, "loop_cap": 1})), true, 0),
+            after_turn(
+                true,
+                &task(json!({"loop": true, "loop_cap": 1})),
+                true,
+                0,
+                false
+            ),
             AfterTurn::Rest
         );
         // Once the loop is spent, Then follows: Again launches the task afresh; Next task and Stop
         // launch nothing here (no queue of tasks to advance to).
         let again = task(json!({"loop": true, "loop_cap": 2, "then": "again"}));
-        assert_eq!(after_turn(true, &again, true, 1), AfterTurn::Again);
+        assert_eq!(after_turn(true, &again, true, 1, false), AfterTurn::Again);
         assert_eq!(
-            after_turn(true, &task(json!({"then": "again"})), true, 0),
+            after_turn(true, &task(json!({"then": "again"})), true, 0, false),
             AfterTurn::Again
         );
         assert_eq!(
-            after_turn(true, &task(json!({"then": "stop"})), true, 0),
+            after_turn(true, &task(json!({"then": "stop"})), true, 0, false),
             AfterTurn::Rest
         );
-        assert_eq!(after_turn(true, &task(json!({})), true, 0), AfterTurn::Rest);
+        assert_eq!(
+            after_turn(true, &task(json!({})), true, 0, false),
+            AfterTurn::Rest
+        );
         // The activator off, or a turn that did not finish (a Stop, a failure), launches nothing.
-        assert_eq!(after_turn(false, &looped, true, 0), AfterTurn::Rest);
+        assert_eq!(after_turn(false, &looped, true, 0, false), AfterTurn::Rest);
         assert_eq!(
-            after_turn(false, &task(json!({"then": "again"})), true, 0),
+            after_turn(false, &task(json!({"then": "again"})), true, 0, false),
             AfterTurn::Rest
         );
-        assert_eq!(after_turn(true, &looped, false, 0), AfterTurn::Rest);
+        assert_eq!(after_turn(true, &looped, false, 0, false), AfterTurn::Rest);
         assert_eq!(
-            after_turn(true, &task(json!({"then": "again"})), false, 0),
+            after_turn(true, &task(json!({"then": "again"})), false, 0, false),
             AfterTurn::Rest
         );
         // Launch mode is how a press starts and stops the task: no mode runs it again by itself.
         for launch in ["trigger", "gate", "toggle", "repeat"] {
             assert_eq!(
-                after_turn(true, &task(json!({"launch": launch})), true, 0),
+                after_turn(true, &task(json!({"launch": launch})), true, 0, false),
                 AfterTurn::Rest,
                 "{launch}"
             );
         }
+    }
+
+    /// Factory's reading of one attempt's Return, as `factory attempt return
+    /// --json` answers it (Factory attempt_task.rs read_return, attempt_view):
+    /// the record in Factory's own camelCase.
+    fn factory_return(record: Value) -> Value {
+        json!({"contract": "factory.attempt-return-reading/v1", "runRef": "run:R1",
+            "attempt": {"standing": "current-attempt", "status": "active", "record": record}})
+    }
+
+    #[test]
+    fn task_done_is_factorys_admitted_return_and_test_pass_its_latest_verification() {
+        let verdict = |outcome: &str| {
+            json!({"verificationRef": format!("verification:{outcome}"), "ownerRef": "factory",
+                "sourceRevision": "r1", "outcome": outcome, "obligations": [], "evidenceRefs": ["e:1"]})
+        };
+        let open = factory_return(json!({"attemptRef": "attempt:A1", "verifications": []}));
+        let returned = factory_return(json!({"attemptRef": "attempt:A1", "verifications": [],
+            "readableReturn": {"returnRef": "return:R1", "summary": "Done", "artifactRefs": [], "evidenceRefs": []}}));
+        let passed = factory_return(json!({"attemptRef": "attempt:A1",
+            "verifications": [verdict("failed"), verdict("passed")]}));
+        let failed_last = factory_return(json!({"attemptRef": "attempt:A1",
+            "verifications": [verdict("passed"), verdict("failed")]}));
+        assert!(
+            loop_condition_met("done", &returned),
+            "an admitted Return is Task done"
+        );
+        assert!(
+            !loop_condition_met("done", &open),
+            "no Return yet: not done"
+        );
+        assert!(
+            !loop_condition_met("done", &passed),
+            "a pass is not a Return"
+        );
+        assert!(
+            loop_condition_met("pass", &passed),
+            "the latest verification passed"
+        );
+        assert!(
+            !loop_condition_met("pass", &failed_last),
+            "an earlier pass does not stand"
+        );
+        assert!(
+            !loop_condition_met("pass", &open),
+            "no verification: no pass"
+        );
+        assert!(
+            !loop_condition_met("pass", &returned),
+            "a Return is not a pass"
+        );
+        // Only Factory's attempt Return reading is judged.
+        let mut other = returned.clone();
+        other["contract"] = json!("factory.attempt-task-reading/v1");
+        assert!(!loop_condition_met("done", &other));
+        assert!(!loop_condition_met("never", &returned));
+    }
+
+    /// Factory as the test scripts it: the readings it answers, by attempt,
+    /// and every call it was asked.
+    struct ScriptedFactory {
+        answers: std::collections::BTreeMap<String, Value>,
+        asked: std::cell::RefCell<Vec<(String, String, String)>>,
+    }
+    impl LoopVerdicts for ScriptedFactory {
+        fn attempt_return(&self, state: &str, run: &str, attempt: &str) -> Result<Value> {
+            self.asked
+                .borrow_mut()
+                .push((state.into(), run.into(), attempt.into()));
+            self.answers
+                .get(attempt)
+                .cloned()
+                .ok_or_else(|| error("Factory: attempt not retained"))
+        }
+    }
+
+    #[test]
+    fn a_loop_reads_its_stop_from_the_latest_attempt_the_task_serves() {
+        let attempt = |n: u32| {
+            json!({"task_ref": "task:fixtures", "attempt_ref": format!("attempt:A{n}"),
+                "run_ref": "run:R1", "state_path": "/factory/state.json", "workflow_unit": null,
+                "recorded_by": "factory", "recorded_at_unix_ms": n})
+        };
+        let attempts = json!({"schema": "aikit.encounter-task-attempts/v1", "task_ref": "task:fixtures",
+            "attempts": [attempt(1), attempt(2)], "earlier": []});
+        let factory = ScriptedFactory {
+            answers: [
+                (
+                    "attempt:A1".to_string(),
+                    factory_return(json!({"verifications": [],
+                    "readableReturn": {"returnRef": "return:old", "summary": "old"}})),
+                ),
+                (
+                    "attempt:A2".to_string(),
+                    factory_return(json!({"verifications": []})),
+                ),
+            ]
+            .into(),
+            asked: Default::default(),
+        };
+        let done = json!({"loop": true, "loop_until": "done"});
+        // The latest attempt (A2) has no Return yet: the earlier one's does not end the loop.
+        assert!(!loop_stop(&done, &attempts, &factory).unwrap());
+        assert_eq!(
+            factory.asked.borrow().last().unwrap(),
+            &(
+                "/factory/state.json".to_string(),
+                "run:R1".to_string(),
+                "attempt:A2".to_string()
+            )
+        );
+        let returned = ScriptedFactory {
+            answers: [(
+                "attempt:A2".to_string(),
+                factory_return(json!({"verifications": [],
+                    "readableReturn": {"returnRef": "return:new", "summary": "new"}})),
+            )]
+            .into(),
+            asked: Default::default(),
+        };
+        assert!(loop_stop(&done, &attempts, &returned).unwrap());
+        assert!(!loop_stop(
+            &json!({"loop": true, "loop_until": "pass"}),
+            &attempts,
+            &returned
+        )
+        .unwrap());
+        // A task that serves no attempt has no verdict yet: the loop runs on to its cap.
+        let none = json!({"attempts": [], "earlier": [attempt(1)]});
+        assert!(!loop_stop(&done, &none, &returned).unwrap());
+        // Factory not answering is said, never read as a verdict.
+        let silent = ScriptedFactory {
+            answers: Default::default(),
+            asked: Default::default(),
+        };
+        assert!(loop_stop(&done, &attempts, &silent).is_err());
+        // The stop condition decides the loop: met, the loop ends and Then follows.
+        let looped = json!({"loop": true, "loop_until": "done", "loop_cap": null, "then": "next"});
+        assert_eq!(after_turn(true, &looped, true, 0, true), AfterTurn::Rest);
+        let again = json!({"loop": true, "loop_until": "pass", "loop_cap": 9, "then": "again"});
+        assert_eq!(after_turn(true, &again, true, 3, true), AfterTurn::Again);
+        assert_eq!(after_turn(true, &again, true, 3, false), AfterTurn::Loop);
     }
 
     #[test]
