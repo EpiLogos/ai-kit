@@ -128,19 +128,31 @@ Without `--request-json` it reads `aikit.encounter-session-settings/v1`: the
 track's `telemetry` (on by default) and `solo` (off), and for the bound task its
 `name` (its purpose until named), `colour` (null takes the session's), `active`,
 `register` (plain · warm · terse), `form` (technical · narrative · list),
-`launch` (once · hold · loop), `then` (next · handoff · stop), `handoff_to` (an
-agent session), `quantize` (global · now · next-tool · next-turn),
-`envelope_mode` (automation · modulation), `envelope_linked`, and the `effort`
-and `autonomy` envelopes as `[[second, value]…]` along the task's time: level
-words under Automation (an empty envelope inherits the session's value), steps
-from −2 to +2 under Modulation. Each part lists what the person `set`; every
-other value is the stated default.
+`loop` (off by default) with its stop condition `loop_until` (done · pass) and
+its `loop_cap` (1–1000 runs, the first launch included; null sets none),
+`launch` (trigger · gate · toggle · repeat), `then` (next · again · stop),
+`quantize` (global · now · next-tool · next-turn), what a Repeat varies —
+`repeat_variable` (condition · model · effort · skillset · budget · autonomy),
+`repeat_levels` (1–3 distinct values; empty until chosen; effort and autonomy
+levels are those settings' own words), `repeat_repeats` (1–32, 3 by default)
+and `repeat_stop` (turns · time · done · pass) — `envelope_mode` (automation ·
+modulation), `envelope_linked`, and the `effort` and `autonomy` envelopes as
+`[[second, value]…]` along the task's time: level words under Automation (an
+empty envelope inherits the session's value), steps from −2 to +2 under
+Modulation. Each part lists what the person `set`; every other value is the
+stated default. These are the manual's words for the Clip and Launch panels.
+`handoff_to` and Then's `handoff` are retired: to hand the work to another
+session, the task is dragged onto that session's track. Settings stored in the
+earlier words read in these: `once` as trigger, `hold` as gate with `loop` on,
+`loop` as trigger with `loop` on (both ran the task again after each finish
+while it was active), `handoff` as stop, and `handoff_to` dropped; the next
+write publishes them.
 
 A change names what moves, `null` returning a field to its default:
 
 ```json
 {"track": {"telemetry": false},
- "task": {"task_ref": "task:example", "set": {"launch": "loop", "effort": [[0, "high"]]}}}
+ "task": {"task_ref": "task:example", "set": {"loop": true, "loop_cap": 5, "effort": [[0, "high"]]}}}
 ```
 
 It is made against the revision that stands (absent while the session has none)
