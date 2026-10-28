@@ -79,7 +79,7 @@
 //! applying the wrong level. Modulation's steps (−2…+2) move an index into
 //! whatever the resident actually advertises, off a baseline captured once
 //! when the executor first sees the task bound and active — never off the
-//! advertised `current_value`, which would drift as the executor's own
+//! advertised `currentValue`, which would drift as the executor's own
 //! selections land.
 //!
 //! Autonomy has no such shared vocabulary: its words
@@ -258,10 +258,16 @@ fn modulation_step_at(points: &[Value], seconds: f64) -> i64 {
 
 /// Autonomy's own words, least to most autonomous. `inherit` carries no
 /// position: the executor never selects a mode for it.
-const AUTONOMY_WORDS: [&str; 3] = ["suggest", "review", "auto"];
+pub(crate) const AUTONOMY_WORDS: [&str; 3] = ["suggest", "review", "auto"];
 
-fn autonomy_word_rank(word: &str) -> Option<usize> {
+pub(crate) fn autonomy_word_rank(word: &str) -> Option<usize> {
     AUTONOMY_WORDS.iter().position(|w| *w == word)
+}
+
+/// The value a provider-advertised select control stands at, read as the
+/// native observation serializes it (`NativeConfigSelector`).
+pub(crate) fn selector_current(selector: &Value) -> Option<&str> {
+    selector["currentValue"].as_str()
 }
 
 /// Place rank `rank` of `ranks` evenly across `options` (both at least 1):
@@ -271,7 +277,7 @@ fn autonomy_word_rank(word: &str) -> Option<usize> {
 /// Modulation's steps (onto whatever the resident advertises for the moved
 /// envelope) are placed by; see the module doc for why neither has a named
 /// one to use instead.
-fn proportional_index(rank: usize, ranks: usize, options: usize) -> Option<usize> {
+pub(crate) fn proportional_index(rank: usize, ranks: usize, options: usize) -> Option<usize> {
     if ranks == 0 || options == 0 {
         return None;
     }
@@ -694,7 +700,7 @@ fn play_effort(
         let baseline = match &state.baseline_effort {
             Some(baseline) => baseline.clone(),
             None => {
-                let current = selector["current_value"].as_str().map(str::to_string);
+                let current = selector_current(selector).map(str::to_string);
                 state.baseline_effort = current.clone();
                 match current {
                     Some(current) => current,
@@ -938,6 +944,20 @@ mod tests {
         assert_eq!(modulation_step_at(points, 30.0), 1);
         assert_eq!(modulation_step_at(points, 61.0), -2);
         assert_eq!(modulation_step_at(&[], 5.0), 0);
+    }
+
+    #[test]
+    fn a_selectors_current_value_is_read_as_the_observation_serializes_it() {
+        // Effort's Modulation baseline is this reading: read under another
+        // name it is never captured, and Modulation never plays.
+        let selector =
+            serde_json::to_value(aikit_adapters::agent_connection::NativeConfigSelector {
+                config_id: "reasoning_effort".into(),
+                current_value: "medium".into(),
+                options: vec![],
+            })
+            .unwrap();
+        assert_eq!(selector_current(&selector), Some("medium"));
     }
 
     #[test]

@@ -37,6 +37,8 @@
 //! Nothing here runs by itself: no timer, no daemon, no routine. The native
 //! host's visible runner calls `aikit work day-move due`, and the person's
 //! pad calls `aikit work day-move run`.
+#[cfg(unix)]
+use crate::encounter_resident_turn::{OwnerError, ResidentOwner, SubmitStage, TurnWords};
 use crate::encounter_service::EncounterRequest;
 use aikit_adapters::runner::{CommandRunner, SystemRunner};
 use aikit_core::session_space::SessionSpaceRef;
@@ -351,34 +353,21 @@ impl DayAgent for ResidentDayAgent {
     }
 }
 
+/// The words the Day's turns speak in (`encounter_resident_turn.rs`).
 #[cfg(unix)]
-struct OwnerError {
-    code: String,
-    message: String,
-}
+const DAY_TURN: TurnWords<'static> = TurnWords {
+    session: "the Day's session",
+    act: "a Day move",
+};
 
 #[cfg(unix)]
 impl ResidentDayAgent {
     fn owner(&self, request: &EncounterRequest) -> std::result::Result<Value, OwnerError> {
-        let socket = crate::encounter_service::socket_path(&self.home);
-        let response =
-            crate::encounter_service::request(&socket, request).map_err(|error| OwnerError {
-                code: error.code().to_owned(),
-                message: error.message().to_owned(),
-            })?;
-        if response["ok"] != true {
-            return Err(OwnerError {
-                code: response["error"]["code"]
-                    .as_str()
-                    .unwrap_or("encounter.refused")
-                    .to_owned(),
-                message: response["error"]["message"]
-                    .as_str()
-                    .unwrap_or("the encounter owner refused the request")
-                    .to_owned(),
-            });
-        }
-        Ok(response["data"].clone())
+        self.resident().call(request)
+    }
+
+    fn resident(&self) -> ResidentOwner {
+        ResidentOwner::at(crate::encounter_service::socket_path(&self.home))
     }
 
     fn failed(what: &str, error: OwnerError) -> TurnFailure {
@@ -461,22 +450,6 @@ impl ResidentDayAgent {
         Ok((space, session))
     }
 
-    /// The journal's last cursor now: the turn's events are the ones after it.
-    fn tail(&self, session: &ResourceRef) -> std::result::Result<u64, OwnerError> {
-        let mut after = 0;
-        loop {
-            let page = self.owner(&EncounterRequest::Read {
-                agent_session: session.clone(),
-                after,
-                limit: 256,
-            })?;
-            after = page["next_cursor"].as_u64().unwrap_or(after);
-            if page["more"] != true {
-                return Ok(after);
-            }
-        }
-    }
-
     fn take_turn(&self, world_ref: &str, prompt: &str) -> std::result::Result<String, TurnFailure> {
         // The Day has one agent session and it takes one turn at a time: a second
         // move waits for the first (its run shows running meanwhile) rather than
@@ -532,108 +505,28 @@ impl ResidentDayAgent {
             Err(error) => return Err(Self::failed("the Day's session could not be opened", error)),
         }
         let baseline = self
-            .tail(&session)
-            .map_err(|error| Self::failed("the Day's session could not be read", error))?;
-        let page = self
-            .owner(&EncounterRequest::Read {
-                agent_session: session.clone(),
-                after: baseline,
-                limit: 1,
-            })
-            .map_err(|error| Self::failed("the Day's session could not be read", error))?;
-        let drafted = self
-            .owner(&EncounterRequest::Draft {
-                agent_session: session.clone(),
-                basis: page["draft"]["revision"].as_u64().unwrap_or(0),
-                text: prompt.to_owned(),
-            })
-            .map_err(|error| Self::failed("the move's prompt could not be drafted", error))?;
-        let revision = drafted["revision"].as_u64().ok_or_else(|| {
-            TurnFailure::Failed("the encounter owner did not answer a draft revision".into())
-        })?;
-        self.owner(&EncounterRequest::Prompt {
-            agent_session: session.clone(),
-            draft_revision: revision,
-        })
-        .map_err(|error| Self::failed("the move's prompt was not accepted", error))?;
-        self.await_answer(&session, baseline)
-    }
-
-    /// Read the session's journal from `after` until the turn ends; the answer is
-    /// the text the agent said. A turn that asks for a tool's permission is
-    /// cancelled: a Day move takes no tool.
-    fn await_answer(
-        &self,
-        session: &ResourceRef,
-        after: u64,
-    ) -> std::result::Result<String, TurnFailure> {
-        let deadline = std::time::Instant::now() + self.timeout;
-        let cancel = |reason: &str| {
-            let _ = self.owner(&EncounterRequest::Cancel {
-                agent_session: session.clone(),
-                reason: Some(reason.to_owned()),
-            });
-        };
-        let mut cursor = after;
-        let mut said = String::new();
-        loop {
-            let page = self
-                .owner(&EncounterRequest::Read {
-                    agent_session: session.clone(),
-                    after: cursor,
-                    limit: 256,
-                })
-                .map_err(|error| Self::failed("the Day's session could not be read", error))?;
-            for row in page["events"].as_array().into_iter().flatten() {
-                cursor = row["cursor"].as_u64().unwrap_or(cursor);
-                let kind = &row["event"]["event"]["Signal"]["kind"];
-                match kind["kind"].as_str() {
-                    Some("agent-message-chunk") => {
-                        said.push_str(kind["text"].as_str().unwrap_or_default())
-                    }
-                    Some("permission-requested") => {
-                        cancel("a Day move takes no tool");
-                        return Err(TurnFailure::Failed(
-                            "the agent asked for permission to use a tool, and a Day move takes none; the turn was cancelled".into(),
-                        ));
-                    }
-                    _ => {}
-                }
-                if let Some(ended) = row["event"]["event"].get("TurnEnded") {
-                    let stop = &ended["stop"];
-                    return if stop.get("Completed").is_some() {
-                        if said.trim().is_empty() {
-                            Err(TurnFailure::Failed(
-                                "the agent's turn ended without an answer".into(),
-                            ))
-                        } else {
-                            Ok(said)
-                        }
-                    } else if let Some(failed) = stop.get("Failed") {
-                        Err(TurnFailure::Failed(format!(
-                            "the agent's turn failed: {}",
-                            failed["reason"].as_str().unwrap_or("no reason given")
-                        )))
-                    } else if stop.get("OperationalLimit").is_some() {
-                        Err(TurnFailure::Failed(
-                            "the agent's turn hit the harness's signal limit".into(),
-                        ))
-                    } else {
-                        Err(TurnFailure::Failed("the agent's turn was cancelled".into()))
-                    };
-                }
-            }
-            if page["more"] != true {
-                if std::time::Instant::now() >= deadline {
-                    cancel("the Day move timed out");
-                    return Err(TurnFailure::Failed(format!(
-                        "the agent did not finish within {} seconds; the turn was cancelled",
-                        self.timeout.as_secs()
-                    )));
-                }
-                std::thread::sleep(Duration::from_millis(150));
-            }
+            .resident()
+            .submit(&session, prompt)
+            .map_err(|(stage, error)| {
+                Self::failed(
+                    match stage {
+                        SubmitStage::Read => "the Day's session could not be read",
+                        SubmitStage::Draft => "the move's prompt could not be drafted",
+                        SubmitStage::Prompt => "the move's prompt was not accepted",
+                    },
+                    error,
+                )
+            })?;
+        let answer = self
+            .resident()
+            .await_turn(&session, baseline, self.timeout, DAY_TURN)
+            .map_err(TurnFailure::Failed)?;
+        if answer.said.trim().is_empty() {
+            return Err(TurnFailure::Failed(
+                "the agent's turn ended without an answer".into(),
+            ));
         }
+        Ok(answer.said)
     }
 }
 
