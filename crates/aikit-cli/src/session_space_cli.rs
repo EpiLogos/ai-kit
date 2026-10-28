@@ -118,6 +118,8 @@ enum Command {
         expected_model_basis: String,
     },
     /// Prepare a Central task and an exact Workcell boundary for this session.
+    /// The request may name `source`: the constellation the task is made of
+    /// (a wiki ref), which its settings read as the task's source.
     EncounterTaskConfigure {
         #[arg(long)]
         agent_session: String,

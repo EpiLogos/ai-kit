@@ -102,12 +102,14 @@ struct TaskRequest {
     set: Map<String, Value>,
 }
 
-/// The bound task as the settings see it: its identity and its purpose (the
-/// name a task has before the person names it).
+/// The bound task as the settings see it: its identity, its purpose (the
+/// name a task has before the person names it) and the constellation it was
+/// made of (its source before the person sets another).
 #[derive(Debug, Clone, PartialEq)]
 struct BoundTask {
     task_ref: ResourceRef,
     purpose: String,
+    source: Option<String>,
 }
 
 fn path(home: &AikitHome, session: &ResourceRef) -> PathBuf {
@@ -476,6 +478,7 @@ fn bound_task(home: &AikitHome, session: &ResourceRef) -> Result<Option<BoundTas
     Ok(read_task_record(home, session)?.map(|record| BoundTask {
         task_ref: record.request.central.task_ref.clone(),
         purpose: record.request.central.purpose.clone(),
+        source: record.request.source.clone(),
     }))
 }
 
@@ -516,7 +519,8 @@ fn reading(
             "repeat_stop": value("repeat_stop", json!("done")),
             "envelope_mode": value("envelope_mode", json!("automation")),
             "envelope_linked": value("envelope_linked", json!(true)),
-            "source": value("source", Value::Null),
+            // The constellation the task was made of, until the person sets another.
+            "source": value("source", bound.source.as_ref().map_or(Value::Null, |source| json!(source))),
             "effort": value("effort", json!([])),
             "autonomy": value("autonomy", json!([])),
             "set": set.keys().collect::<Vec<_>>(),
@@ -532,7 +536,7 @@ fn reading(
         "track": track,
         "task": task,
         "previous_task": previous,
-        "standing": "The person's settings for this session and its bound task: intent the owners of launch, model and delivery read. Colour null takes the session's colour; an empty envelope inherits the session's value; a null loop cap sets no cap; Repeat's levels stay empty until chosen; a null source: the task was made of no constellation.",
+        "standing": "The person's settings for this session and its bound task: intent the owners of launch, model and delivery read. Colour null takes the session's colour; an empty envelope inherits the session's value; a null loop cap sets no cap; Repeat's levels stay empty until chosen; the source is the constellation the task was made of until another is set, and null when it was made of none.",
     })
 }
 
@@ -674,6 +678,7 @@ mod tests {
         BoundTask {
             task_ref: ResourceRef::parse(task).unwrap(),
             purpose: "Write the hand-off fixtures".into(),
+            source: None,
         }
     }
 
@@ -747,6 +752,42 @@ mod tests {
                 "{said}"
             );
         }
+    }
+
+    #[test]
+    fn a_task_made_of_a_constellation_reads_it_as_its_source_until_another_is_set() {
+        let task = BoundTask {
+            source: Some("wiki:anchor:lived-in".into()),
+            ..bound("task:fixtures")
+        };
+        let read = reading(&session(), None, Some(&task));
+        assert_eq!(read["task"]["source"], "wiki:anchor:lived-in");
+        assert_eq!(read["task"]["set"], json!([]), "the person set nothing");
+        let other = apply(
+            &session(),
+            None,
+            Some(&task),
+            json!({"task": {"task_ref": "task:fixtures", "set": {"source": "wiki:frame:hand-off"}}}),
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            reading(&session(), Some(&other), Some(&task))["task"]["source"],
+            "wiki:frame:hand-off"
+        );
+        let back = apply(
+            &session(),
+            Some(other.clone()),
+            Some(&task),
+            json!({"task": {"task_ref": "task:fixtures", "set": {"source": null}}}),
+            Some(&other.revision),
+        )
+        .unwrap();
+        assert_eq!(
+            reading(&session(), Some(&back), Some(&task))["task"]["source"],
+            "wiki:anchor:lived-in",
+            "null returns the task to the constellation it was made of"
+        );
     }
 
     #[test]
