@@ -21,6 +21,8 @@ use std::{
 
 #[path = "encounter_task_attempts.rs"]
 mod attempts;
+#[path = "encounter_task_derive.rs"]
+mod derive;
 #[path = "encounter_task_material.rs"]
 mod material;
 #[path = "encounter_task_run.rs"]
@@ -988,6 +990,13 @@ impl EncounterService {
         input: Value,
         expected: Option<&SourceRevision>,
     ) -> Result<Value> {
+        // A short request names only what is the task's own; the owner
+        // completes the rest from the session's standing (derive).
+        let input = if derive::is_short(&input) {
+            derive::complete(home, session, input)?
+        } else {
+            input
+        };
         let request: TaskRequest = serde_json::from_value(input).map_err(error)?;
         check_source(&request, None)?;
         validate_task_repertoire(home, session, &request)?;

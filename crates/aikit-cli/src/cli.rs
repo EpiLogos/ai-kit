@@ -5994,7 +5994,11 @@ pub enum SessionSpaceCommand {
     },
     /// Prepare a Central task and an exact Workcell boundary for this session.
     /// The request may name `source`: the constellation the task is made of
-    /// (a wiki ref), which its settings read as the task's source.
+    /// (a wiki ref), which its settings read as the task's source. A short
+    /// request `{purpose, source?, task_ref?}` names only what is the task's
+    /// own; the rest is derived from the session's standing (its Agency's
+    /// agent and authority, the agent it opened on and where, Central and
+    /// the Workcell boundary), and what cannot be is refused by name.
     EncounterTaskConfigure {
         #[arg(long)]
         agent_session: String,
