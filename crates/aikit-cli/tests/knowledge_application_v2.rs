@@ -273,3 +273,86 @@ fn one_production_service_materialises_routes_history_forget_and_tui_views() {
         "forget does not erase Knowledge audit receipts"
     );
 }
+
+/// O-I #741 (DLW §18.4: "Each world you work in keeps its own [history] … Press ✕ beside it and the line forgets it"). The
+/// search line records each open as a route and forgets one item from the world it stands in: `aikit knowledge forget here
+/// <RESOURCE>` forgets the destination's learned use in this invocation's own context (its project), routes and plain uses
+/// alike, and leaves the same destination's use in another world, and the operation history, as they were.
+#[test]
+fn forget_here_forgets_one_item_in_the_world_it_is_asked_in_and_no_other() {
+    use aikit_cli::cli::Cli;
+    use clap::Parser;
+
+    let temp = TempDir::new().unwrap();
+    write_project_knowledge(&temp);
+    let world = |project: &'static str| {
+        let home = AikitHome::at(temp.path().join("aikit-home"));
+        Service::open(home, temp.path(), move |key| {
+            (key == "AIKIT_PROJECT_ID").then(|| project.to_string())
+        })
+        .expect("open the production service in one world")
+    };
+    let source = world("prj_alpha")
+        .knowledge_search("authentication", 50)
+        .unwrap()
+        .hits
+        .into_iter()
+        .find(|hit| matches!(hit.address, KnowledgeAddress::Source(_)))
+        .expect("SourcePool hit")
+        .address;
+    let resource = ResourceRef::parse("source:paper:authentication").unwrap();
+    let used_here = |service: &Service| {
+        service
+            .knowledge_search("authentication", 50)
+            .unwrap()
+            .hits
+            .into_iter()
+            .find(|hit| hit.resource == resource)
+            .and_then(|hit| hit.ranking)
+            .and_then(|ranking| ranking.route)
+            .map(|route| route.contextual_observations)
+            .unwrap_or(0)
+    };
+    {
+        let mut alpha = world("prj_alpha");
+        alpha
+            .knowledge_route(None, std::slice::from_ref(&source))
+            .unwrap();
+        alpha
+            .knowledge_route(None, std::slice::from_ref(&source))
+            .unwrap();
+        let mut beta = world("prj_beta");
+        beta.knowledge_route(None, std::slice::from_ref(&source))
+            .unwrap();
+        assert_eq!(used_here(&alpha), 2, "alpha counts its own two opens");
+        assert_eq!(used_here(&beta), 1, "beta counts its own one");
+    }
+    let scope = world("prj_alpha")
+        .knowledge_forget_here(resource.clone())
+        .unwrap();
+    assert_eq!(
+        scope,
+        ForgetScope::DestinationIn {
+            destination: resource.clone(),
+            project: Some(ResourceRef::parse("project/prj_alpha").unwrap()),
+        },
+        "the forget names the world it was asked in"
+    );
+    assert_eq!(used_here(&world("prj_alpha")), 0, "alpha forgot it");
+    assert_eq!(used_here(&world("prj_beta")), 1, "beta keeps its own");
+    assert_eq!(
+        world("prj_alpha").knowledge_history(None).unwrap().len(),
+        2,
+        "the operation history is preserved, as every forget preserves it"
+    );
+
+    let cli = Cli::try_parse_from([
+        "aikit",
+        "knowledge",
+        "forget",
+        "here",
+        "source:paper:authentication",
+    ])
+    .expect("`aikit knowledge forget here RESOURCE` parses");
+    assert_eq!(cli.command.unwrap().route(), "cmd_knowledge_forget_here");
+}

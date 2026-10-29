@@ -4148,6 +4148,15 @@ fn cmd_knowledge(cwd: &std::path::Path, c: KnowledgeCmd) -> Result<Reply> {
             }
             KnowledgeReflectionSub::Laws => jval!(service.reflection_laws()?),
         },
+        KnowledgeSub::Forget(KnowledgeForgetCmd {
+            command: KnowledgeForgetSub::Here(a),
+        }) => {
+            let scope = service.knowledge_forget_here(ResourceRef::parse(&a.resource)?)?;
+            jval!({
+                "forgot": scope,
+                "preserved": ["canonical-resource-identity", "provider-truth", "knowledge-operation-history", "other-worlds"]
+            })
+        }
         KnowledgeSub::Forget(a) => {
             let scope = match a.command {
                 KnowledgeForgetSub::Destination(a) => {
@@ -4160,6 +4169,7 @@ fn cmd_knowledge(cwd: &std::path::Path, c: KnowledgeCmd) -> Result<Reply> {
                     ForgetScope::Project(ResourceRef::parse(&a.resource)?)
                 }
                 KnowledgeForgetSub::All(_) => ForgetScope::All,
+                KnowledgeForgetSub::Here(_) => unreachable!("forget here is answered above"),
             };
             service.knowledge_forget(scope.clone())?;
             jval!({

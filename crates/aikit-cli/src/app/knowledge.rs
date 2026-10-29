@@ -1917,6 +1917,19 @@ impl Service {
         append_familiarity_reset(&self.index, scope, now_ms())
     }
 
+    /// Forget one destination in the world this invocation stands in: its
+    /// learned use recorded in this invocation's own context's project — a
+    /// plain use, a route ending there and an operative path alike — and in
+    /// no other. Answers the scope it recorded, which names that world.
+    pub fn knowledge_forget_here(&mut self, destination: ResourceRef) -> Result<ForgetScope> {
+        let scope = ForgetScope::DestinationIn {
+            destination,
+            project: self.knowledge_context().project,
+        };
+        self.knowledge_forget(scope.clone())?;
+        Ok(scope)
+    }
+
     fn materialize_knowledge_runtime(
         &self,
         need: KnowledgeNeed,

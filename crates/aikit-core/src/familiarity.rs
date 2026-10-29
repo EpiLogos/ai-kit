@@ -297,6 +297,15 @@ pub enum ForgetScope {
     Route(ResourceRef),
     ResolvePath(String),
     Project(ResourceRef),
+    /// One destination in one world: every learned use of `destination`
+    /// recorded in the `project` context (`None` is the unscoped world) —
+    /// a plain use, a traversed route ending there and an operative path
+    /// alike. The same destination in another project context stays, and so
+    /// does everything else in this one.
+    DestinationIn {
+        destination: ResourceRef,
+        project: Option<ResourceRef>,
+    },
     All,
 }
 
@@ -555,6 +564,13 @@ impl FamiliarityStore {
                     if &operative.path_identity == path_identity
             ),
             ForgetScope::Project(project) => observation.context.project.as_ref() != Some(project),
+            ForgetScope::DestinationIn {
+                destination,
+                project,
+            } => {
+                !(&observation.destination == destination
+                    && &observation.context.project == project)
+            }
             ForgetScope::All => false,
         });
         before - self.observations.len()
