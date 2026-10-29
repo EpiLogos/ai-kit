@@ -268,6 +268,17 @@ impl EncounterContextAdmission {
         Ok(())
     }
 }
+/// A deliberate send to a session that waits on the person: why it is sent
+/// anyway. The only override of the needs-input guard (there is no force);
+/// it is recorded in the session's journal before the send, and a send whose
+/// override cannot be recorded is refused (OpenRig
+/// `packages/daemon/src/domain/session-transport.ts:1012-1041`).
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct EncounterInteract {
+    pub reason: String,
+}
+
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(tag = "action", rename_all = "kebab-case")]
 pub enum EncounterRequest {
@@ -278,6 +289,9 @@ pub enum EncounterRequest {
         agent_session: ResourceRef,
         draft_revision: u64,
         context: ContextExpectation,
+        /// The deliberate override of the needs-input guard.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        interact: Option<EncounterInteract>,
     },
     /// Select a catalogue-backed, scoped, already configured native body.
     OpenModel {
@@ -365,6 +379,9 @@ pub enum EncounterRequest {
     Send {
         agent_session: ResourceRef,
         turn: EncounterAddressedTurn,
+        /// The deliberate override of the needs-input guard.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        interact: Option<EncounterInteract>,
     },
     SendGroup {
         delivery_ref: ResourceRef,
@@ -445,6 +462,9 @@ pub enum EncounterRequest {
     Prompt {
         agent_session: ResourceRef,
         draft_revision: u64,
+        /// The deliberate override of the needs-input guard.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        interact: Option<EncounterInteract>,
     },
     Cancel {
         agent_session: ResourceRef,
@@ -1181,6 +1201,98 @@ impl EncounterService {
         }
         Ok(rows)
     }
+    /// The send guard (OpenRig `session-transport.ts:1012-1050`): only
+    /// positive evidence that the session waits on the person refuses a send —
+    /// the permission requests its provider holds open until they are decided.
+    /// No evidence, no refusal. The refusal is three-part, one line each: what
+    /// stands, that nothing was sent, and the next lawful operation. The one
+    /// override is `interact.reason`, recorded as `encounter.prompt_override`
+    /// in the session's own journal before the send; a send whose override
+    /// cannot be recorded is refused. Nothing here bypasses the host's own
+    /// law: a session still carries one turn at a time.
+    pub(crate) fn needs_input_guard(
+        &self,
+        session: &ResourceRef,
+        action: &'static str,
+        interact: Option<&EncounterInteract>,
+    ) -> Result<()> {
+        let pending: Vec<(String, String)> = self
+            .permissions
+            .lock()
+            .map_err(error)?
+            .get(session)
+            .map(|requests| {
+                requests
+                    .values()
+                    .map(|request| {
+                        let title = request.tool_call["title"]
+                            .as_str()
+                            .filter(|title| !title.trim().is_empty())
+                            .unwrap_or(&request.native_request_id)
+                            .to_owned();
+                        (request.native_request_id.clone(), title)
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        if pending.is_empty() {
+            return Ok(());
+        }
+        let ids: Vec<&str> = pending.iter().map(|(id, _)| id.as_str()).collect();
+        let Some(interact) = interact else {
+            let count = pending.len();
+            let titles: Vec<&str> = pending.iter().map(|(_, title)| title.as_str()).collect();
+            let fact = format!(
+                "{session} waits on you: {count} permission request{} pending ({}).",
+                if count == 1 { "" } else { "s" },
+                titles.join("; ")
+            );
+            let consequence = if action == "send" {
+                "Nothing was sent or queued."
+            } else {
+                "Nothing was sent; the words stay in the draft."
+            };
+            let next =
+                "Answer the request in the session's thread (Allow or Deny), or stop the turn.";
+            return Err(AikitError::new(
+                "encounter.target_needs_input",
+                format!("{fact}\n{consequence}\n{next}"),
+            )
+            .with("fact", fact)
+            .with("consequence", consequence)
+            .with("action", next)
+            .with(
+                "override",
+                "to send regardless, send again with interact.reason saying why; the override is recorded before the send",
+            )
+            .with("pending", ids.join(",")));
+        };
+        if interact.reason.trim().is_empty() {
+            return Err(AikitError::new(
+                "encounter.interact_reason_required",
+                format!("An override of {session}'s pending permission request needs interact.reason saying why it is driven.\nNothing was sent.\nSend again with a non-empty interact.reason, or answer the request first."),
+            ));
+        }
+        self.store
+            .append(
+                session,
+                &json!({
+                    "kind": "prompt-override",
+                    "code": "encounter.prompt_override",
+                    "action": action,
+                    "detected": {"state": "needs-input", "pending_permissions": ids},
+                    "reason": interact.reason,
+                }),
+            )
+            .map_err(|failure| {
+                AikitError::new(
+                    "encounter.prompt_override_unrecorded",
+                    format!("The override of {session}'s pending permission request could not be recorded ({}).\nNothing was sent.\nRetry once the session's journal can be written: an override that cannot be recorded never sends.", failure.message()),
+                )
+            })?;
+        Ok(())
+    }
+
     fn resident(&self, session: &ResourceRef) -> Result<Arc<Resident>> {
         self.residents.lock().map_err(error)?.get(session).cloned().ok_or_else(||error("This canonical encounter has no resident native session; explicit owner open is required"))
     }
@@ -2891,7 +3003,9 @@ impl EncounterService {
                 agent_session,
                 draft_revision,
                 context,
+                interact,
             } => {
+                self.needs_input_guard(&agent_session, "prompt-context", interact.as_ref())?;
                 self.check_context_scope(&context.scope)?;
                 let resident = self.resident(&agent_session)?;
                 let _operation = resident.operations.lock().map_err(error)?;
@@ -3384,7 +3498,9 @@ impl EncounterService {
             EncounterRequest::Prompt {
                 agent_session,
                 draft_revision,
+                interact,
             } => {
+                self.needs_input_guard(&agent_session, "prompt", interact.as_ref())?;
                 // Solo: "only soloed sessions may run" (FACTORY_MIXER.solo's
                 // own words) gates every launch of this harness, a human's
                 // own Prompt included — never only the executor's own.
@@ -3823,6 +3939,109 @@ mod tests {
         // The refusal happens at configuration, before any open can accept
         // and silently drop the declared facts.
         assert_eq!(failure.code(), "encounter.connect_facts_unreachable");
+    }
+
+    /// One permission request the provider holds open for `session`.
+    pub(super) fn hold_permission(service: &EncounterService, session: &ResourceRef, id: &str) {
+        let request: NativePermissionRequest = serde_json::from_value(json!({
+            "native_request_id": id, "native_session_id": "native-1",
+            "tool_call": {"title": "Write fixtures/handoff.json"},
+        }))
+        .unwrap();
+        service
+            .permissions
+            .lock()
+            .unwrap()
+            .entry(session.clone())
+            .or_default()
+            .insert(id.to_owned(), request);
+    }
+
+    fn journal(service: &EncounterService, session: &ResourceRef) -> Vec<Value> {
+        service
+            .store
+            .events(session, 0, 100)
+            .unwrap()
+            .events
+            .into_iter()
+            .map(|event| event.event)
+            .collect()
+    }
+
+    fn prompt(
+        service: &EncounterService,
+        session: &ResourceRef,
+        reason: Option<&str>,
+    ) -> Result<Value> {
+        service.apply(EncounterRequest::Prompt {
+            agent_session: session.clone(),
+            draft_revision: 1,
+            interact: reason.map(|reason| EncounterInteract {
+                reason: reason.into(),
+            }),
+        })
+    }
+
+    #[test]
+    fn a_prompt_to_a_session_waiting_on_the_person_is_refused_in_three_parts_and_records_nothing() {
+        let service = EncounterService::new(test_home()).unwrap();
+        let session = ResourceRef::parse("agent-session/guard").unwrap();
+        // No evidence, no refusal: the guard answers only positive evidence.
+        service.needs_input_guard(&session, "prompt", None).unwrap();
+        hold_permission(&service, &session, "perm-1");
+        let refused = prompt(&service, &session, None).unwrap_err();
+        assert_eq!(refused.code(), "encounter.target_needs_input");
+        let lines: Vec<&str> = refused.message().lines().collect();
+        assert_eq!(
+            lines,
+            [
+                "agent-session/guard waits on you: 1 permission request pending (Write fixtures/handoff.json).",
+                "Nothing was sent; the words stay in the draft.",
+                "Answer the request in the session's thread (Allow or Deny), or stop the turn.",
+            ]
+        );
+        assert_eq!(refused.details()["pending"], "perm-1");
+        assert!(refused.details()["override"].contains("interact.reason"));
+        // A blank reason is no override, and neither refusal writes anything.
+        assert_eq!(
+            prompt(&service, &session, Some("  ")).unwrap_err().code(),
+            "encounter.interact_reason_required"
+        );
+        assert!(journal(&service, &session).is_empty());
+    }
+
+    #[test]
+    fn a_deliberate_prompt_override_is_recorded_before_the_send_and_bypasses_nothing_else() {
+        let service = EncounterService::new(test_home()).unwrap();
+        let session = ResourceRef::parse("agent-session/guard").unwrap();
+        hold_permission(&service, &session, "perm-1");
+        hold_permission(&service, &session, "perm-2");
+        let after = prompt(&service, &session, Some("the request is stale")).unwrap_err();
+        // Past the guard, the send meets the session's own law (here: no
+        // resident holds it); the override bypasses nothing else.
+        assert_ne!(after.code(), "encounter.target_needs_input");
+        let journal = journal(&service, &session);
+        assert_eq!(journal.len(), 1, "{journal:?}");
+        assert_eq!(journal[0]["kind"], "prompt-override");
+        assert_eq!(journal[0]["code"], "encounter.prompt_override");
+        assert_eq!(journal[0]["action"], "prompt");
+        assert_eq!(journal[0]["reason"], "the request is stale");
+        assert_eq!(
+            journal[0]["detected"],
+            json!({"state": "needs-input", "pending_permissions": ["perm-1", "perm-2"]})
+        );
+    }
+
+    #[test]
+    fn an_override_that_cannot_be_recorded_never_sends() {
+        let service = EncounterService::new(test_home()).unwrap();
+        // The journal keeps only canonical AgentSession history, so a record
+        // for this session cannot be written.
+        let session = ResourceRef::parse("agency/not-canonical").unwrap();
+        hold_permission(&service, &session, "perm-1");
+        let refused = prompt(&service, &session, Some("drive it")).unwrap_err();
+        assert_eq!(refused.code(), "encounter.prompt_override_unrecorded");
+        assert_eq!(refused.message().lines().nth(1), Some("Nothing was sent."));
     }
 }
 

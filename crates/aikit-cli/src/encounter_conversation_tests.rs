@@ -755,6 +755,7 @@ fn start_composer_turn(service: &EncounterService, session: &ResourceRef, text: 
         .apply(EncounterRequest::Prompt {
             agent_session: session.clone(),
             draft_revision: draft["revision"].as_u64().unwrap(),
+            interact: None,
         })
         .unwrap();
 }
@@ -2050,4 +2051,44 @@ fn actual_legacy_route_capture_deadline_preserves_private_observation_and_native
     // The metadata does not claim post-cleanup EOF when only the native
     // pre-cleanup observation is available. The inner owner confirmed reap.
     assert!(started.elapsed() < Duration::from_secs(5));
+}
+
+#[test]
+fn a_recipient_that_waits_on_the_person_is_held_and_answers_once_the_request_is_decided() {
+    let f = Fixture::new(need_ctrl!());
+    let service = Arc::new(EncounterService::new(f.world.home.clone()).unwrap());
+    let (_ada, ash) = open_both(&f, &service);
+    spawn_worker(&service);
+    // Ash's provider holds a permission request open: Ash waits on the person.
+    crate::encounter_service::tests::hold_permission(&service, &ash, "perm-1");
+    f.send(
+        &service,
+        "conversation/waits",
+        "<p>Your view, when you are free?</p>",
+        &[("p-ash", &ash)],
+    )
+    .unwrap();
+    let held = recipient_of(&service, "conversation/waits", "p-ash");
+    assert_eq!(held["state"], "held", "{held}");
+    assert!(
+        held["dispatch"]["detail"]
+            .as_str()
+            .unwrap()
+            .contains("waits on a permission request"),
+        "{held}"
+    );
+    assert_eq!(
+        prompt_count(&f, "ash"),
+        0,
+        "nothing reached the waiting session"
+    );
+    // The request is decided; the held entry is brought forward and answered once.
+    service.permissions.lock().unwrap().remove(&ash);
+    service
+        .apply(EncounterRequest::ConversationReconcile {
+            request_ref: r("conversation/waits"),
+        })
+        .unwrap();
+    wait_for(&service, "conversation/waits", &[("p-ash", "included")]);
+    assert_eq!(prompt_count(&f, "ash"), 1);
 }

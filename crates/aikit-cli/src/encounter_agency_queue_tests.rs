@@ -6,8 +6,9 @@
 #![cfg(unix)]
 use super::EncounterA2aFraming;
 use crate::encounter_service::{
-    EncounterAddressedTurn, EncounterContextAdmission, EncounterContextPacket, EncounterProtocol,
-    EncounterProvider, EncounterRequest, EncounterRequiredSource, EncounterService,
+    EncounterAddressedTurn, EncounterContextAdmission, EncounterContextPacket, EncounterInteract,
+    EncounterProtocol, EncounterProvider, EncounterRequest, EncounterRequiredSource,
+    EncounterService,
 };
 use aikit_adapters::agency_admission::AgencySourceBasis;
 use aikit_core::session_space::SessionSpaceRef;
@@ -313,7 +314,72 @@ fn send(
     service.apply(EncounterRequest::Send {
         agent_session: session.clone(),
         turn,
+        interact: None,
     })
+}
+
+fn send_deliberately(
+    service: &EncounterService,
+    session: &ResourceRef,
+    turn: EncounterAddressedTurn,
+    reason: &str,
+) -> Result<Value, AikitError> {
+    service.apply(EncounterRequest::Send {
+        agent_session: session.clone(),
+        turn,
+        interact: Some(EncounterInteract {
+            reason: reason.into(),
+        }),
+    })
+}
+
+#[test]
+fn a_send_to_a_session_that_waits_on_the_person_is_refused_unless_deliberate() {
+    let world = QueueWorld::new();
+    let (_space, session) = world.attach("one");
+    let service = EncounterService::new(world.home.clone()).unwrap();
+    crate::encounter_service::tests::hold_permission(&service, &session, "perm-1");
+    // Positive evidence that the session waits on the person: nothing is sent
+    // or queued behind its back, and the refusal names the next operation.
+    let refused = send(
+        &service,
+        &session,
+        turn("held-1", "while you wait", "agent:one", None),
+    )
+    .unwrap_err();
+    assert_eq!(refused.code(), "encounter.target_needs_input");
+    assert_eq!(
+        refused.message().lines().nth(1),
+        Some("Nothing was sent or queued.")
+    );
+    assert!(service
+        .store
+        .delivery(&session, &r("delivery/held-1"))
+        .unwrap()
+        .is_none());
+    // Deliberately: recorded first, then queued for the next turn boundary.
+    let queued = send_deliberately(
+        &service,
+        &session,
+        turn("held-1", "while you wait", "agent:one", None),
+        "the reviewer asked for it now",
+    )
+    .unwrap();
+    assert_eq!(queued["queued"], json!(true), "{queued}");
+    let journal = service.store.events(&session, 0, 100).unwrap().events;
+    let override_at = journal
+        .iter()
+        .position(|event| event.event["kind"] == "prompt-override")
+        .expect("the override is recorded");
+    assert_eq!(journal[override_at].event["action"], "send");
+    assert_eq!(
+        journal[override_at].event["reason"],
+        "the reviewer asked for it now"
+    );
+    assert!(
+        world.prompts("one").is_empty(),
+        "queued, never typed into the waiting session"
+    );
 }
 
 fn wait_settled(service: &EncounterService, session: &ResourceRef, delivery: &str) -> Value {

@@ -980,6 +980,7 @@ impl EncounterService {
         &self,
         session: ResourceRef,
         turn: EncounterAddressedTurn,
+        interact: Option<&super::EncounterInteract>,
     ) -> Result<Value> {
         let binding = self.preflight_addressed(&session, &turn)?;
         let request = json!({"turn":turn,"agent_ref":binding.agent_ref,"agency_ref":binding.agency_ref,"world_binding_ref":binding.world_binding_ref});
@@ -995,6 +996,11 @@ impl EncounterService {
             }
             return Ok(json!({"duplicate":true,"delivery":held}));
         }
+        // A session that waits on the person is not addressed behind its back:
+        // refused before anything is queued or reserved, unless the sender
+        // overrides it deliberately (recorded first). A replay above still
+        // reads its receipt.
+        self.needs_input_guard(&session, "send", interact)?;
         // A resident that is not currently live is no longer an immediate
         // refusal. Authority is settled here, at submit; only presence may be
         // missing, and a missing presence becomes a durable queued delivery
@@ -1296,7 +1302,7 @@ impl EncounterService {
         }
         let results=recipients.into_iter().map(|recipient| {
             let turn=EncounterAddressedTurn{delivery_ref:delivery.clone(),sender:sender.clone(),expected_binding_revision:recipient.expected_binding_revision,expected_task:recipient.expected_task,packet:packet.clone(),a2a:None};
-            match self.send_addressed(recipient.agent_session.clone(),turn) {
+            match self.send_addressed(recipient.agent_session.clone(),turn,None) {
                 Ok(result)=>json!({"agent_session":recipient.agent_session,"result":result}),
                 Err(failure)=>json!({"agent_session":recipient.agent_session,"error":{"code":failure.code(),"message":failure.message()}}),
             }
@@ -1310,7 +1316,8 @@ impl EncounterService {
             EncounterRequest::Send {
                 agent_session,
                 turn,
-            } => self.send_addressed(agent_session, turn),
+                interact,
+            } => self.send_addressed(agent_session, turn, interact.as_ref()),
             EncounterRequest::SendGroup {
                 delivery_ref,
                 sender,
