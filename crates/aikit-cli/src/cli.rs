@@ -960,6 +960,7 @@ fn wiki_shape_route(command: &WikiShapeSub) -> &'static str {
         WikiShapeSub::Declare(_) => "cmd_wiki_shape_declare",
         WikiShapeSub::Validate(_) => "cmd_wiki_shape_validate",
         WikiShapeSub::Compress(_) => "cmd_wiki_shape_compress",
+        WikiShapeSub::Target(_) => "cmd_wiki_shape_target",
     }
 }
 
@@ -4041,6 +4042,11 @@ pub enum WikiShapeSub {
     /// declared generated relations through the 0 // 1 trinity (the 6+6′
     /// compression).
     Compress(WikiShapeCompressArgs),
+    /// The Wiki's own projection of one constellation for QL's Technē
+    /// reading (`ql techne reading`): its frame as the target, at its
+    /// revision and snapshot, with the QL shape binding the constellation
+    /// keeps (`ql-mef/shape-binding/v1`). Read-only.
+    Target(WikiShapeTargetArgs),
 }
 
 #[derive(Debug, Args)]
@@ -4052,10 +4058,37 @@ pub struct WikiShapeDeclareArgs {
     /// The wiki.json file to write.
     #[arg(long, value_name = "PATH")]
     pub file: std::path::PathBuf,
+    /// Change the roles of a frame the file holds at exactly this revision:
+    /// each constellation of the body replaces the held constellation with
+    /// the same whole-anchor (or joins the frame), the rest of the held frame
+    /// stays as it is, and the frame advances one revision. Without it,
+    /// declare only creates and refuses a frame that exists.
+    #[arg(long, value_name = "N")]
+    pub expected_revision: Option<u64>,
 }
 
 #[derive(Debug, Args)]
 pub struct WikiShapeValidateArgs {
+    /// The wiki.json file to read.
+    #[arg(long, value_name = "PATH")]
+    pub file: std::path::PathBuf,
+    /// Check a draft frame body read from stdin instead of the frames the
+    /// file holds: the floor `declare` enforces, then the write simulated
+    /// over the file, with nothing written. The answer names whether the
+    /// draft would create or change a frame.
+    #[arg(long)]
+    pub stdin: bool,
+    /// With `--stdin`: the revision of the held frame the draft changes (as
+    /// `declare --expected-revision`).
+    #[arg(long, value_name = "N", requires = "stdin")]
+    pub expected_revision: Option<u64>,
+}
+
+#[derive(Debug, Args)]
+pub struct WikiShapeTargetArgs {
+    /// The constellation's whole-anchor ref.
+    #[arg(value_name = "ANCHOR_REF")]
+    pub anchor_ref: String,
     /// The wiki.json file to read.
     #[arg(long, value_name = "PATH")]
     pub file: std::path::PathBuf,
