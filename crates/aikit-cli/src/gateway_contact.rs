@@ -3223,6 +3223,80 @@ pub fn conversation(
 }
 
 // ---------------------------------------------------------------------------
+// heard
+// ---------------------------------------------------------------------------
+
+/// `aikit gateway heard`'s reading.
+pub const COMMUNIQUE_HEARD_SCHEMA: &str = "aikit.communique-heard/v1";
+
+/// Whether one Communique was heard (O-I #741: Heard on the line the desk
+/// sent): its delivery standing read by its ref through the gateway's own
+/// `ReadCommunique` — held, pending, delivered or escalated, when, to which
+/// occupant generation, and where it landed (`handling`) — and never its
+/// body. Full retrieval stays the current occupant's (`message`): the desk
+/// that sent the line occupies no Position, so it reads only what a sender
+/// may know of its own words' delivery.
+///
+/// A Communique relayed to another Workcell is heard there: `remote` reads
+/// that gateway's own record (`forwarded_readback`), and a remote that cannot
+/// be read is said, never taken for unheard.
+pub fn heard(
+    gateway: &dyn GatewayAccess,
+    reference: &str,
+    remote: impl FnOnce(&Communique) -> Result<Option<Value>>,
+) -> Result<Value> {
+    if !reference.starts_with(COMMUNIQUE_REF_PREFIX) {
+        return Err(three_part(
+            "gateway.heard_not_a_communique",
+            format!("{reference} is not a Communique ref ({COMMUNIQUE_REF_PREFIX}…)."),
+            "Nothing was read.",
+            "Name the ref `aikit gateway send` answered.",
+        ));
+    }
+    let record = expect_record(gateway.call(GatewayCommand::ReadCommunique {
+        communique_ref: reference.into(),
+    })?)?;
+    let relayed = matches!(record.forward, Some(CommuniqueForward::Forwarded { .. }));
+    let remote_delivery = if relayed {
+        match remote(&record) {
+            Ok(Some(observed)) => observed,
+            Ok(None) => Value::Null,
+            Err(error) => json!({"state": "unreadable", "error": error.to_string()}),
+        }
+    } else {
+        Value::Null
+    };
+    let delivered = |state: &Value| state.as_str() == Some(CommuniqueState::Delivered.as_str());
+    let (state, delivered_at, generation) = if relayed {
+        (
+            remote_delivery["state"].clone(),
+            remote_delivery["delivered_at_unix_ms"].clone(),
+            remote_delivery["delivered_to_generation_ref"].clone(),
+        )
+    } else {
+        (
+            json!(record.state.as_str()),
+            json!(record.delivered_at_unix_ms),
+            json!(record.delivered_to_generation_ref),
+        )
+    };
+    Ok(json!({
+        "schema": COMMUNIQUE_HEARD_SCHEMA,
+        "communique_ref": record.communique_ref,
+        "to_position_ref": record.to_position_ref,
+        "handling": record.handling.as_str(),
+        "sent_at_unix_ms": record.sent_at_unix_ms,
+        "state": state,
+        "heard": delivered(&state) || !delivered_at.is_null(),
+        "delivered_at_unix_ms": delivered_at,
+        "delivered_to_generation_ref": generation,
+        "escalated_custody_ref": record.escalated_custody_ref,
+        "relayed": relayed,
+        "remote_delivery": remote_delivery,
+    }))
+}
+
+// ---------------------------------------------------------------------------
 // delegate
 // ---------------------------------------------------------------------------
 
@@ -4739,5 +4813,124 @@ mod forwarded_readback_tests {
             .code(),
             "gateway.remote_readback_changed"
         );
+    }
+}
+
+#[cfg(test)]
+mod heard_tests {
+    //! O-I #741: Heard on the line the desk sent — one Communique's delivery
+    //! standing read by its ref, never its words.
+    use std::cell::RefCell;
+
+    use super::*;
+
+    fn record(state: &str, forwarded: bool) -> Communique {
+        serde_json::from_value(json!({
+            "schema": "aikit.communique/v1",
+            "communique_ref": "aikit:communique:01heard",
+            "sequence": 4,
+            "attribution": "unknown",
+            "attribution_basis": "the desk occupies no Position",
+            "to_position_ref": "central:position:project:O-I:anima-4",
+            "body": "Skip the root; the words stay the occupant's.",
+            "handling": "steer",
+            "sent_at_unix_ms": 10,
+            "state": state,
+            "delivered_to_generation_ref": if state == "delivered" { json!("generation:anima-4:2") } else { Value::Null },
+            "delivered_at_unix_ms": if state == "delivered" { json!(20) } else { Value::Null },
+            "origin_gateway_ref": "agency-gateway/local",
+            "forward": if forwarded { json!({"state": "forwarded", "workcell_ref": "workcell:omarchy", "remote_gateway_ref": "agency-gateway/omarchy", "forwarded_at_unix_ms": 12, "attempts": 1}) } else { Value::Null },
+        }))
+        .unwrap()
+    }
+
+    struct OneRecord {
+        record: Communique,
+        asked: RefCell<Vec<String>>,
+    }
+
+    impl GatewayAccess for OneRecord {
+        fn call(&self, command: GatewayCommand) -> Result<GatewayResponse> {
+            match command {
+                GatewayCommand::ReadCommunique { communique_ref } => {
+                    self.asked.borrow_mut().push(communique_ref);
+                    Ok(GatewayResponse::CommuniqueRecord {
+                        communique: self.record.clone(),
+                    })
+                }
+                other => panic!("the heard read asks only for the record, not {other:?}"),
+            }
+        }
+    }
+
+    fn gateway(record: Communique) -> OneRecord {
+        OneRecord {
+            record,
+            asked: RefCell::new(Vec::new()),
+        }
+    }
+
+    fn no_remote(_: &Communique) -> Result<Option<Value>> {
+        panic!("a record kept here is read here")
+    }
+
+    #[test]
+    fn a_pending_line_is_not_heard_and_its_words_are_never_carried() {
+        let gateway = gateway(record("pending", false));
+        let reading = heard(&gateway, "aikit:communique:01heard", no_remote).unwrap();
+        assert_eq!(reading["schema"], COMMUNIQUE_HEARD_SCHEMA);
+        assert_eq!(reading["state"], "pending");
+        assert_eq!(reading["heard"], false);
+        assert_eq!(reading["handling"], "steer");
+        assert_eq!(
+            reading["to_position_ref"],
+            "central:position:project:O-I:anima-4"
+        );
+        assert!(
+            !reading.to_string().contains("Skip the root"),
+            "the body stays the occupant's: {reading}"
+        );
+        assert_eq!(*gateway.asked.borrow(), ["aikit:communique:01heard"]);
+    }
+
+    #[test]
+    fn a_delivered_line_is_heard_with_when_and_by_which_generation() {
+        let gateway = gateway(record("delivered", false));
+        let reading = heard(&gateway, "aikit:communique:01heard", no_remote).unwrap();
+        assert_eq!(reading["heard"], true);
+        assert_eq!(reading["delivered_at_unix_ms"], 20);
+        assert_eq!(
+            reading["delivered_to_generation_ref"],
+            "generation:anima-4:2"
+        );
+    }
+
+    #[test]
+    fn a_relayed_line_is_heard_where_it_was_relayed_and_an_unread_remote_is_said() {
+        let gateway = gateway(record("pending", true));
+        let reading = heard(&gateway, "aikit:communique:01heard", |_| {
+            Ok(Some(
+                json!({"schema": "aikit.remote-communique-readback/v1", "state": "delivered",
+                "delivered_at_unix_ms": 30, "delivered_to_generation_ref": "generation:remote:1"}),
+            ))
+        })
+        .unwrap();
+        assert_eq!(reading["relayed"], true);
+        assert_eq!(reading["heard"], true);
+        assert_eq!(reading["delivered_at_unix_ms"], 30);
+        let unread = heard(&gateway, "aikit:communique:01heard", |_| {
+            Err(AikitError::new("gateway.remote_undeclared", "no route"))
+        })
+        .unwrap();
+        assert_eq!(unread["heard"], false);
+        assert_eq!(unread["remote_delivery"]["state"], "unreadable");
+    }
+
+    #[test]
+    fn a_ref_that_is_no_communique_is_refused_before_the_gateway_is_asked() {
+        let gateway = gateway(record("pending", false));
+        let error = heard(&gateway, "communique:01heard", no_remote).unwrap_err();
+        assert_eq!(error.code(), "gateway.heard_not_a_communique");
+        assert!(gateway.asked.borrow().is_empty());
     }
 }
