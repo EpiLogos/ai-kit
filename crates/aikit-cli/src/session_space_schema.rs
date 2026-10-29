@@ -286,6 +286,30 @@ fn operations() -> Vec<StageSchemaOperation> {
             ],
         },
         StageSchemaOperation {
+            operation: "bind-agent-set",
+            intent: json!({
+                "operation": "bind-agent-set",
+                "binding": {
+                    "agent_set_ref": "<central agent-set ref>",
+                    "revision": null,
+                    "provenance": []
+                }
+            }),
+            notes: vec![
+                (
+                    "binding.agent_set_ref",
+                    "required; the Central agent set this space runs (central.agent-set.read {scope, ref})",
+                ),
+                ("binding.revision", "optional; the set's revision when tied"),
+                ("binding.provenance", "optional; defaults to empty"),
+            ],
+        },
+        StageSchemaOperation {
+            operation: "unbind-agent-set",
+            intent: json!({"operation": "unbind-agent-set"}),
+            notes: vec![("operation", "the space names no agent set afterwards")],
+        },
+        StageSchemaOperation {
             operation: "restore",
             intent: json!({
                 "operation": "restore",

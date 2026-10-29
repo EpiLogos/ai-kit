@@ -220,6 +220,37 @@ pub struct SessionSpaceNativeReferenceBinding {
     pub provenance: Vec<String>,
 }
 
+/// The Central agent set a SessionSpace runs (`central.agent-set/v1`): the
+/// group's tie to the record that names its members, its orchestrator and how
+/// their returns combine (`join`). AIKit keeps only the tie; the set is
+/// Central's, read and written there. A space that runs no set names none.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionSpaceAgentSetBinding {
+    /// The set's ref in Central (`central.agent-set.read {scope, ref}`).
+    pub agent_set_ref: String,
+    /// The set's revision when the tie was made, where it was known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub revision: Option<String>,
+    #[serde(default)]
+    pub provenance: Vec<String>,
+}
+
+impl SessionSpaceAgentSetBinding {
+    fn validate(&self) -> Result<()> {
+        let reference = self.agent_set_ref.as_str();
+        if reference.trim().is_empty()
+            || reference.len() > 256
+            || reference.chars().any(char::is_control)
+        {
+            return Err(AikitError::new(
+                "session_space.agent_set_ref_invalid",
+                "the agent set's ref must be a bounded, printable Central ref",
+            ));
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionSpaceFocus {
     pub target: ResourceRef,
@@ -250,6 +281,9 @@ pub struct SessionSpaceAuthoredState {
     pub native_references: BTreeMap<ResourceRef, SessionSpaceNativeReferenceBinding>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub focus: Option<SessionSpaceFocus>,
+    /// The Central agent set this space runs, where one is named (O-I #684).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_set: Option<SessionSpaceAgentSetBinding>,
 }
 
 impl SessionSpaceAuthoredState {
@@ -265,6 +299,7 @@ impl SessionSpaceAuthoredState {
             working_surfaces: BTreeMap::new(),
             native_references: BTreeMap::new(),
             focus: None,
+            agent_set: None,
         }
     }
 
@@ -438,6 +473,12 @@ pub enum SessionSpaceMutation {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         focus: Option<SessionSpaceFocus>,
     },
+    /// Name the Central agent set this space runs, replacing any it named.
+    BindAgentSet {
+        binding: SessionSpaceAgentSetBinding,
+    },
+    /// Name no agent set.
+    UnbindAgentSet,
     Restore {
         target: Box<SessionSpaceAuthoredState>,
         evidence: String,
@@ -672,6 +713,19 @@ fn apply_intent(
                 .map(|focus| focus.target.as_str())
                 .unwrap_or("none");
             changed.push(change("focus", subject, "selected"));
+        }
+        SessionSpaceMutation::BindAgentSet { binding } => {
+            binding.validate()?;
+            state.agent_set = Some(binding.clone());
+            changed.push(change("agent-set", binding.agent_set_ref.as_str(), "bound"));
+        }
+        SessionSpaceMutation::UnbindAgentSet => {
+            let subject = state
+                .agent_set
+                .take()
+                .map(|binding| binding.agent_set_ref)
+                .unwrap_or_else(|| "none".into());
+            changed.push(change("agent-set", subject, "unbound"));
         }
         SessionSpaceMutation::Restore { target, evidence } => {
             if target.id() != state.id() {
