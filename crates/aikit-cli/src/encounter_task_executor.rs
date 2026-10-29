@@ -912,6 +912,7 @@ fn resubmit(service: &EncounterService, session: &ResourceRef, text: &str) -> Re
     service.apply(EncounterRequest::Prompt {
         agent_session: session.clone(),
         draft_revision,
+        interact: None,
     })?;
     Ok(())
 }

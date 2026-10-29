@@ -210,6 +210,7 @@ impl Rig {
             .apply(EncounterRequest::Prompt {
                 agent_session: self.session.clone(),
                 draft_revision: draft["revision"].as_u64().unwrap(),
+                interact: None,
             })
             .unwrap();
     }

@@ -550,6 +550,7 @@ pub fn team_operation(home: &AikitHome, cwd: &Path, input: Value) -> Result<Valu
                 &EncounterRequest::Send {
                     agent_session: session.clone(),
                     turn,
+                    interact: None,
                 },
             )?;
             Ok(

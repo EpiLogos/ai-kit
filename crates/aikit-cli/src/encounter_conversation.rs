@@ -1305,7 +1305,7 @@ impl EncounterService {
             },
             a2a: None,
         };
-        match self.send_addressed(session.clone(), turn) {
+        match self.send_addressed(session.clone(), turn, None) {
             Ok(result) => set(
                 "sent",
                 result
@@ -1318,6 +1318,12 @@ impl EncounterService {
             Err(failure) if failure.code() == "encounter.delivery_pending" => set(
                 "held",
                 Some("recipient session is busy with another delivery"),
+            ),
+            // A recipient that waits on the person is held, not refused: the
+            // entry is brought forward again once its request is answered.
+            Err(failure) if failure.code() == "encounter.target_needs_input" => set(
+                "held",
+                Some("recipient session waits on a permission request"),
             ),
             Err(failure) => set(
                 "refused",

@@ -123,6 +123,7 @@ fn prompt(service: &EncounterService, session: &ResourceRef, text: &str) {
         .apply(EncounterRequest::Prompt {
             agent_session: session.clone(),
             draft_revision: draft["revision"].as_u64().unwrap(),
+            interact: None,
         })
         .unwrap();
 }
@@ -404,6 +405,7 @@ fn redis_prepared_now_is_delivered_before_turn_and_verifier_context_is_isolated(
         .apply(EncounterRequest::Prompt {
             agent_session: session.clone(),
             draft_revision: draft["revision"].as_u64().unwrap(),
+            interact: None,
         })
         .unwrap_err();
     assert_eq!(failure.code(), "now_context.disclosure_revoked");

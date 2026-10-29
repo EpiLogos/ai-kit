@@ -138,6 +138,7 @@ impl ResidentOwner {
         self.call(&EncounterRequest::Prompt {
             agent_session: session.clone(),
             draft_revision: revision,
+            interact: None,
         })
         .map_err(|error| (SubmitStage::Prompt, error))?;
         Ok(baseline)
