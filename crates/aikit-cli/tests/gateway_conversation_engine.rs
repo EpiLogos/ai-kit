@@ -1373,6 +1373,138 @@ fn a_message_sent_mid_turn_queues_and_answers_at_the_turn_boundary() {
     assert_eq!(harness.source.prompted_turns(), 2);
 }
 
+/// One carrier read of the binding's conversation: the engine's result.
+fn read(harness: &Harness, operation: aikit_adapters::GatewayConversationOperation) -> Value {
+    let execution = harness
+        .engine
+        .execute(harness.binding_ref.clone(), operation)
+        .unwrap();
+    let GatewayResponse::Conversation { result, .. } = execution.response else {
+        panic!("a conversation read answers with a conversation response");
+    };
+    result
+}
+
+#[test]
+fn the_sessions_and_status_readings_carry_the_link_as_the_gateway_knows_it() {
+    let harness = Harness::new(aikit_adapters::EnginePolicy::default());
+
+    // Before any frame: the link stands, empty, and names no check-in.
+    let link = &read(
+        &harness,
+        aikit_adapters::GatewayConversationOperation::Sessions,
+    )["link"];
+    assert_eq!(link["frame_count"], json!(0), "{link}");
+    assert_eq!(link["frames"], json!([]), "{link}");
+    assert_eq!(link["turns_running"], json!(0), "{link}");
+    assert_eq!(link["frames_in_flight"], json!(0), "{link}");
+    assert!(
+        link["last_check_in_unix_ms"].is_null() && link["check_in_age_seconds"].is_null(),
+        "no frame, no check-in: {link}"
+    );
+
+    harness.source.script_park();
+    harness.admit(fixture_inbound("long running question", "l1"));
+    harness.wait_until(
+        "the turn registers in flight",
+        Duration::from_secs(30),
+        |harness| {
+            read(
+                harness,
+                aikit_adapters::GatewayConversationOperation::Status,
+            )["link"]["turns_running"]
+                == json!(1)
+        },
+    );
+    harness.admit(fixture_inbound("and one more thing", "l2"));
+    harness.wait_until(
+        "the mid-turn message queues",
+        Duration::from_secs(30),
+        |harness| {
+            read(
+                harness,
+                aikit_adapters::GatewayConversationOperation::Sessions,
+            )["link"]["queued_prompts"]
+                == json!(1)
+        },
+    );
+
+    let sessions = read(
+        &harness,
+        aikit_adapters::GatewayConversationOperation::Sessions,
+    );
+    let link = &sessions["link"];
+    assert_eq!(link["turns_running"], json!(1), "{link}");
+    assert_eq!(
+        link["frame_count"],
+        json!(2),
+        "two frames journaled: {link}"
+    );
+    assert_eq!(link["last_sequence"], json!(2), "{link}");
+    let in_flight = link["frames_in_flight"].as_u64().unwrap();
+    assert_eq!(
+        in_flight,
+        link["queued_prompts"].as_u64().unwrap() + link["pending_deliveries"].as_u64().unwrap(),
+        "frames in flight are the prompts waiting for the harness and the sends waiting for a receipt: {link}"
+    );
+    assert!(in_flight >= 1, "{link}");
+    let frames = link["frames"].as_array().unwrap();
+    assert_eq!(frames.len(), 2, "{link}");
+    assert_eq!(frames[0]["sequence"], json!(1));
+    assert_eq!(frames[0]["kind"], "human-message");
+    assert_eq!(frames[0]["direction"], "to-agent");
+    assert_eq!(frames[0]["note"], "long running question");
+    assert_eq!(frames[1]["note"], "and one more thing");
+    let observed = link["observed_at_unix_ms"].as_u64().unwrap();
+    let newest = frames[1]["recorded_at_unix_ms"].as_u64().unwrap();
+    assert!(
+        frames[0]["recorded_at_unix_ms"].as_u64().unwrap() <= newest && newest <= observed,
+        "the gateway stamps each frame as it journals it: {link}"
+    );
+    assert_eq!(link["last_check_in_unix_ms"], json!(newest), "{link}");
+    let age = link["check_in_age_seconds"].as_f64().unwrap();
+    assert!(
+        (0.0..30.0).contains(&age),
+        "the check-in's age, by the gateway's clock: {link}"
+    );
+    assert_eq!(
+        read(
+            &harness,
+            aikit_adapters::GatewayConversationOperation::Status
+        )["link"]["frame_count"],
+        json!(2),
+        "status carries the same link"
+    );
+
+    // A carrier's read answers its asker: nothing is said into the conversation for it.
+    thread::sleep(Duration::from_millis(300));
+    let sends = harness.executed_sends();
+    assert!(
+        !sends
+            .iter()
+            .any(|text| text.starts_with("sessions:") || text.starts_with("status:")),
+        "a read posted into the conversation: {sends:?}"
+    );
+
+    // Stop: the turn ends, the queue drops, and the agent's own frame comes back on the link.
+    read(&harness, aikit_adapters::GatewayConversationOperation::Stop);
+    harness.wait_until(
+        "the interruption is journaled",
+        Duration::from_secs(30),
+        |harness| harness.stream_events().len() == 3,
+    );
+    let link = &read(
+        &harness,
+        aikit_adapters::GatewayConversationOperation::Sessions,
+    )["link"];
+    assert_eq!(link["turns_running"], json!(0), "{link}");
+    assert_eq!(link["queued_prompts"], json!(0), "{link}");
+    assert_eq!(link["frame_count"], json!(3), "{link}");
+    let last = &link["frames"][2];
+    assert_eq!(last["direction"], "from-agent", "{link}");
+    assert_eq!(last["custom_kind"], "gateway-agent/turn-failure", "{link}");
+}
+
 #[test]
 fn stop_interrupts_the_turn_drops_the_queue_and_the_next_message_starts_fresh() {
     let harness = Harness::new(aikit_adapters::EnginePolicy::default());

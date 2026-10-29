@@ -939,7 +939,9 @@ mod tests {
                 GatewaySubscriptionRead::Closed => panic!("the carrier closed before the push"),
             }
         };
-        let GatewayStreamEvent { sequence, event } = pushed;
+        let GatewayStreamEvent {
+            sequence, event, ..
+        } = pushed;
         assert_eq!(sequence, 2);
         assert_eq!(event["content"], "two");
 

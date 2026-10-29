@@ -226,6 +226,7 @@ impl FakeGateway {
                 event: GatewayStreamEvent {
                     sequence,
                     event: journal_event_from(sequence, text, sender),
+                    recorded_at_unix_ms: None,
                 },
             }),
         ))
@@ -375,6 +376,7 @@ impl FakeGateway {
                     .map(|(index, event)| GatewayStreamEvent {
                         sequence: index as u64 + 1,
                         event: event.clone(),
+                        recorded_at_unix_ms: None,
                     })
                     .collect::<Vec<_>>();
                 let returned_through = events
@@ -415,6 +417,7 @@ impl FakeGateway {
                                 event: GatewayStreamEvent {
                                     sequence,
                                     event: journal_event_from(sequence, &text, &sender),
+                                    recorded_at_unix_ms: None,
                                 },
                             },
                         }
