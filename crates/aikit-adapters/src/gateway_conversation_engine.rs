@@ -2113,18 +2113,32 @@ impl GatewayConversationEngine {
         }
     }
 
-    /// Execute one canonical conversation operation. The result travels two
-    /// ways: as the `GatewayResponse::Conversation` payload for the requesting
-    /// carrier, and as a plain line to the requesting conversation through the
-    /// outbound queue.
+    /// Execute one canonical conversation operation a carrier asked for (the
+    /// CLI, the kernel, the TUI). The result travels as the
+    /// `GatewayResponse::Conversation` payload for the requesting carrier; a
+    /// control operation's line also goes to the conversation through the
+    /// outbound queue. A read (status, sessions, the model listing, harness,
+    /// skills) changes nothing, so it tells nobody else and puts no frame in
+    /// flight; asked at the surface (a slash command), its line lands there.
     pub fn execute(
         self: &Arc<Self>,
         binding_ref: ResourceRef,
         operation: GatewayConversationOperation,
     ) -> Result<ConversationExecution> {
+        self.run(binding_ref, operation, false)
+    }
+
+    /// One operation; `surface_reads` is set when the conversation itself
+    /// asked (a slash command at the surface), so its answer lands there.
+    fn run(
+        self: &Arc<Self>,
+        binding_ref: ResourceRef,
+        operation: GatewayConversationOperation,
+        surface_reads: bool,
+    ) -> Result<ConversationExecution> {
         let (result, line, surface_target, restart_requested) =
             self.perform(&binding_ref, &operation)?;
-        if let Some(line) = line {
+        if let Some(line) = line.filter(|_| surface_reads || !reads_only(&operation)) {
             let target = surface_target.as_ref().unwrap_or(&binding_ref);
             if matches!(operation, GatewayConversationOperation::Announce { .. }) {
                 // An announcement is a receipt somebody waits to be told: if it
@@ -2151,7 +2165,7 @@ impl GatewayConversationEngine {
         binding_ref: &ResourceRef,
         operation: GatewayConversationOperation,
     ) {
-        match self.execute(binding_ref.clone(), operation) {
+        match self.run(binding_ref.clone(), operation, true) {
             Ok(_) => {}
             Err(error) => {
                 eprintln!("conversation operation failed: {error}");
@@ -2376,6 +2390,7 @@ impl GatewayConversationEngine {
             .cloned()
             .ok_or_else(|| unknown_binding(binding_ref))?;
         let stream_position = kernel.stream_position(&binding.actuation_stream_ref);
+        let link = self.link(&kernel, &binding);
         let health = kernel
             .status()
             .connector_health
@@ -2428,6 +2443,7 @@ impl GatewayConversationEngine {
                     "state": health.state,
                     "detail": health.detail,
                 })),
+                "link": link,
             }),
             line,
         ))
@@ -2630,6 +2646,7 @@ impl GatewayConversationEngine {
             .binding(binding_ref)
             .cloned()
             .ok_or_else(|| unknown_binding(binding_ref))?;
+        let link = self.link(&kernel, &binding);
         drop(kernel);
         let source = self.source_for(&binding);
         let native = match &source {
@@ -2641,19 +2658,63 @@ impl GatewayConversationEngine {
             .and_then(|source| source.harness())
             .unwrap_or_else(|| "none".into());
         let line = format!(
-            "sessions: agent session {} on harness {} holds {} native session(s)",
+            "sessions: agent session {} on harness {} holds {} native session(s); {}",
             binding.agent_session_ref,
             harness,
             native.len(),
+            link_line(&link),
         );
         Ok((
             json!({
                 "agent_session_ref": binding.agent_session_ref.to_string(),
                 "harness": source.as_ref().and_then(|source| source.harness()),
                 "sessions": native,
+                "link": link,
             }),
             line,
         ))
+    }
+
+    /// The binding's link as this gateway knows it, read under the kernel
+    /// lock: the newest frames of its Stream (each stamped when the gateway
+    /// journaled it) and how many the journal holds; the check-in — the
+    /// newest frame's instant — and its age by the gateway's own clock; the
+    /// turns running on the binding's turn plane (one at a time, starting or
+    /// in flight); and the frames in flight, the admitted prompts waiting for
+    /// the harness and the sends waiting for the connector's receipt.
+    fn link(&self, kernel: &AgencyGateway, binding: &GatewayBinding) -> Value {
+        let observed_at = crate::gateway_posture::unix_ms_now();
+        let (tail, held) = kernel
+            .stream_tail(&binding.actuation_stream_ref, LINK_FRAME_LIMIT)
+            .unwrap_or((&[], 0));
+        let checked_in = tail.last().and_then(|frame| frame.recorded_at_unix_ms);
+        let (running, queued) = {
+            let inner = self.inner.lock().expect("conversation engine");
+            let busy = inner.in_flight.contains_key(&binding.binding_ref)
+                || inner.starting.contains(&binding.binding_ref);
+            (
+                usize::from(busy),
+                inner
+                    .queued
+                    .get(&binding.binding_ref)
+                    .map_or(0, |queue| queue.len()),
+            )
+        };
+        let pending = kernel.pending_deliveries_for(&binding.actuation_stream_ref);
+        json!({
+            "observed_at_unix_ms": observed_at,
+            "last_check_in_unix_ms": checked_in,
+            "check_in_age_seconds": checked_in
+                .map(|at| observed_at.saturating_sub(at) as f64 / 1000.0),
+            "turns_running": running,
+            "frames_in_flight": queued + pending,
+            "queued_prompts": queued,
+            "pending_deliveries": pending,
+            "frame_count": held,
+            "last_sequence": tail.last().map(|frame| frame.sequence),
+            "frames_limit": LINK_FRAME_LIMIT,
+            "frames": tail.iter().map(link_frame).collect::<Vec<_>>(),
+        })
     }
 
     /// The binding behind a surface request and its turn source, so the
@@ -3090,6 +3151,79 @@ impl GatewayConversationEngine {
         let kernel = self.gateway.lock().map_err(|_| poisoned())?;
         persist_gateway_state(&kernel, self.state_file.as_deref())
     }
+}
+
+/// How many of a binding's newest frames its link carries.
+const LINK_FRAME_LIMIT: usize = 100;
+/// How many characters of a frame's words its link carries.
+const LINK_NOTE_CHARS: usize = 240;
+
+/// Whether an operation only reads: it changes nothing, so a carrier's ask is
+/// answered to the carrier and nothing is said into the conversation.
+fn reads_only(operation: &GatewayConversationOperation) -> bool {
+    matches!(
+        operation,
+        GatewayConversationOperation::Status
+            | GatewayConversationOperation::Sessions
+            | GatewayConversationOperation::Harness
+            | GatewayConversationOperation::Skills
+            | GatewayConversationOperation::Model { model: None }
+    )
+}
+
+/// One journaled frame as the link carries it: its sequence, its kind, which
+/// way it went — named by the door that journaled it (ingress marks the
+/// connector's event, an agent reply or activity the inbound frame it
+/// answers) — when the gateway journaled it, and how its words open.
+fn link_frame(frame: &GatewayStreamEvent) -> Value {
+    let event = &frame.event;
+    let metadata = event.get("metadata");
+    let marked = |key: &str| metadata.and_then(|metadata| metadata.get(key)).is_some();
+    let direction = if marked("connector_event_ref") {
+        Some("to-agent")
+    } else if marked("in_reply_to_sequence") {
+        Some("from-agent")
+    } else {
+        None
+    };
+    let mut row = serde_json::Map::new();
+    row.insert("sequence".into(), json!(frame.sequence));
+    for key in ["kind", "custom_kind"] {
+        if let Some(word) = event.get(key).and_then(Value::as_str) {
+            row.insert(key.into(), json!(word));
+        }
+    }
+    if let Some(direction) = direction {
+        row.insert("direction".into(), json!(direction));
+    }
+    if let Some(at) = frame.recorded_at_unix_ms {
+        row.insert("recorded_at_unix_ms".into(), json!(at));
+    }
+    if let Some(text) = event.get("content").and_then(Value::as_str) {
+        let words = text.split_whitespace().collect::<Vec<_>>().join(" ");
+        let note = match words.char_indices().nth(LINK_NOTE_CHARS) {
+            Some((cut, _)) => format!("{}…", &words[..cut]),
+            None => words,
+        };
+        row.insert("note".into(), json!(note));
+    }
+    Value::Object(row)
+}
+
+/// The link in one line, for the surface.
+fn link_line(link: &Value) -> String {
+    let count = |key: &str| link.get(key).and_then(Value::as_u64).unwrap_or(0);
+    let check_in = match link.get("check_in_age_seconds").and_then(Value::as_f64) {
+        Some(age) => format!("last check-in {} s ago", age.round()),
+        None if count("frame_count") == 0 => "no check-in yet".to_owned(),
+        None => "no stamped check-in".to_owned(),
+    };
+    format!(
+        "link: {} frame(s), {check_in}, {} turn(s) running, {} frame(s) in flight",
+        count("frame_count"),
+        count("turns_running"),
+        count("frames_in_flight"),
+    )
 }
 
 fn unknown_binding(binding_ref: &ResourceRef) -> AikitError {

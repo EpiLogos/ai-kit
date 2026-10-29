@@ -235,6 +235,10 @@ impl GatewayBinding {
 pub struct GatewayStreamEvent {
     pub sequence: u64,
     pub event: Value,
+    /// When this gateway journaled the frame, by its own clock (Unix ms).
+    /// Absent on a frame journaled before the gateway stamped its frames.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recorded_at_unix_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -325,7 +329,11 @@ impl GatewayStreamJournal {
                 ),
             ));
         }
-        let item = GatewayStreamEvent { sequence, event };
+        let item = GatewayStreamEvent {
+            sequence,
+            event,
+            recorded_at_unix_ms: Some(crate::gateway_posture::unix_ms_now()),
+        };
         self.events.push(item.clone());
         self.next_sequence += 1;
         Ok(item)
@@ -1010,6 +1018,28 @@ impl AgencyGateway {
         self.streams
             .get(stream_ref)
             .map(|stream| (stream.next_sequence.saturating_sub(1), stream.events.len()))
+    }
+
+    /// One Stream's newest frames, at most `limit` of them in sequence, and
+    /// how many its journal holds.
+    pub fn stream_tail(
+        &self,
+        stream_ref: &ResourceRef,
+        limit: usize,
+    ) -> Option<(&[GatewayStreamEvent], usize)> {
+        self.streams.get(stream_ref).map(|stream| {
+            let held = stream.events.len();
+            (&stream.events[held.saturating_sub(limit)..], held)
+        })
+    }
+
+    /// How many outbound operations prepared for one Stream's binding wait
+    /// for their delivery receipt.
+    pub fn pending_deliveries_for(&self, stream_ref: &ResourceRef) -> usize {
+        self.pending_deliveries
+            .values()
+            .filter(|operation| operation.actuation_stream_ref.as_ref() == Some(stream_ref))
+            .count()
     }
 
     /// Append an agent turn's reply (or its honest failure record) to the same

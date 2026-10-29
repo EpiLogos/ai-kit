@@ -200,6 +200,72 @@ fn replay_reads_one_streams_frames_after_a_sequence_within_a_limit() {
     serve.wait().unwrap();
 }
 
+/// `aikit gateway agent --binding B sessions` — the document O-I's kernel
+/// reads for the Gateway device — carries the binding's link from the
+/// running gateway's own state: its frames (each stamped as the gateway
+/// journaled it), their count, the check-in's age, the turns running and the
+/// frames in flight.
+#[test]
+fn the_sessions_reading_carries_the_bindings_link_through_the_binary() {
+    let home = TempDir::new().unwrap();
+    let mut serve = ServeGuard::new(
+        Command::new(bin())
+            .args(["gateway", "serve"])
+            .env("AIKIT_HOME", home.path())
+            .env("HOME", home.path())
+            .current_dir(home.path())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("aikit gateway serve should spawn"),
+    );
+    wait_for_socket(home.path());
+    conversation(home.path(), 3);
+
+    let (ok, envelope) = run(
+        home.path(),
+        &[
+            "gateway",
+            "agent",
+            "--binding",
+            "gateway-binding/replay",
+            "sessions",
+        ],
+    );
+    assert!(ok, "{envelope}");
+    // The carrier's answer wraps the engine's result: `data.result` is the document.
+    let link = &envelope["data"]["result"]["link"];
+    assert_eq!(link["frame_count"], 3, "{envelope}");
+    assert_eq!(link["last_sequence"], 3, "{envelope}");
+    assert_eq!(
+        link["turns_running"], 0,
+        "no backing runs a turn: {envelope}"
+    );
+    assert_eq!(link["frames_in_flight"], 0, "{envelope}");
+    let notes: Vec<&str> = link["frames"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|frame| frame["note"].as_str().unwrap())
+        .collect();
+    assert_eq!(notes, ["frame 1", "frame 2", "frame 3"]);
+    assert!(link["frames"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|frame| frame["direction"] == "to-agent"
+            && frame["recorded_at_unix_ms"].as_u64().is_some()));
+    assert_eq!(
+        link["last_check_in_unix_ms"], link["frames"][2]["recorded_at_unix_ms"],
+        "{envelope}"
+    );
+    assert!(link["check_in_age_seconds"].as_f64().unwrap() >= 0.0);
+
+    let stopped = exchange(home.path(), json!({"type": "shutdown"}));
+    assert_eq!(stopped["ok"], true, "{stopped}");
+    serve.wait().unwrap();
+}
+
 #[test]
 fn replay_without_a_running_gateway_fails_honestly() {
     let home = TempDir::new().unwrap();
