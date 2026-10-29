@@ -1,5 +1,5 @@
 //! An agent session's own settings, beside its bound task: how its track
-//! plays (Telemetry, Solo) and how its task launches, what follows it and how
+//! plays (its Name, Telemetry, Solo) and how its task launches, what follows it and how
 //! the agent works in it (name, colour, activator, output style, Loop with its
 //! stop condition and cap, Launch mode, Then, Quantize, what a Repeat varies,
 //! the Effort and Autonomy envelopes, and its source: the constellation it was
@@ -488,11 +488,14 @@ fn validate_track(changes: &Map<String, Value>) -> Result<Map<String, Value>> {
     for (key, value) in changes {
         let value = match (key.as_str(), value) {
             (_, Value::Null) => Value::Null,
+            // The session's own name, the one its track shows (O-I #743: a
+            // session renamed on its track). Null takes it away.
+            ("name", value) => words("Name", value, 200)?,
             ("telemetry", value) => flag("Telemetry", value)?,
             ("solo", value) => flag("Solo", value)?,
             (other, _) => {
                 return Err(error(format!(
-                    "A track has no setting {other}; it takes telemetry and solo"
+                    "A track has no setting {other}; it takes name, telemetry and solo"
                 )))
             }
         };
@@ -559,6 +562,33 @@ fn bound_task(home: &AikitHome, session: &ResourceRef) -> Result<Option<BoundTas
     }))
 }
 
+/// The person's own settings of `task_ref` on `session`, as a copy of the
+/// task carries them: never its takes, and not its source, which the copy's
+/// request carries. Empty when none were set for that task.
+pub(super) fn task_set_of(
+    home: &AikitHome,
+    session: &ResourceRef,
+    task_ref: &ResourceRef,
+) -> Result<Map<String, Value>> {
+    Ok(read_record(home, session)?
+        .and_then(|record| record.task)
+        .filter(|task| &task.task_ref == task_ref)
+        .map(|task| {
+            let mut set = task.set;
+            set.remove("source");
+            set
+        })
+        .unwrap_or_default())
+}
+
+/// The revision `session`'s settings stand on; none while it has none.
+pub(super) fn revision_of(
+    home: &AikitHome,
+    session: &ResourceRef,
+) -> Result<Option<SourceRevision>> {
+    Ok(read_record(home, session)?.map(|record| record.revision))
+}
+
 /// Repeat's fields as they stand: what the person set, else the defaults the
 /// reading states.
 fn repeat_value(set: &Map<String, Value>, key: &str) -> Value {
@@ -620,6 +650,9 @@ fn reading(
 ) -> Value {
     let track_set = record.map(|r| r.track.clone()).unwrap_or_default();
     let track = json!({
+        // Null while no one has named the session: its track then shows what
+        // the session is (its purpose, its agent), as before.
+        "name": track_set.get("name").cloned().unwrap_or(Value::Null),
         "telemetry": track_set.get("telemetry").cloned().unwrap_or(json!(true)),
         "solo": track_set.get("solo").cloned().unwrap_or(json!(false)),
         "set": track_set.keys().collect::<Vec<_>>(),
@@ -1119,6 +1152,83 @@ mod tests {
         assert_eq!(read["task"]["launch"], "gate", "the other fields stand");
         assert_eq!(read["task"]["loop"], true, "the other fields stand");
         assert_eq!(read["track"]["telemetry"], false, "the track stands");
+    }
+
+    #[test]
+    fn a_session_is_named_by_its_own_track_setting_and_null_takes_the_name_away() {
+        let task = bound("task:fixtures");
+        let unnamed = reading(&session(), None, Some(&task));
+        assert_eq!(
+            unnamed["track"]["name"],
+            Value::Null,
+            "a session no one named reads no name"
+        );
+        let named = apply(
+            &session(),
+            None,
+            Some(&task),
+            json!({"track": {"name": "  Fixtures lane "}}),
+            None,
+        )
+        .unwrap();
+        let read = reading(&session(), Some(&named), Some(&task));
+        assert_eq!(read["track"]["name"], "Fixtures lane");
+        assert_eq!(read["track"]["set"], json!(["name"]));
+        assert_eq!(
+            read["task"]["name"], "Write the hand-off fixtures",
+            "the task keeps its own name"
+        );
+        // A session that holds no task is named all the same: the name is the track's.
+        let alone = apply(
+            &session(),
+            None,
+            None,
+            json!({"track": {"name": "Scratch"}}),
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            reading(&session(), Some(&alone), None)["track"]["name"],
+            "Scratch"
+        );
+        let cleared = apply(
+            &session(),
+            Some(named.clone()),
+            Some(&task),
+            json!({"track": {"name": null}}),
+            Some(&named.revision),
+        )
+        .unwrap();
+        assert_eq!(
+            reading(&session(), Some(&cleared), Some(&task))["track"]["name"],
+            Value::Null
+        );
+        let blank = apply(
+            &session(),
+            None,
+            Some(&task),
+            json!({"track": {"name": "  "}}),
+            None,
+        )
+        .unwrap_err();
+        assert!(
+            blank.to_string().contains("Name is text of 1 to 200"),
+            "{blank}"
+        );
+        let unknown = apply(
+            &session(),
+            None,
+            None,
+            json!({"track": {"arm": true}}),
+            None,
+        )
+        .unwrap_err();
+        assert!(
+            unknown
+                .to_string()
+                .contains("A track has no setting arm; it takes name, telemetry and solo"),
+            "{unknown}"
+        );
     }
 
     #[test]

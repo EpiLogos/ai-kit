@@ -32,6 +32,10 @@ mod settings;
 use material::{MaterialBinding, MaterialHost};
 
 const WRITE_ACTION: &str = "action/aikit/encounter-task";
+/// The receipt of a task taken off its session (`encounter-task-remove`).
+pub const REMOVAL_SCHEMA: &str = "aikit.encounter-task-removal/v1";
+/// The receipt of a task copied onto another session (`encounter-task-copy`).
+pub const COPY_SCHEMA: &str = "aikit.encounter-task-copy/v1";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -368,6 +372,32 @@ fn launcher_belongs_to(session: &ResourceRef, record: &TaskRecord) -> bool {
             .map(String::as_str)
             .eq(suffix)
 }
+/// One reading the binding no longer holds, kept in the task history by the
+/// digest of its bytes (a replaced reading, and a removed one), fsynced.
+fn keep_in_history(parent: &Path, previous: &[u8]) -> Result<()> {
+    let history = parent.join("history");
+    fs::create_dir_all(&history).map_err(error)?;
+    let entry = history.join(format!("{}.json", blake3::hash(previous).to_hex()));
+    match fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&entry)
+    {
+        Ok(mut file) => {
+            file.write_all(previous).map_err(error)?;
+            file.sync_all().map_err(error)?;
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+            if fs::read(&entry).map_err(error)? != previous {
+                return Err(error("Task history conflict"));
+            }
+        }
+        Err(e) => return Err(error(e)),
+    }
+    fs::File::open(&history)
+        .and_then(|f| f.sync_all())
+        .map_err(error)
+}
 fn publish(home: &AikitHome, session: &ResourceRef, record: &TaskRecord) -> Result<()> {
     let target = path(home, session);
     let parent = target.parent().expect("task parent");
@@ -380,29 +410,7 @@ fn publish(home: &AikitHome, session: &ResourceRef, record: &TaskRecord) -> Resu
     // Keep every replaced pending/ready reading. A new body/configuration must
     // not erase the historical material, NOW/source and return correlations.
     if target.exists() {
-        let previous = fs::read(&target).map_err(error)?;
-        let history = parent.join("history");
-        fs::create_dir_all(&history).map_err(error)?;
-        let entry = history.join(format!("{}.json", blake3::hash(&previous).to_hex()));
-        match fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&entry)
-        {
-            Ok(mut file) => {
-                file.write_all(&previous).map_err(error)?;
-                file.sync_all().map_err(error)?;
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-                if fs::read(&entry).map_err(error)? != previous {
-                    return Err(error("Task history conflict"));
-                }
-            }
-            Err(e) => return Err(error(e)),
-        }
-        fs::File::open(&history)
-            .and_then(|f| f.sync_all())
-            .map_err(error)?;
+        keep_in_history(parent, &fs::read(&target).map_err(error)?)?;
     }
     let mut staged = tempfile::NamedTempFile::new_in(parent).map_err(error)?;
     staged
@@ -1198,6 +1206,182 @@ impl EncounterService {
             "record": prior,
         }))
     }
+    /// `session-space encounter-task-remove`: the session's task taken off it
+    /// (O-I #743, a Factory clip's Delete), under the lock its configuration
+    /// takes and against the revision read. The record is kept in the task
+    /// history as a replaced reading is, then the binding is removed, so the
+    /// session reads no task and a launch of it is refused. Only a ready,
+    /// unhosted task without a prepared run is removed: a pending one must
+    /// recover its own request, and a hosted one's material and a prepared
+    /// run are Workcell's to close. Its settings stand (their reading
+    /// discloses them as the previous task's); Central's NOW clearing for it
+    /// is Central's.
+    pub fn remove_task(
+        home: &AikitHome,
+        session: &ResourceRef,
+        task_ref: &ResourceRef,
+        expected: &SourceRevision,
+    ) -> Result<Value> {
+        let _lock = ContextLock::acquire(
+            home,
+            &format!(
+                "encounter-agency-{}",
+                blake3::hash(session.as_str().as_bytes()).to_hex()
+            ),
+            LockOptions::default(),
+        )?;
+        Self::new(home.clone())?.require_attached(session)?;
+        let current = read(home, session)?
+            .ok_or_else(|| error("No task is bound to this session: there is nothing to remove"))?;
+        if &current.request.central.task_ref != task_ref {
+            return Err(error(format!(
+                "The session's bound task is {}, not {}; read again",
+                current.request.central.task_ref.as_str(),
+                task_ref.as_str()
+            )));
+        }
+        if &current.revision != expected {
+            return Err(error(
+                "Task revision conflict; read current task before removing it",
+            ));
+        }
+        if !current.ready {
+            return Err(error(
+                "Uncertain preparation must recover the same request, not be removed",
+            ));
+        }
+        if current.request.material_host.is_some() || current.material.is_some() {
+            return Err(error(
+                "A hosted task's material is Workcell's: recover or close its Workcell demand first; the task is not removed",
+            ));
+        }
+        if current.request.prepared_run_scope.is_some() || current.prepared_run.is_some() {
+            return Err(error(
+                "A task bound to a prepared run is Workcell's: close the run through Workcell first; the task is not removed",
+            ));
+        }
+        let target = path(home, session);
+        let parent = target.parent().expect("task parent");
+        keep_in_history(parent, &fs::read(&target).map_err(error)?)?;
+        fs::remove_file(&target).map_err(error)?;
+        fs::File::open(parent)
+            .and_then(|f| f.sync_all())
+            .map_err(error)?;
+        let now_ref = current
+            .allocation
+            .as_ref()
+            .map(|task| task.allocation["now_ref"].clone())
+            .filter(|now| now.is_string())
+            .unwrap_or(Value::Null);
+        Ok(json!({
+            "schema": REMOVAL_SCHEMA,
+            "agent_session": session.as_str(),
+            "task_ref": task_ref.as_str(),
+            "removed_revision": current.revision.as_str(),
+            "outcome": "removed",
+            "now_ref": now_ref,
+            "standing": "The session holds no task now; its record stays in the task history. Central keeps the task's NOW clearing as it stands: closing it is Central's.",
+        }))
+    }
+    /// `session-space encounter-task-copy`: `from`'s task copied onto `to`,
+    /// a session that holds none (O-I #743, a Factory clip's Copy and Paste).
+    /// The copy is made by the owner's own creation from what is the task's
+    /// own — its purpose, the constellation it was made of and a ref of its
+    /// own — the rest derived from `to`'s standing, as any short request is.
+    /// Then the task's own settings (never its takes, nor its source, which
+    /// the request carries) are written onto the copy against `to`'s
+    /// settings revision; a refusal there leaves the made task standing and
+    /// is said in the receipt.
+    pub fn copy_task(
+        home: &AikitHome,
+        to: &ResourceRef,
+        from: &ResourceRef,
+        task_ref: Option<ResourceRef>,
+    ) -> Result<Value> {
+        Self::copy_task_with(home, to, from, task_ref, |home, session, input| {
+            Self::configure_task(home, session, input, None)
+        })
+    }
+    /// `copy_task` over the creation it is given (the owner's own; a test's
+    /// stand-in for an admission it cannot make).
+    fn copy_task_with(
+        home: &AikitHome,
+        to: &ResourceRef,
+        from: &ResourceRef,
+        task_ref: Option<ResourceRef>,
+        make: impl FnOnce(&AikitHome, &ResourceRef, Value) -> Result<Value>,
+    ) -> Result<Value> {
+        let service = Self::new(home.clone())?;
+        service.require_attached(from)?;
+        service.require_attached(to)?;
+        let held = read(home, from)?
+            .ok_or_else(|| error(format!("{} holds no task to copy", from.as_str())))?;
+        if !held.ready {
+            return Err(error(format!(
+                "{}'s task is still being prepared: it is copied once it is ready",
+                from.as_str()
+            )));
+        }
+        if let Some(theirs) = read(home, to)? {
+            return Err(error(format!(
+                "A session holds one task: {} holds {}",
+                to.as_str(),
+                theirs.request.central.task_ref.as_str()
+            )));
+        }
+        let from_ref = held.request.central.task_ref.clone();
+        let task_ref = match task_ref {
+            Some(task_ref) => task_ref,
+            None => ResourceRef::parse(format!(
+                "task:{}-copy-{}",
+                derive::slug(&held.request.central.purpose),
+                ulid::Ulid::generate().to_string().to_lowercase()
+            ))?,
+        };
+        if task_ref == from_ref {
+            return Err(error(format!(
+                "A copy is a task of its own: name it other than {}",
+                from_ref.as_str()
+            )));
+        }
+        let mut short = json!({"purpose": held.request.central.purpose, "task_ref": task_ref});
+        if let Some(source) = &held.request.source {
+            short["source"] = json!(source);
+        }
+        let task = make(home, to, short)?;
+        let carried = settings::task_set_of(home, from, &from_ref)?;
+        let (settings, settings_refused) = if carried.is_empty() {
+            (Value::Null, Value::Null)
+        } else {
+            let expected = settings::revision_of(home, to)?;
+            match Self::write_session_settings(
+                home,
+                to,
+                json!({"task": {"task_ref": task_ref, "set": carried}}),
+                expected.as_ref(),
+            ) {
+                Ok(reading) => (reading, Value::Null),
+                Err(refused) => (
+                    Value::Null,
+                    json!(format!(
+                        "AIKit made the copy, but did not carry {}'s task settings onto it: {}",
+                        from.as_str(),
+                        refused.message()
+                    )),
+                ),
+            }
+        };
+        Ok(json!({
+            "schema": COPY_SCHEMA,
+            "from_session": from.as_str(),
+            "from_task_ref": from_ref.as_str(),
+            "agent_session": to.as_str(),
+            "task_ref": task_ref.as_str(),
+            "task": task,
+            "settings": settings,
+            "settings_refused": settings_refused,
+        }))
+    }
     pub(crate) fn selected_model_provider(
         &self,
         session: &ResourceRef,
@@ -1860,6 +2044,397 @@ mod startup_deadline_tests {
         assert!(
             expired.is_err(),
             "even a fast owner is not invoked after the retained budget"
+        );
+    }
+}
+
+/// A session's task taken off it, and copied onto a session that holds none
+/// (O-I #743: a Factory clip's Delete, Copy and Paste).
+#[cfg(test)]
+mod task_removal_and_copy_tests {
+    use super::*;
+    use aikit_core::session_space::SessionSpaceRef;
+    use aikit_core::session_space_application::{
+        SessionSpaceAgentAttachmentIntent, SessionSpaceMutation,
+    };
+    use aikit_store::SessionSpaceApplicationStore;
+
+    fn r(text: &str) -> ResourceRef {
+        ResourceRef::parse(text).unwrap()
+    }
+
+    /// A home whose sessions are attached to one retained space.
+    fn attached(sessions: &[&str]) -> (tempfile::TempDir, AikitHome) {
+        let dir = tempfile::tempdir().unwrap();
+        let home = AikitHome::at(dir.path().canonicalize().unwrap().join("home"));
+        home.ensure_layout().unwrap();
+        let store = SessionSpaceApplicationStore::new(home.clone());
+        let space = SessionSpaceRef::parse("session-space/task-acts").unwrap();
+        let create = SessionSpaceMutation::Create {
+            id: space.clone(),
+            label: None,
+        };
+        store.apply(&store.stage(None, create).unwrap()).unwrap();
+        for session in sessions {
+            let attach = SessionSpaceMutation::AttachAgentSession {
+                attachment: SessionSpaceAgentAttachmentIntent {
+                    agent_session: r(session),
+                    purpose: None,
+                    provenance: vec!["isolated task-acts test".into()],
+                },
+            };
+            store
+                .apply(&store.stage(Some(&space), attach).unwrap())
+                .unwrap();
+        }
+        (dir, home)
+    }
+
+    /// A task record as the admission leaves it, its owner effects absent;
+    /// `change` adjusts the record's JSON before it is read as one.
+    fn record(task_ref: &str, source: Option<&str>, change: impl FnOnce(&mut Value)) -> TaskRecord {
+        let mut value = json!({"schema": "aikit.encounter-task/v1", "revision": "task-binding/fixture",
+            "request": {"central": {"ctrl_bin": "/unused/ctrl", "central_root": "/unused/central", "project": null,
+                "task_ref": task_ref, "purpose": "Write the hand-off fixtures"},
+                "provider": {"id": "task-peer", "label": "the task's agent"}, "cwd": "/unused",
+                "selected_directories": [], "authority_ref": "authority/fixture"},
+            "agency_revision": "rev/fixture", "ready": true, "allocation": null, "requirements": null,
+            "inspection": null, "cwd_anchor": null, "launcher": {"id": "task-launcher", "label": "Workcell boundary"}});
+        if let Some(source) = source {
+            value["request"]["source"] = json!(source);
+        }
+        change(&mut value);
+        serde_json::from_value(value).unwrap()
+    }
+
+    fn history(home: &AikitHome, session: &ResourceRef) -> Vec<Value> {
+        let directory = path(home, session).parent().unwrap().join("history");
+        let Ok(entries) = fs::read_dir(directory) else {
+            return Vec::new();
+        };
+        entries
+            .map(|entry| serde_json::from_slice(&fs::read(entry.unwrap().path()).unwrap()).unwrap())
+            .collect()
+    }
+
+    #[test]
+    fn a_ready_task_is_taken_off_its_session_and_kept_in_the_task_history() {
+        let (_dir, home) = attached(&["agent-session/one"]);
+        let one = r("agent-session/one");
+        let bound = record("task:fixtures", None, |value| {
+            value["allocation"] = json!({"request": value["request"]["central"].clone(),
+                "allocation": {"now_ref": "central:now:control:root:fixtures"}});
+        });
+        publish(&home, &one, &bound).unwrap();
+        EncounterService::write_session_settings(
+            &home,
+            &one,
+            json!({"task": {"task_ref": "task:fixtures", "set": {"name": "Fixtures"}}}),
+            None,
+        )
+        .unwrap();
+        let receipt =
+            EncounterService::remove_task(&home, &one, &r("task:fixtures"), &bound.revision)
+                .unwrap();
+        assert_eq!(
+            receipt,
+            json!({"schema": "aikit.encounter-task-removal/v1", "agent_session": "agent-session/one",
+                "task_ref": "task:fixtures", "removed_revision": "task-binding/fixture", "outcome": "removed",
+                "now_ref": "central:now:control:root:fixtures",
+                "standing": "The session holds no task now; its record stays in the task history. Central keeps the task's NOW clearing as it stands: closing it is Central's."})
+        );
+        // The session holds no task: its reading is null and a launch is refused.
+        assert_eq!(
+            EncounterService::read_task(&home, &one).unwrap(),
+            Value::Null
+        );
+        let refused = EncounterService::exec_task(&home, &one, &bound.revision, None).unwrap_err();
+        assert!(
+            refused.to_string().contains("Task binding removed"),
+            "{refused}"
+        );
+        // Its record stays in the history, exactly as it stood.
+        let kept = history(&home, &one);
+        assert_eq!(kept.len(), 1, "{kept:?}");
+        assert_eq!(kept[0], serde_json::to_value(&bound).unwrap());
+        // Its settings stand, disclosed as the previous task's.
+        let settings = EncounterService::read_session_settings(&home, &one).unwrap();
+        assert_eq!(settings["task"], Value::Null);
+        assert_eq!(settings["previous_task"]["task_ref"], "task:fixtures");
+        assert_eq!(settings["previous_task"]["set"]["name"], "Fixtures");
+    }
+
+    #[test]
+    fn a_removal_is_refused_in_words_and_removes_nothing() {
+        let (_dir, home) = attached(&["agent-session/one"]);
+        let one = r("agent-session/one");
+        let revision = SourceRevision::parse("task-binding/fixture").unwrap();
+        let remove = |task: &str, revision: &SourceRevision| {
+            EncounterService::remove_task(&home, &one, &r(task), revision)
+                .unwrap_err()
+                .to_string()
+        };
+        let none = remove("task:fixtures", &revision);
+        assert!(none.contains("No task is bound to this session"), "{none}");
+        let unattached = EncounterService::remove_task(
+            &home,
+            &r("agent-session/elsewhere"),
+            &r("task:fixtures"),
+            &revision,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(unattached.contains("not attached"), "{unattached}");
+        let bound = record("task:fixtures", None, |_| {});
+        publish(&home, &one, &bound).unwrap();
+        let other = remove("task:other", &revision);
+        assert!(
+            other.contains("The session's bound task is task:fixtures, not task:other"),
+            "{other}"
+        );
+        let stale = remove(
+            "task:fixtures",
+            &SourceRevision::parse("task-binding/older").unwrap(),
+        );
+        assert!(stale.contains("Task revision conflict"), "{stale}");
+        for (change, said) in [
+            (
+                json!({"ready": false}),
+                "Uncertain preparation must recover the same request, not be removed",
+            ),
+            (
+                json!({"material_host": {"workcell_bin": "/unused/workcell", "endpoint": "fixture",
+                    "workcell_ref": "workcell:fixture", "demand_ref": "demand:fixture"}}),
+                "A hosted task's material is Workcell's",
+            ),
+            (
+                json!({"prepared_run_scope": {"run_slug": "fixture", "expected_demand_digest": "fixture"}}),
+                "A task bound to a prepared run is Workcell's",
+            ),
+        ] {
+            let held = record("task:fixtures", None, |value| {
+                if let Some(ready) = change.get("ready") {
+                    value["ready"] = ready.clone();
+                } else {
+                    for (key, field) in change.as_object().unwrap() {
+                        value["request"][key] = field.clone();
+                    }
+                }
+            });
+            publish(&home, &one, &held).unwrap();
+            let refused = remove("task:fixtures", &revision);
+            assert!(refused.contains(said), "{refused} lacks {said}");
+            assert_eq!(
+                EncounterService::read_task(&home, &one).unwrap(),
+                serde_json::to_value(&held).unwrap(),
+                "nothing was removed"
+            );
+        }
+    }
+
+    /// The owner's creation as a test stands it in: the record a ready
+    /// admission of `input` would leave on `session`, under `made_ref`.
+    fn made_as(
+        made_ref: Option<&'static str>,
+    ) -> impl FnOnce(&AikitHome, &ResourceRef, Value) -> Result<Value> {
+        move |home, session, input| {
+            let task_ref = made_ref
+                .map(str::to_owned)
+                .unwrap_or_else(|| input["task_ref"].as_str().unwrap().to_owned());
+            let made = record(&task_ref, input["source"].as_str(), |value| {
+                value["request"]["central"]["purpose"] = input["purpose"].clone();
+                value["revision"] = json!("task-binding/copy");
+            });
+            publish(home, session, &made).unwrap();
+            Ok(serde_json::to_value(made).unwrap())
+        }
+    }
+
+    #[test]
+    fn a_task_is_copied_onto_a_session_holding_none_with_its_purpose_source_and_settings() {
+        let (_dir, home) = attached(&["agent-session/from", "agent-session/to"]);
+        let (from, to) = (r("agent-session/from"), r("agent-session/to"));
+        publish(
+            &home,
+            &from,
+            &record("task:fixtures", Some("wiki:anchor:lived-in"), |_| {}),
+        )
+        .unwrap();
+        EncounterService::write_session_settings(
+            &home,
+            &from,
+            json!({"track": {"solo": true},
+                "task": {"task_ref": "task:fixtures", "set": {"name": "Fixtures", "launch": "gate", "colour": "#79b6ce"}}}),
+            None,
+        )
+        .unwrap();
+        let asked = std::cell::RefCell::new(Value::Null);
+        let receipt =
+            EncounterService::copy_task_with(&home, &to, &from, None, |home, session, input| {
+                *asked.borrow_mut() = input.clone();
+                made_as(None)(home, session, input)
+            })
+            .unwrap();
+        // The owner's own creation was asked for the task's own: its purpose and source, and a ref of its own.
+        let asked = asked.into_inner();
+        let minted = asked["task_ref"].as_str().unwrap().to_owned();
+        assert!(
+            minted.starts_with("task:write-the-hand-off-fixtures-copy-"),
+            "{minted}"
+        );
+        assert_eq!(
+            asked,
+            json!({"purpose": "Write the hand-off fixtures", "source": "wiki:anchor:lived-in", "task_ref": minted})
+        );
+        assert_eq!(receipt["schema"], "aikit.encounter-task-copy/v1");
+        assert_eq!(receipt["from_session"], "agent-session/from");
+        assert_eq!(receipt["from_task_ref"], "task:fixtures");
+        assert_eq!(receipt["agent_session"], "agent-session/to");
+        assert_eq!(receipt["task_ref"], minted.as_str());
+        assert_eq!(
+            receipt["task"]["request"]["central"]["task_ref"],
+            minted.as_str()
+        );
+        assert_eq!(receipt["settings_refused"], Value::Null);
+        // The task's own settings came with it; the session's track settings did not.
+        let read = EncounterService::read_session_settings(&home, &to).unwrap();
+        assert_eq!(receipt["settings"], read);
+        assert_eq!(read["task"]["task_ref"], minted.as_str());
+        assert_eq!(read["task"]["name"], "Fixtures");
+        assert_eq!(read["task"]["launch"], "gate");
+        assert_eq!(read["task"]["colour"], "#79b6ce");
+        assert_eq!(read["task"]["source"], "wiki:anchor:lived-in");
+        assert_eq!(
+            read["track"]["solo"], false,
+            "a track's settings are its own"
+        );
+        // The original stands as it was.
+        assert_eq!(
+            EncounterService::read_task(&home, &from).unwrap()["request"]["central"]["task_ref"],
+            "task:fixtures"
+        );
+        // A copy named by the caller takes that name.
+        let (_dir, home) = attached(&["agent-session/from", "agent-session/to"]);
+        publish(&home, &from, &record("task:fixtures", None, |_| {})).unwrap();
+        let named = EncounterService::copy_task_with(
+            &home,
+            &to,
+            &from,
+            Some(r("task:named-copy")),
+            made_as(None),
+        )
+        .unwrap();
+        assert_eq!(named["task_ref"], "task:named-copy");
+        assert_eq!(
+            named["settings"],
+            Value::Null,
+            "nothing of its own to carry"
+        );
+        assert_eq!(named["task"]["request"].get("source"), None);
+    }
+
+    #[test]
+    fn a_copy_is_refused_in_words_and_makes_nothing() {
+        let (_dir, home) = attached(&["agent-session/from", "agent-session/to"]);
+        let (from, to) = (r("agent-session/from"), r("agent-session/to"));
+        let never = |_: &AikitHome, _: &ResourceRef, _: Value| -> Result<Value> {
+            panic!("a refused copy never reaches the owner's creation")
+        };
+        let copy = |to: &ResourceRef, from: &ResourceRef, task_ref: Option<&str>| {
+            EncounterService::copy_task_with(&home, to, from, task_ref.map(r), never)
+                .unwrap_err()
+                .to_string()
+        };
+        let empty = copy(&to, &from, None);
+        assert!(
+            empty.contains("agent-session/from holds no task to copy"),
+            "{empty}"
+        );
+        publish(
+            &home,
+            &from,
+            &record("task:fixtures", None, |value| value["ready"] = json!(false)),
+        )
+        .unwrap();
+        let pending = copy(&to, &from, None);
+        assert!(pending.contains("still being prepared"), "{pending}");
+        publish(&home, &from, &record("task:fixtures", None, |_| {})).unwrap();
+        let itself = copy(&from, &from, None);
+        assert!(
+            itself.contains("A session holds one task: agent-session/from holds task:fixtures"),
+            "{itself}"
+        );
+        let same = copy(&to, &from, Some("task:fixtures"));
+        assert!(same.contains("A copy is a task of its own"), "{same}");
+        let unattached = copy(&r("agent-session/elsewhere"), &from, None);
+        assert!(unattached.contains("not attached"), "{unattached}");
+        publish(&home, &to, &record("task:theirs", None, |_| {})).unwrap();
+        let held = copy(&to, &from, None);
+        assert!(
+            held.contains("A session holds one task: agent-session/to holds task:theirs"),
+            "{held}"
+        );
+    }
+
+    #[test]
+    fn a_copy_whose_settings_are_refused_stands_and_says_so() {
+        let (_dir, home) = attached(&["agent-session/from", "agent-session/to"]);
+        let (from, to) = (r("agent-session/from"), r("agent-session/to"));
+        publish(&home, &from, &record("task:fixtures", None, |_| {})).unwrap();
+        EncounterService::write_session_settings(
+            &home,
+            &from,
+            json!({"task": {"task_ref": "task:fixtures", "set": {"name": "Fixtures"}}}),
+            None,
+        )
+        .unwrap();
+        // The owner made the task under another ref than asked: the settings
+        // are refused for the ref asked, and the task stands.
+        let receipt = EncounterService::copy_task_with(
+            &home,
+            &to,
+            &from,
+            Some(r("task:asked")),
+            made_as(Some("task:made")),
+        )
+        .unwrap();
+        assert_eq!(receipt["settings"], Value::Null);
+        let refused = receipt["settings_refused"].as_str().unwrap();
+        assert!(
+            refused.contains("did not carry agent-session/from's task settings")
+                && refused.contains("The session's bound task is task:made, not task:asked"),
+            "{refused}"
+        );
+        assert_eq!(
+            EncounterService::read_task(&home, &to).unwrap()["request"]["central"]["task_ref"],
+            "task:made"
+        );
+    }
+
+    #[test]
+    fn a_copy_goes_through_the_owners_own_creation_which_derives_the_rest_from_the_session() {
+        // The production path: `configure_task` takes the short request and
+        // derives the rest from the receiving session's standing — here a
+        // session with no Agency that never opened, refused in its words.
+        let (_dir, home) = attached(&["agent-session/from", "agent-session/to"]);
+        let (from, to) = (r("agent-session/from"), r("agent-session/to"));
+        publish(
+            &home,
+            &from,
+            &record("task:fixtures", Some("wiki:anchor:lived-in"), |_| {}),
+        )
+        .unwrap();
+        let refused = EncounterService::copy_task(&home, &to, &from, None).unwrap_err();
+        assert_eq!(refused.code(), "encounter.task_underivable", "{refused}");
+        assert!(
+            refused.to_string().contains(
+                "its participant (central.participant_refs): the session has no Agency binding"
+            ),
+            "{refused}"
+        );
+        assert_eq!(
+            EncounterService::read_task(&home, &to).unwrap(),
+            Value::Null
         );
     }
 }

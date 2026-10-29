@@ -154,7 +154,7 @@ enum Command {
         expected_revision: Option<String>,
     },
     /// Read or change this session's settings and its bound task's: the
-    /// track's Telemetry and Solo; the task's name, colour, activator, output
+    /// track's Name, Telemetry and Solo; the task's name, colour, activator, output
     /// style, Loop, Launch mode, Then, Quantize, Repeat, envelopes and source
     /// (the constellation the task was made of, a wiki ref). Without
     /// --request-json it reads; several --agent-session read each at once.
@@ -182,6 +182,31 @@ enum Command {
         /// How long one turn may run before it is cancelled.
         #[arg(long, default_value_t = 600)]
         turn_timeout_secs: u64,
+    },
+    /// Take this session's task off it, against the task's revision: its
+    /// record stays in the task history and the session holds no task. Only
+    /// a ready, unhosted task without a prepared run is removed; its settings
+    /// stand, and Central keeps the task's NOW clearing.
+    EncounterTaskRemove {
+        #[arg(long)]
+        agent_session: String,
+        #[arg(long)]
+        task_ref: String,
+        #[arg(long)]
+        expected_revision: String,
+    },
+    /// Copy another session's ready task onto this session, which holds
+    /// none: the owner's own creation makes it of the task's purpose and
+    /// source (the rest derived from this session's standing) under a ref of
+    /// its own, then the task's own settings are carried onto it.
+    EncounterTaskCopy {
+        #[arg(long)]
+        agent_session: String,
+        #[arg(long)]
+        from_session: String,
+        /// The copy's ref; otherwise one is minted from its purpose.
+        #[arg(long)]
+        task_ref: Option<String>,
     },
     /// Restore an exact prior ready task after failed unhosted preparation.
     /// Hosted pending work requires recovery of the same Workcell demand.
@@ -675,6 +700,26 @@ fn run(cli: Cli) -> Result<()> {
             &socket.unwrap_or_else(|| crate::encounter_service::socket_path(home)),
             std::time::Duration::from_secs(turn_timeout_secs),
         ),
+        Command::EncounterTaskRemove {
+            agent_session,
+            task_ref,
+            expected_revision,
+        } => emit(&crate::encounter_service::EncounterService::remove_task(
+            home,
+            &aikit_core::ResourceRef::parse(agent_session)?,
+            &aikit_core::ResourceRef::parse(task_ref)?,
+            &aikit_core::SourceRevision::parse(expected_revision)?,
+        )?),
+        Command::EncounterTaskCopy {
+            agent_session,
+            from_session,
+            task_ref,
+        } => emit(&crate::encounter_service::EncounterService::copy_task(
+            home,
+            &aikit_core::ResourceRef::parse(agent_session)?,
+            &aikit_core::ResourceRef::parse(from_session)?,
+            task_ref.map(aikit_core::ResourceRef::parse).transpose()?,
+        )?),
         Command::EncounterTaskAbort {
             agent_session,
             expected_revision,
