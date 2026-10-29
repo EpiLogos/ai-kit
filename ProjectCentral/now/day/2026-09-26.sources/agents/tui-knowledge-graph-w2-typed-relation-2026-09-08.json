@@ -1,0 +1,11 @@
+{
+  "schema": "central.project-now.handoff/v1",
+  "id": "tui-knowledge-graph-w2-typed-relation-2026-09-08",
+  "provenance": "agent-authored-bounded-return",
+  "actor": "claude-opus-5",
+  "kind": "handoff",
+  "recorded_at_unix_seconds": 1788883372,
+  "subject": "TUI Knowledge graph W2: typed relation boundary and spatial navigation (PR #218)",
+  "result": "PR #218 open, 13/13 CI green, mergeable. Fixed the presentation boundary that fetched a typed KnowledgeRelationView then discarded it via to_value() and scraped a non-existent \"related\" key — every provider-bearing neighbourhood rendered \"no typed resource relations\". Added pure deterministic graph_layout (four bands, focus-centred, BTree-only), graph presentation state with recenter/back/depth/filter, narrow grouped fallback, mouse-keyboard parity, provenance-bearing Inspector. Containment is read structurally off endpoint role, not relation name (member arrives in both directions after cc1e152). Two consumer-side regression tests for #216 empirically fail against the pre-cc1e152 provider. OPEN: (1) owner-contract gap — RelationEdge carries no containment signal, so every consumer must keep a private relation-name list; draft issue written but unfiled, awaiting owner decision. (2) #43 is closed COMPLETED with seven acceptance claims its renderer never satisfied (no recentre existed at all; performance.rs had zero relation content; degraded state rendered a false absence); #218 is what backs them; standing correction not yet made. (3) W1 Universal Navigator untouched by design. (4) No physical/provider acceptance claimed — #211 W10 proving matrix unrun.",
+  "status": "active"
+}

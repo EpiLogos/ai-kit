@@ -1,0 +1,25 @@
+{
+  "schema": "central.project-now.handoff/v1",
+  "id": "sync-survives-an-invalid-skill-gitdirectory-2026-09-23",
+  "provenance": "agent-authored-bounded-return",
+  "actor": "zcode-glm-53f-sync-skip-2026-09-23",
+  "kind": "handoff",
+  "recorded_at_unix_seconds": 1790197748,
+  "subject": "sync survives an invalid skill: Git/Directory sources skip and name rejections, PR #412 open",
+  "result": "aikit source sync no longer aborts the whole snapshot when one discovered SKILL.md is invalid, on Git and plain Directory sources. SnapshotRecord gained rejected: [{path (relative to scan root), code, message}] with serde default + skip when empty, so existing snapshot.toml files load unchanged and a no-rejection snapshot keeps its exact previous digest (verified: installed pre-change binary and this build both produce 9ae69df157eb71fb... for the same clean fixture). Rejections join the digest when present, so a refusal that appears or disappears is a new candidate, never a stale record. Zero valid skills still fails source.no_skills, now listing every rejection and suggesting --root. Control-ground and Central sources stay strict at the first invalid skill; reject_symlinks and source.skill_collision unchanged. Rejections visible in source sync --json (rejected) and source show (candidate_rejected/active_rejected). Real case replayed with the built binary against mvschwarz/openrig@c8fca9d5c436e5357807e05254bf6735613eea3f: sync succeeds with 87 skills and exactly 1 rejection (packages/daemon/specs/agents/apps/vault-specialist/skills/vault-user, skill.invalid, no frontmatter); probe source removed with --force, never promoted. Evidence: PR https://github.com/EpiLogos/ai-kit/pull/412 (branch aikit/sync-skip-invalid-skills, head d823b099, based on origin/main b9ea2ac4). Tests: 4 new tests in crates/aikit-cli/tests/source_lifecycle.rs (skip-and-name on Directory and Git, all-invalid refusal lists every rejection, control-ground strictness unchanged); control_ground_source.rs 14/14 green including contract_violations_are_refused_at_sync_naming_the_file; workspace nextest 3383/3392 passed, clippy -D warnings clean, git diff --check clean, cargo fmt clean. 9 local failures are pre-existing environment divergences, not reachable from this diff: 6 tmux_real (aikit-adapters does not depend on aikit-cli; pane content never arrives under this shell sandbox), 2 client_roster_real + 1 discovery matrix (fail or flake identically with the change stashed at the base commit), a_scoped_query_hides_other_projects_absences_and_edges (fails identically at base b9ea2ac4; machine GitNexus refuses non-git directories). CI on base commit is green; CI will arbitrate the PR. Worktree: .aikit/tasks/sync-skip-invalid-skills (aikit task, own CARGO_TARGET_DIR), left in place pending merge, then aikit task close.",
+  "status": "carried",
+  "carried_from_days": [
+    "2026-09-23",
+    "2026-09-24",
+    "2026-09-26",
+    "2026-09-27",
+    "2026-09-28",
+    "2026-09-29",
+    "2026-09-30",
+    "2026-10-01",
+    "2026-10-02",
+    "2026-10-03",
+    "2026-10-04",
+    "2026-10-06"
+  ]
+}

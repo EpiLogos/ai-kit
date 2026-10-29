@@ -1,0 +1,14 @@
+{
+  "schema": "central.project-now.handoff/v1",
+  "id": "gateway-conversation-steering-real-stop-landed-2026-10-07",
+  "provenance": "agent-authored-bounded-return",
+  "actor": "agent:zcode-gateway-steer",
+  "kind": "handoff",
+  "recorded_at_unix_seconds": 1791333016,
+  "subject": "Gateway conversation steering + real stop landed on branch fix/gateway-turn-steer-interrupt, PR #494 open",
+  "result": "What now works in the gateway conversation engine (telegram and every connector): a message sent while a turn runs is queued and answered at the turn boundary (acknowledged in chat, bounded at 16); /stop interrupts through the harness real cancel (HostTurn wraps TurnHandle, receipt is the host-issued one) and drops the queue it supersedes; /new drops the queue and names it; /status discloses queued count; restart drain names queued prompts that never started. Evidence: new real-process test gateway_agent_host_turn.rs (ACP fixture: interrupt -> session/cancel on the wire -> turn ends Interrupted -> lane frees for next prompt) verified to FAIL on previous code; engine suite 30 passed/0 failed; host v2 12 passed; scripts/verify quick -p aikit-adapters -p aikit-cli green (nextest 2427 passed, clippy -D warnings clean, fmt clean). State: commit b3698ccc on fix/gateway-turn-steer-interrupt, pushed, PR https://github.com/EpiLogos/ai-kit/pull/494, CI pending; branch stands in env-2 seat (claimed by agent:zcode-gateway-steer) until the PR lands, then seat release --retire per the lane law. Remaining after merge: restart the running gateway service (aikit gateway serve / service manager) so the deployed telegram connector picks up the new build; live acceptance over the real telegram chat is the owner-side check. Side finding, not this lane: cargo clippy -p aikit-cli --tests fails identically on clean main (SourcePool/credential unresolved imports in aikit-adapters cfg-test blocks) - different clippy invocation than the gate uses, tests pass under nextest; name for whoever owns the sourcepool refactor.",
+  "status": "carried",
+  "carried_from_days": [
+    "2026-10-07"
+  ]
+}

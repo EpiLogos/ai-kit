@@ -1,0 +1,23 @@
+{
+  "schema": "central.project-now.handoff/v1",
+  "id": "resident-custody-landed-orphansafe-tui-surface-2026-09-25",
+  "provenance": "agent-authored-bounded-return",
+  "actor": "ZCode",
+  "kind": "handoff",
+  "recorded_at_unix_seconds": 1790334736,
+  "subject": "resident custody landed: orphan-safe TUI surface and idle-exit encounter owner",
+  "result": "Fixed the two process-custody defects behind the Sep 25 rogue-process incident (working tree, uncommitted, on latest origin/main ce0e528b). (1) aikit-tui surface loop now draws only when a frame-changing event arrives (idle ticks and mouse motion triggered full redraws at 10fps forever) and closes when the process is orphaned (parent-change watchdog), so a palette whose terminal died can no longer spin for days - the incident process burned ~74% CPU for 4.6 days. Proven by crates/aikit-tui/tests/surface_loop_custody_v2.rs (3 tests, counting backend). (2) encounter-serve now has explicit resident custody: --idle-exit-secs (default 21600, 0 disables) exits an owner no client has talked to, and SIGTERM/SIGINT are forwarded through signal-hook into the same graceful path as an explicit Shutdown request, so resident agents (pi children) are reaped and journalled instead of orphaned - the incident TERM left three pi agents alive for days. Proven by an_idle_owner_exits_and_leaves_no_socket_behind (lib test), the existing encounter_shutdown integration suite, and live binary replays: SIGTERM gives exit 0 with socket removed; --idle-exit-secs 1 self-exits with socket removed. Docs: resident-custody paragraph added to docs/encounter-runtime.md. Verification: scripts/verify quick -p aikit-tui -p aikit-cli = 1194/1195; the one failure (knowledge_project_code_scope_real) proven pre-existing by stash-replay (installed gitnexus CLI rejects the query; same degradation aikit knowledge search showed this session); clippy -D warnings clean; git diff --check clean. Proposal, not implemented (spans O-I ground): gateway serve has the same no-custody shape; the standing launchd gateway must keep running (it hosts the routine dispatcher), so the proportionate fix is an opt-in --idle-exit-secs on gateway serve plus adoption by O-I campaign spawners; stray campaign gateways are meanwhile covered by the machine process-hygiene sweep. Note: the incident ran the INSTALLED ~/.local/bin/aikit, which still carries the spin bug until this lands and is reinstalled.",
+  "status": "carried",
+  "carried_from_days": [
+    "2026-09-26",
+    "2026-09-27",
+    "2026-09-28",
+    "2026-09-29",
+    "2026-09-30",
+    "2026-10-01",
+    "2026-10-02",
+    "2026-10-03",
+    "2026-10-04",
+    "2026-10-06"
+  ]
+}

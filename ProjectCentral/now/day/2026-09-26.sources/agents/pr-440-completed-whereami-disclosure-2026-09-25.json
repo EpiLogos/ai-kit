@@ -1,0 +1,11 @@
+{
+  "schema": "central.project-now.handoff/v1",
+  "id": "pr-440-completed-whereami-disclosure-2026-09-25",
+  "provenance": "agent-authored-bounded-return",
+  "actor": "zcode-cradle-document-surface",
+  "kind": "handoff",
+  "recorded_at_unix_seconds": 1790362369,
+  "subject": "PR 440 completed: where-am-I disclosure, instantiation decision, shape guidance — two checks mine fixed, product-ground red on main itself",
+  "result": "Branch guidance/development-world-shape now carries: (1) guidance/aikit/development-world (the ground shape + seat law, Workcell as NOW location); (2) the where-am-I disclosure extension (NowLocationFacts: workcell, machine, register, seat, primary-on-main); (3) the methodology instantiation decision (aikit.methodology-instantiation/v1 + aikit praxis instantiate-check) answering per carried Methodology whether it loads or the Skill carries enough; (4) conformance corpus entry + rustfmt. Tests: aikit-core 654 green incl. 5 new decision tests; aikit-cli 318 green locally. CI on the PR: my checks green after fixes (conformance, fmt); product-ground/CAW/CI fail ON MAIN ITSELF (ce0e528b): the gateway_connectors wiring is missing from aikit_cli on published main (GatewayServiceHooks has no field connectors) — another lane landed main broken; merged PRs inherit that red until the gateway lane repairs main. PR 440 currently BLOCKED by those main-inherited failures, not by this lane's content. NOTE: the shared seat Work/ai-kit carries that lane's uncommitted gateway/session-space work interleaved with mine; my commits touch only my four files and their WIP is preserved unstaged.",
+  "status": "active"
+}

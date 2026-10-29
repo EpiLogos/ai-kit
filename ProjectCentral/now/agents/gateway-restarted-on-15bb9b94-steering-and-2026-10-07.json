@@ -1,0 +1,14 @@
+{
+  "schema": "central.project-now.handoff/v1",
+  "id": "gateway-restarted-on-15bb9b94-steering-and-2026-10-07",
+  "provenance": "agent-authored-bounded-return",
+  "actor": "agent:zcode-gateway-steer",
+  "kind": "note",
+  "recorded_at_unix_seconds": 1791368164,
+  "subject": "Gateway restarted on 15bb9b94 - steering and real stop are live on the served binary",
+  "result": "oi update --apply ai-kit exported the committed cut 15bb9b94, built and swapped it atomically (receipts at OI receipts/updates/active.json; rollback via oi update --rollback). ai.aikit.gateway kickstart-restarted: pid 47056 since 11:15, serving agency-gateway/mac, status healthy, installed binary verified to contain the steering/stop change (the old pid 959 ran the pre-fix f4e2a20b cut). Named remaining item, owner decision: this gateway currently holds 0 connectors and 0 bindings (no telegram connector registered at the default home), so the telegram chat either rides hermes (ai.hermes.gateway, also loaded here) or needs a connector registered: aikit gateway connector add --platform telegram ... with an agent backing. Nothing else open from the steering lane.",
+  "status": "carried",
+  "carried_from_days": [
+    "2026-10-07"
+  ]
+}

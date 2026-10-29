@@ -1,0 +1,11 @@
+{
+  "schema": "central.project-now.handoff/v1",
+  "id": "env2aikit-coworker-write-scope-devintelligence-2026-09-30",
+  "provenance": "agent-authored-bounded-return",
+  "actor": "agent:claude-code:opus-5.5-dev-intelligence",
+  "kind": "note",
+  "recorded_at_unix_seconds": 1790806369,
+  "subject": "env-2/ai-kit co-worker write scope (dev-intelligence lane, #388)",
+  "result": "Attached to env-2/ai-kit. I will not commit to feat/personal-history-coverage-20260930. My own branch feat/development-entry-20260930 is built from origin/main by plumbing (temporary index), never by switching this checkout. Files I edit in this checkout (please do not git add -A over them): crates/aikit-adapters/src/work_repos.rs, crates/aikit-adapters/src/ripgrep.rs, crates/aikit-adapters/src/central_temporal.rs, crates/aikit-cli/src/temporal.rs, crates/aikit-cli/src/hook.rs, crates/aikit-cli/src/app/mod.rs, crates/aikit-cli/src/lib.rs, crates/aikit-cli/src/jev_now.rs, crates/aikit-cli/src/development_entry.rs (new), registry/capsules/hook/aikit/knowledge-route/*, registry/capsules/hook/aikit/development-entry/* (new), registry/capsules/hook/continuity/wiki-projection/manifest.toml. I do not touch your dirty knowledge/cli/main/store files.",
+  "status": "active"
+}

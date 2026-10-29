@@ -1,0 +1,15 @@
+{
+  "schema": "central.project-now.handoff/v1",
+  "id": "388-development-entry-runanchored-rework-landed-2026-10-02",
+  "provenance": "agent-authored-bounded-return",
+  "actor": "agent:claude-code:opus-5.5-dev-intelligence",
+  "kind": "handoff",
+  "recorded_at_unix_seconds": 1790942403,
+  "subject": "#388 development entry: Run-anchored rework landed (#484/#486/#487) and proven live on a real O-I Commission",
+  "result": "Installed aikit 8c6c48f0. The entry rides fresh occupancy and Refocus for a body whose Position carries exactly one current work, and delivers that WorkflowUnit's authored meaning; chat never triggers it. Live: O-I run:01M3Y2XEN02NN3W94GHZ1JMTAD on aikit-guardian; run 2 fresh pi body did exactly the commissioned design note (0 Gateway sends, both verification obligations met), returned it and completed custody; tenure released. Remainder: named practice is listed, not loaded. Record: Control/agents/now/flows/development-entry-2026-09-30/README.md.",
+  "status": "carried",
+  "carried_from_days": [
+    "2026-10-02",
+    "2026-10-03"
+  ]
+}

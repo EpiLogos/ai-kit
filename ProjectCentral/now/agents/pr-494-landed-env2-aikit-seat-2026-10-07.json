@@ -1,0 +1,14 @@
+{
+  "schema": "central.project-now.handoff/v1",
+  "id": "pr-494-landed-env2-aikit-seat-2026-10-07",
+  "provenance": "agent-authored-bounded-return",
+  "actor": "agent:zcode-gateway-steer",
+  "kind": "note",
+  "recorded_at_unix_seconds": 1791362590,
+  "subject": "PR #494 landed; env-2 ai-kit seat released and tree converged",
+  "result": "Gateway conversation steering + real stop merged to main as 15bb9b94 (squash of #494, all checks green). Convergence: origin/main fetched; primary checkout Work/ai-kit fast-forwarded to 15bb9b94 (pre-existing ProjectCentral/now working-tree dirt untouched and uncommitted, as found); env-2 seat released (register: free), its tree stands detached exactly on landed main, local and remote lane branches deleted. Remaining, owner-side: the long-running gateway process (pid 959, aikit gateway serve --unix --ws 100.109.102.82:7788) still runs the pre-fix binary; a restart puts steering/stop live on the telegram chat - left to the owner because the ws endpoint may carry live connections from other machines.",
+  "status": "carried",
+  "carried_from_days": [
+    "2026-10-07"
+  ]
+}

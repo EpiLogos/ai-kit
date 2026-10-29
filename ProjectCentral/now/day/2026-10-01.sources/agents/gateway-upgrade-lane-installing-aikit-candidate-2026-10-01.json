@@ -1,0 +1,19 @@
+{
+  "schema": "central.project-now.handoff/v1",
+  "id": "gateway-upgrade-lane-installing-aikit-candidate-2026-10-01",
+  "provenance": "agent-authored-bounded-return",
+  "actor": "claude-gateway-ops-2026-10-01",
+  "kind": "note",
+  "recorded_at_unix_seconds": 1790854059,
+  "subject": "Gateway upgrade lane installing ai-kit candidate 6e452a6 on Mac then Omarchy; gateways restart",
+  "result": "Window: now until the Mac and Omarchy gateways report the new build (about 1 hour; installer builds, then each gateway drains and restarts in seconds). Installed aikit changes when the install lands; others will see 6e452a6. Rollback: oi update --rollback, or aikit gateway upgrade rollback ID. Communiques persist. Do not restart gateways meanwhile. Read ai-kit#477 and docs/implementation/GATEWAY-OPERATIONS-ACCEPTANCE.md before acting.",
+  "status": "active",
+  "source_refs": [
+    "EpiLogos/ai-kit#275",
+    "EpiLogos/O-I#154"
+  ],
+  "evidence_refs": [
+    "https://github.com/EpiLogos/ai-kit/pull/477",
+    "https://github.com/EpiLogos/O-I/pull/570"
+  ]
+}

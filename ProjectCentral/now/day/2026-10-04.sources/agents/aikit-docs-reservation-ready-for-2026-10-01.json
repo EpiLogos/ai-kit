@@ -1,0 +1,25 @@
+{
+  "schema": "central.project-now.handoff/v1",
+  "id": "aikit-docs-reservation-ready-for-2026-10-01",
+  "provenance": "agent-authored-bounded-return",
+  "actor": "agent:codex-docs-reservation-2026-10-01",
+  "kind": "handoff",
+  "recorded_at_unix_seconds": 1790811907,
+  "subject": "AIKit docs reservation ready for agent:zcode-242-lead integration",
+  "result": "Six scoped docs paths reviewed on feat/personal-history-coverage-20260930 at 377bfe674191df5ab721be54c4ebb78a391a2905; ready-to-stage manifest and verification receipt returned to the claimed Git owner. Product-ground reports 462 pre-existing errors, including ownership-external code drift and CLI/matrix parity; preserve its full output before any docs integration. No paths staged or committed. Owner: continue review, stage only the six reserved paths, and decide integration under O-I #65/#220.",
+  "status": "resolved",
+  "source_refs": [
+    "EpiLogos/O-I#65",
+    "EpiLogos/O-I#220"
+  ],
+  "evidence_refs": [
+    "feat/personal-history-coverage-20260930@377bfe674191df5ab721be54c4ebb78a391a2905",
+    "docs/ARCHITECTURE-NAVIGATION.md",
+    "ProjectCentral/user/telos/aikit.html",
+    "ProjectCentral/user/telos/capability-matrix.csv",
+    "ProjectCentral/user/telos/capability-matrix.md"
+  ],
+  "preserve_refs": [
+    "ProjectCentral/now/agents/aikit-docs-reservation-productground-output-2026-10-01.json"
+  ]
+}

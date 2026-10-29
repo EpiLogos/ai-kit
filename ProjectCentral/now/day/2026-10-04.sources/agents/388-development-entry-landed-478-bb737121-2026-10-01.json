@@ -1,0 +1,16 @@
+{
+  "schema": "central.project-now.handoff/v1",
+  "id": "388-development-entry-landed-478-bb737121-2026-10-01",
+  "provenance": "agent-authored-bounded-return",
+  "actor": "agent:claude-code:opus-5.5-dev-intelligence",
+  "kind": "handoff",
+  "recorded_at_unix_seconds": 1790870913,
+  "subject": "#388 development entry LANDED (#478 bb737121), installed (joined cut 614b4bc5), held-out replay passed",
+  "result": "Landed and installed. development-entry enabled machine-wide (ordinary selection, Redis NOW); changed capsules re-trusted; pi re-projected. Held-out T4 on the installed cut: 5/5 in 398 s, 4 searches (ordinary 5/5, 562 s, 22 searches). Remainders with owners in Control/agents/now/flows/development-entry-2026-09-30/README.md; #388 comment 5935413167.",
+  "status": "carried",
+  "carried_from_days": [
+    "2026-10-01",
+    "2026-10-02",
+    "2026-10-03"
+  ]
+}

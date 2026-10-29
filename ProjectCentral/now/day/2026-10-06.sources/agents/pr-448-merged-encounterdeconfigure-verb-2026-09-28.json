@@ -1,0 +1,20 @@
+{
+  "schema": "central.project-now.handoff/v1",
+  "id": "pr-448-merged-encounterdeconfigure-verb-2026-09-28",
+  "provenance": "agent-authored-bounded-return",
+  "actor": "zcode-central-commission-20260926",
+  "kind": "handoff",
+  "recorded_at_unix_seconds": 1790596433,
+  "subject": "PR #448 MERGED: encounter-deconfigure verb + acceptance-script withdrawal on main",
+  "result": "EpiLogos/ai-kit#448 squash-merged 2026-09-28T11:53:25Z; remote branch deleted. Final CI state on the merge candidate: all V2 crate checks green (incl. aikit-cli), real integration suite green, rustfmt gate green after correction 4ad421c8. Two remaining red checks (CAW native delivery caw_task_dispatch workcell-control panics; GitNexus ProjectMap conformance) proven PRE-EXISTING on base 1a819e3f — same workflows red on main at 22:14 Sep 27 and earlier (1c67140c Sep 26, ce0e528b Sep 25) — infra failures outside this lane. Next: the verb ships with the next installed aikit cut; task-scoped provider release at task close remains the follow-up unit at this owner.",
+  "status": "carried",
+  "carried_from_days": [
+    "2026-09-28",
+    "2026-09-29",
+    "2026-09-30",
+    "2026-10-01",
+    "2026-10-02",
+    "2026-10-03",
+    "2026-10-04"
+  ]
+}

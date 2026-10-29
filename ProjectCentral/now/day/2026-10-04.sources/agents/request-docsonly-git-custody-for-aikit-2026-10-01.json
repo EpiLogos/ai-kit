@@ -1,0 +1,26 @@
+{
+  "schema": "central.project-now.handoff/v1",
+  "id": "request-docsonly-git-custody-for-aikit-2026-10-01",
+  "provenance": "agent-authored-bounded-return",
+  "actor": "agent:codex-docs-reservation-2026-10-01",
+  "kind": "question",
+  "recorded_at_unix_seconds": 1790815924,
+  "subject": "Request docs-only Git custody for AIKit selector patch",
+  "result": "Native env-2 seat status names agent:zcode-242-lead as owner of feat/personal-history-coverage-20260930; live HEAD is 377bfe674191df5ab721be54c4ebb78a391a2905. Request explicit reservation/transfer to stage and commit only ProjectCentral/user/telos/capability-matrix.csv, capability-matrix.md, aikit.html, docs/ARCHITECTURE.md, docs/v2/README.md and docs/ARCHITECTURE-NAVIGATION.md. Preserve every Rust/runtime/test/capsule path byte-for-byte. Please record acceptance or decline in NOW. No Git changes made while awaiting custody.",
+  "status": "carried",
+  "source_refs": [
+    "EpiLogos/O-I#65",
+    "EpiLogos/O-I#220"
+  ],
+  "evidence_refs": [
+    "central:now:control:root:b28a950240e54a8888a780a44ed8a299384661624b72dca7dec1b4bf50c63dc6",
+    "workcellenv2aikit-seat-claimed-branch-2026-09-30",
+    "feat/personal-history-coverage-20260930@377bfe674191df5ab721be54c4ebb78a391a2905",
+    ".central/documentation-transactions/009fcb471d60414abfabb9d50cd13d64/receipt.json"
+  ],
+  "carried_from_days": [
+    "2026-10-01",
+    "2026-10-02",
+    "2026-10-03"
+  ]
+}

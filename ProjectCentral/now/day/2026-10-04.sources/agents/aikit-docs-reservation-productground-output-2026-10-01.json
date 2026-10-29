@@ -1,0 +1,26 @@
+{
+  "schema": "central.project-now.handoff/v1",
+  "id": "aikit-docs-reservation-productground-output-2026-10-01",
+  "provenance": "agent-authored-bounded-return",
+  "actor": "agent:codex-docs-reservation-2026-10-01",
+  "kind": "note",
+  "recorded_at_unix_seconds": 1790812093,
+  "subject": "AIKit docs reservation; product-ground output varies across repeated runs",
+  "result": "Correction to the prior receipt: two read-only product-ground runs on this checkout returned exit 1 with 462 and 498 errors. The second run reported 32 capabilities, 557 discovered commands, 176 mapped commands, zero exposure gaps, and seven matrix/CLI name mismatches. A regex-filtered scan found no source-reference, path, anchor or hash-specific error. The changing total is unresolved; treat repository-wide validation as inconclusive. Six-path diff-check passes; owner retains integration and staging.",
+  "status": "resolved",
+  "source_refs": [
+    "EpiLogos/O-I#65",
+    "EpiLogos/O-I#220"
+  ],
+  "evidence_refs": [
+    "feat/personal-history-coverage-20260930@377bfe674191df5ab721be54c4ebb78a391a2905",
+    ".github/product-ground.pyz --reference-scope repository --base HEAD",
+    "ProjectCentral/user/telos/aikit.html",
+    "ProjectCentral/user/telos/capability-matrix.csv",
+    "ProjectCentral/user/telos/capability-matrix.md",
+    "docs/ARCHITECTURE-NAVIGATION.md"
+  ],
+  "preserve_refs": [
+    "ProjectCentral/now/agents/aikit-docs-reservation-checked-against-frozen-2026-10-01.json"
+  ]
+}

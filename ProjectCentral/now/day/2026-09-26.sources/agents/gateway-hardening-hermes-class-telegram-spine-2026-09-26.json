@@ -1,0 +1,21 @@
+{
+ "schema": "central.project-now.handoff/v1",
+ "id": "gateway-hardening-hermes-class-telegram-spine-2026-09-26",
+ "provenance": "agent-authored-bounded-return",
+ "actor": "zcode-session",
+ "kind": "handoff",
+ "recorded_at_unix_seconds": 1790423326,
+ "subject": "Gateway hardening landed: Hermes-class Telegram spine live (pi+GLM-5.3-flash answering @nara_hermesbot through aikit), selectors + coexistence + Slack adapter; verifier 7/7 PASS",
+ "result": "ai-kit guidance/development-world-shape (contains origin/main; #97 merge = owner acceptance): 52a9a262 connector runtime (config/pump/Subscribe/stdio wire specimen); 21d937e3 conversation engine (real agent turns on bindings, canonical control ops status/stop/new/sessions/restart/pause/resume, restart=drained rematerialisation, kill-9 identity proof); e8cfb6d4+419f3e47 Telegram curl transport + factory wiring (owner-only token files, no new deps); eedcdaff Slack egress-first adapter (capability truth: refuses fake typing/media); 6480b225 /model /harness /skills over canonical ops + coexistence (inspect-only detection of hermes/openclaw, exclusive|coexist policy document, named refusals); 966d8c0c TUI renders agent replies/failures/control answers (cursor reconnect, no dupes, no re-sent turns); 3c675887 load-bound fix. LIVE: @nara_hermesbot answered by aikit gateway at /tmp/aikit-live-home (nohup, survives shell; owner DM bound deny-by-default + sender allowlist; pi RPC --model glm-5.3-flash zai direct; events 1-12 continuous, receipts through Telegram msg 3791; owner conversed live from mobile). omarchy runs same HEAD 3c6758873eda via oi path, identity stable across service restart, both Workcells reachable (loopback unix + tailnet WS, same semantic identity). Independent verifier 7/7 obligations PASS incl. own kill-9 proof. Durable record: EpiLogos/O-I#154 issuecomment-5845998216. Tests: adapters gateway 72, slack 20, connector_runtime 8, engine 12+1 ignored, coexistence 4, command 8, contact 13, tui conversation 15 \u2014 all green on quiet rerun.",
+ "status": "active",
+ "remaining": [
+  "Slack P-grade evidence: owner stages bot token at ~/.aikit/credentials/slack.token + AIKIT_SLACK_TEST_CHANNEL, then cargo test -p aikit-adapters --test slack_gateway_live -- --ignored",
+  "WhatsApp (Meta app + webhook endpoint), Discord (bot + outbound WS client), iMessage (macOS bridge sidecar via the proved stdio wire seam) \u2014 named prerequisites, no code faked",
+  "pi session continuity across gateway process loss: wire --session-id per binding (resident process holds continuity today)",
+  "Connector-conversation relocation across Workcells (Communique relay already proven; stream-plane relocation is new work)",
+  "Mac posture migration: live gateway is a temp home (nohup); production LaunchAgent still runs old binary on ~/.aikit \u2014 owner picks dedicated bot + posture, then cargo install --locked --path crates/aikit-cli && aikit gateway install-service",
+  "Hermes gateway was launchctl-bootouted at owner direction for bot exclusivity \u2014 restore with: launchctl bootstrap gui/501 ~/Library/LaunchAgents/ai.hermes.gateway.plist",
+  "aikit-adapters clippy debt (loop-never-loops x2, arity warnings) predates this lane; custody-lane uncommitted TUI files (application_surface.rs hunk, surface_loop_custody_v2.rs) belong to another session",
+  "seat-guard refuses commits on the primary checkout while this lane's branch lives there \u2014 furniture for the branch-excursion owner"
+ ]
+}
