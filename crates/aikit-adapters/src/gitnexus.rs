@@ -21,9 +21,18 @@ use crate::runner::CommandRunner;
 #[path = "gitnexus_snapshot.rs"]
 mod snapshot;
 
-/// Bound on the GitNexus index metadata file, read by both the in-place reader
-/// and the isolated snapshot.
-const MAX_INDEX_METADATA_BYTES: usize = 8 * 1024 * 1024;
+/// The deadline for a lens read when the runner was given none.
+const FALLBACK_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
+
+/// What GitNexus's `--limit` is asked for. It counts execution-flow
+/// *processes*, not hits, and its cost is per process: measured 27 Oct 2026 on
+/// O-I's graph, a query took 1.4 s at 5, 4.4 s at 50 and 18.7 s at 256, while
+/// the symbols it returns stop growing (twenty definitions whatever the limit,
+/// a few dozen process symbols). The knowledge faculty's candidate depth (256)
+/// counts hits, so it is translated here, not forwarded: forwarded, it put the
+/// largest graph past every deadline for no more hits.
+const DEFAULT_PROCESSES: usize = 5;
+const MAX_PROCESSES: usize = 50;
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 struct GitNexusCliSurface {
@@ -243,13 +252,15 @@ impl<R: CommandRunner> GitNexusCodeIndexProvider<R> {
                 reply_path.into(),
             ],
         );
-        // This is an optional derived lens. Its ceiling cannot lengthen the
-        // budget the application configured for this provider's runner.
-        let ceiling = std::time::Duration::from_secs(15);
+        // The budget the application configured for this provider's runner is
+        // the one deadline. It used to be capped again here at fifteen seconds,
+        // so a forty-five second budget, or a search's own, was cut at fifteen
+        // by a number nobody had configured. The fifteen stands in only when
+        // the runner carries no budget at all.
         let timeout = self
             .runner
             .configured_timeout()
-            .map_or(ceiling, |configured| configured.min(ceiling));
+            .unwrap_or(FALLBACK_READ_TIMEOUT);
         let output = self
             .runner
             .run_with_timeout(&argv, timeout)?
@@ -520,7 +531,7 @@ impl<R: CommandRunner> CodeIndexProvider for GitNexusCodeIndexProvider<R> {
                 "--repo".into(),
                 self.repo_name.clone(),
                 "--limit".into(),
-                limit.to_string(),
+                limit.clamp(DEFAULT_PROCESSES, MAX_PROCESSES).to_string(),
             ],
             "knowledge.gitnexus_query_failed",
         )?;
@@ -659,13 +670,14 @@ impl<R: CommandRunner> CodeIndexProvider for GitNexusCodeIndexProvider<R> {
 }
 
 /// The native index metadata GitNexus writes at the end of `analyze`
-/// (`gitnexus.json`, or `meta.json` from older releases), bounded to
-/// [`MAX_INDEX_METADATA_BYTES`]. GitNexus keeps whole-repository caches in this
-/// file (`fileHashes`, `indexCoverage`), so a large repository's metadata passes
-/// 1 MiB (O:I's is 1.8 MiB) while the few fields read here stay small.
+/// (`gitnexus.json`, or `meta.json` from older releases), read whole. GitNexus
+/// keeps whole-repository caches in this file (`fileHashes`, `indexCoverage`),
+/// so it grows with the repository (O:I's is 1.8 MiB) while the few fields read
+/// here stay small; a size bound here would switch the lens off as a repository
+/// grew.
 fn read_index_metadata(root: &Path) -> Result<Value> {
     let directory = root.join(".gitnexus");
-    let file = match std::fs::File::open(directory.join("gitnexus.json")) {
+    let mut file = match std::fs::File::open(directory.join("gitnexus.json")) {
         Ok(file) => file,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             std::fs::File::open(directory.join("meta.json")).map_err(|error| {
@@ -680,18 +692,8 @@ fn read_index_metadata(root: &Path) -> Result<Value> {
         }
     };
     let mut bytes = Vec::new();
-    file.take(MAX_INDEX_METADATA_BYTES as u64 + 1)
-        .read_to_end(&mut bytes)
+    file.read_to_end(&mut bytes)
         .map_err(|error| AikitError::new("knowledge.gitnexus_existing_index", error.to_string()))?;
-    if bytes.len() > MAX_INDEX_METADATA_BYTES {
-        return Err(AikitError::new(
-            "knowledge.gitnexus_existing_index",
-            format!(
-                "index metadata exceeds {} MiB",
-                MAX_INDEX_METADATA_BYTES / (1024 * 1024)
-            ),
-        ));
-    }
     serde_json::from_slice(&bytes).map_err(|error| {
         AikitError::new(
             "knowledge.gitnexus_existing_index",
@@ -954,15 +956,11 @@ mod tests {
     }
 
     #[test]
-    fn index_metadata_beyond_the_bound_is_refused_and_names_the_bound() {
-        let root = index_with_cache_of(MAX_INDEX_METADATA_BYTES);
-        let error = read_index_metadata(root.path()).expect_err("over the bound is refused");
-        assert_eq!(error.code(), "knowledge.gitnexus_existing_index");
-        assert!(
-            error.message().contains("exceeds 8 MiB"),
-            "{}",
-            error.message()
-        );
+    fn index_metadata_is_not_bounded_by_size() {
+        // 9 MB: past the 8 MiB bound this reader used to refuse at.
+        let root = index_with_cache_of(9_000_000);
+        let meta = read_index_metadata(root.path()).expect("metadata of any size is admitted");
+        assert_eq!(meta["lastCommit"], "abc123");
     }
 
     fn scripted(query: &str) -> ScriptedRunner {
@@ -1048,6 +1046,29 @@ mod tests {
         assert!(status.capabilities.cypher);
         assert!(status.capabilities.pdg_impact);
         assert!(!status.capabilities.structured_output);
+    }
+
+    #[test]
+    fn the_faculty_candidate_depth_is_translated_to_processes_not_forwarded() {
+        let calls = runner(r#"{"processes":[],"process_symbols":[],"definitions":[]}"#);
+        let observed = Arc::clone(&calls);
+        let mut provider = GitNexusCodeIndexProvider::new(
+            calls,
+            "demo",
+            SourceRef::parse("source:git/demo").unwrap(),
+            Some(SourceRevision::parse("git:abc").unwrap()),
+        );
+        provider.index(Path::new("/tmp/project"), false).unwrap();
+        provider.search("auth", 256).unwrap();
+        provider.search("auth", 3).unwrap();
+        let queries: Vec<String> = observed
+            .call_lines()
+            .into_iter()
+            .filter(|line| line.contains("query auth"))
+            .collect();
+        assert!(queries[0].contains("--limit 50"), "{queries:?}");
+        assert!(queries[1].contains("--limit 5"), "{queries:?}");
+        assert!(!queries.iter().any(|line| line.contains("--limit 256")));
     }
 
     #[test]

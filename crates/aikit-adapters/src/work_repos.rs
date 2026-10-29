@@ -159,9 +159,10 @@ pub fn decode_work_file_source_ref(source: &SourceRef) -> Result<Option<WorkFile
     Ok(Some(WorkFileAddress { project_id, member }))
 }
 
-/// Bound on one project read through this provider, mirroring the NOW-field
-/// read budget.
-pub const WORK_REPOS_MAX_READ_BYTES: u64 = 1024 * 1024;
+/// Bound on one project read through this provider: the physical reader's own
+/// ceiling (16 MiB, shared with wiki publication). It mirrored the NOW-field
+/// budget at 1 MiB, which refused ordinary generated and data sources.
+pub const WORK_REPOS_MAX_READ_BYTES: u64 = 16 * 1024 * 1024;
 
 /// Depth cap for the marker walk that prunes `.no-agent-retrieval` subtrees
 /// per project (the NOW-field walk's discipline).
@@ -261,8 +262,8 @@ fn term_weights(terms: usize, files: &BTreeMap<PathBuf, FileEvidence>) -> Vec<f6
 }
 
 /// First-class content types swept per repo (addendum A-7). Per-repo result
-/// limits and the searcher's `--max-filesize` budget keep json-heavy and
-/// noise repos bounded.
+/// limits keep json-heavy and noise repos bounded; the searcher sets no
+/// per-file size bound, so a long source is searched like a short one.
 pub const WORK_REPOS_TYPES: [&str; 14] = [
     "md", "rs", "ts", "tsx", "js", "mjs", "c", "h", "py", "sh", "toml", "json", "yml", "html",
 ];
@@ -1159,7 +1160,7 @@ impl<R: CommandRunner> WorkReposSourcePoolProvider<R> {
             exclude_globs,
             // Gitignore respected: no --hidden, no --no-ignore.
             hidden: false,
-            max_file_bytes: crate::ripgrep::DEFAULT_MAX_FILE_BYTES,
+            max_file_bytes: crate::ripgrep::NO_FILE_BOUND,
             limit: PER_REPO_MATCH_BUDGET,
             max_count_per_file: Some(PER_FILE_MATCH_CAP),
             timeout: Some(std::time::Duration::from_secs(30)),
@@ -2115,7 +2116,10 @@ mod tests {
             !search.iter().any(|arg| arg == "--no-ignore"),
             "hidden=false keeps gitignore respect: {search:?}"
         );
-        assert!(search.iter().any(|arg| arg == "--max-filesize"));
+        assert!(
+            !search.iter().any(|arg| arg == "--max-filesize"),
+            "a work source is searched whatever its size: {search:?}"
+        );
     }
 
     #[test]
@@ -2667,7 +2671,7 @@ mod tests {
     }
 
     #[test]
-    fn real_exact_byte_read_preserves_non_utf8_for_local_blake3_and_enforces_one_mebibyte() {
+    fn real_exact_byte_read_preserves_non_utf8_for_local_blake3_and_enforces_sixteen_mebibytes() {
         let owned = native_scratch();
         let root = owned.path();
         let bytes = vec![0xff, b'\n', 0xfe];
