@@ -8,7 +8,7 @@ use crate::encounter_service::{
 };
 use aikit_core::session_space::SessionSpaceRef;
 use aikit_core::session_space_application::{
-    SessionSpaceAgentAttachmentIntent, SessionSpaceMutation,
+    SessionSpaceAgentAttachmentIntent, SessionSpaceAgentSetBinding, SessionSpaceMutation,
 };
 use aikit_core::{ResourceRef, SourceRevision};
 use aikit_store::SessionSpaceApplicationStore;
@@ -48,7 +48,12 @@ fn member(home: &AikitHome, generation: &str, agent: &str) -> Result<(Value, Val
             .flatten()
             .filter(|entry| entry["agent_ref"] == agent)
         {
-            if selected.replace(entry.clone()).is_some() {
+            // The member carries the Central set it was projected from, so the
+            // space it is prepared into can name the set it runs.
+            let mut entry = entry.clone();
+            entry["agent_set_ref"] = team["agent_set_ref"].clone();
+            entry["agent_set_revision"] = team["agent_set_revision"].clone();
+            if selected.replace(entry).is_some() {
                 return Err(invalid("Team member is ambiguous across selected sets"));
             }
         }
@@ -77,6 +82,39 @@ fn call(_: &AikitHome, _: &EncounterRequest) -> Result<Value> {
     Err(invalid(
         "Native team encounter transport is unavailable on this host",
     ))
+}
+
+/// Tie the space a member is prepared into to the Central agent set the member
+/// was projected from (O-I #684): the space then names the set it runs, whose
+/// record says how its members' returns combine. A space that already names a
+/// set keeps it, and a member that names no set ties nothing.
+fn tie_team_set(
+    store: &SessionSpaceApplicationStore,
+    space: &SessionSpaceRef,
+    member: &Value,
+    provenance: &str,
+) -> Result<()> {
+    let Some(set) = member["agent_set_ref"]
+        .as_str()
+        .filter(|set| !set.is_empty())
+    else {
+        return Ok(());
+    };
+    if store.load(space)?.agent_set.is_some() {
+        return Ok(());
+    }
+    let preview = store.stage(
+        Some(space),
+        SessionSpaceMutation::BindAgentSet {
+            binding: SessionSpaceAgentSetBinding {
+                agent_set_ref: set.to_owned(),
+                revision: member["agent_set_revision"].as_str().map(str::to_owned),
+                provenance: vec![format!("Central team {set}: {provenance}")],
+            },
+        },
+    )?;
+    store.apply(&preview)?;
+    Ok(())
 }
 
 fn check_child_binding_revision(
@@ -281,6 +319,12 @@ pub fn team_operation(home: &AikitHome, cwd: &Path, input: Value) -> Result<Valu
                 )?;
                 store.apply(&preview)?;
             }
+            tie_team_set(
+                &store,
+                &space,
+                &member,
+                &format!("parent {parent}; generation {}", occupant.generation_ref),
+            )?;
             let state = store.load(&space)?;
             if !state.agent_sessions.contains_key(&session) {
                 let preview = store.stage(
@@ -863,5 +907,64 @@ mod retained_repertoire_tests {
                 .is_err(),
             "native generation drift must not bless retained execution"
         );
+    }
+}
+
+#[cfg(test)]
+mod team_set_tie_tests {
+    use super::*;
+
+    fn store() -> (
+        tempfile::TempDir,
+        SessionSpaceApplicationStore,
+        SessionSpaceRef,
+    ) {
+        let directory = tempfile::tempdir().unwrap();
+        let home = AikitHome::at(directory.path());
+        home.ensure_layout().unwrap();
+        let store = SessionSpaceApplicationStore::new(home);
+        let space = SessionSpaceRef::parse("session-space/central-team-tie").unwrap();
+        let preview = store
+            .stage(
+                None,
+                SessionSpaceMutation::Create {
+                    id: space.clone(),
+                    label: Some("Central native team".into()),
+                },
+            )
+            .unwrap();
+        store.apply(&preview).unwrap();
+        (directory, store, space)
+    }
+
+    #[test]
+    fn preparing_a_member_ties_the_space_to_the_members_central_set_once() {
+        let (_directory, store, space) = store();
+        let member = json!({"agent_ref":"agent/anima-eros","agent_set_ref":"anima","agent_set_revision":"r1"});
+        tie_team_set(&store, &space, &member, "parent agent/anima; generation g1").unwrap();
+        let tie = store
+            .load(&space)
+            .unwrap()
+            .agent_set
+            .expect("the space names its set");
+        assert_eq!(tie.agent_set_ref, "anima");
+        assert_eq!(tie.revision.as_deref(), Some("r1"));
+        assert!(tie.provenance[0].contains("parent agent/anima"));
+        // A second member of the same set changes nothing; another set's member
+        // never re-ties a space that already names one.
+        let revision = store.load(&space).unwrap().revision;
+        tie_team_set(&store, &space, &member, "again").unwrap();
+        let other = json!({"agent_ref":"agent/aletheia-janus","agent_set_ref":"aletheia","agent_set_revision":"r1"});
+        tie_team_set(&store, &space, &other, "other").unwrap();
+        let after = store.load(&space).unwrap();
+        assert_eq!(after.revision, revision);
+        assert_eq!(after.agent_set.unwrap().agent_set_ref, "anima");
+    }
+
+    #[test]
+    fn a_member_with_no_set_ties_nothing() {
+        let (_directory, store, space) = store();
+        tie_team_set(&store, &space, &json!({"agent_ref":"agent/kite"}), "p").unwrap();
+        assert!(store.load(&space).unwrap().agent_set.is_none());
     }
 }
