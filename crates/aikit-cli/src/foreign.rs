@@ -56,11 +56,12 @@ pub fn default_roots(home: &Path) -> Vec<(String, PathBuf)> {
 /// Foreign roots visible from a particular project. The npx `skills` CLI installs
 /// project skills into `.agents/skills` beside `skills-lock.json`; only indexing
 /// the global home root makes those project-local installations disappear from
-/// AIKit's map.
+/// AIKit's map. A project inside `home` is found no higher than `home` itself
+/// ([`project_ancestors`]).
 pub fn roots_for(home: &Path, cwd: &Path) -> Vec<(String, PathBuf)> {
     let mut roots = default_roots(home);
-    if let Some(project) = closest_ancestor_with(cwd, "skills-lock.json")
-        .or_else(|| closest_ancestor_dir(cwd, ".agents/skills"))
+    if let Some(project) = closest_ancestor_with(cwd, home, "skills-lock.json")
+        .or_else(|| closest_ancestor_dir(cwd, home, ".agents/skills"))
     {
         let path = project.join(".agents/skills");
         let global = home.join(".agents/skills");
@@ -142,18 +143,35 @@ fn direct_projected_generation(
     Some(metadata)
 }
 
-fn closest_ancestor_with(start: &Path, file: &str) -> Option<PathBuf> {
+/// The directories a project around `start` may stand in: `start` and its
+/// ancestors, but when `start` lies inside `home`, none above `home`. A home
+/// that is one folder among others (a world the O:I shell opens with its
+/// folder as `HOME`, O-I #740) sits under the computer's own user's home, whose
+/// `~/.agents/skills` is not a project of this home: walking past `home`
+/// reported it as one (`@project-agents` at `/Users/<you>/.agents/skills` in
+/// every world). A `start` outside `home` (a project in `/tmp`) walks to the
+/// root as before. Both paths are compared as the filesystem resolves them.
+fn project_ancestors(start: &Path, home: &Path) -> Vec<PathBuf> {
+    let resolved = |path: &Path| std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let home = resolved(home);
+    let inside = resolved(start).starts_with(&home);
     start
         .ancestors()
-        .find(|ancestor| ancestor.join(file).is_file())
+        .take_while(|ancestor| !inside || resolved(ancestor).starts_with(&home))
         .map(Path::to_path_buf)
+        .collect()
 }
 
-fn closest_ancestor_dir(start: &Path, dir: &str) -> Option<PathBuf> {
-    start
-        .ancestors()
+fn closest_ancestor_with(start: &Path, home: &Path, file: &str) -> Option<PathBuf> {
+    project_ancestors(start, home)
+        .into_iter()
+        .find(|ancestor| ancestor.join(file).is_file())
+}
+
+fn closest_ancestor_dir(start: &Path, home: &Path, dir: &str) -> Option<PathBuf> {
+    project_ancestors(start, home)
+        .into_iter()
         .find(|ancestor| ancestor.join(dir).is_dir())
-        .map(Path::to_path_buf)
 }
 
 // ---------------------------------------------------------------------------
@@ -229,7 +247,7 @@ pub fn survey_npx_skills_at(home: &Path, cwd: &Path, xdg_state_home: Option<&Pat
         home.join(".agents/skills"),
         3,
     )];
-    if let Some(project) = closest_ancestor_with(cwd, "skills-lock.json") {
+    if let Some(project) = closest_ancestor_with(cwd, home, "skills-lock.json") {
         candidates.push((
             NpxScope::Project,
             project.join("skills-lock.json"),
@@ -683,7 +701,53 @@ pub fn default_hook_survey(home: &Path) -> HookSurvey {
 
 #[cfg(test)]
 mod tests {
-    use super::sort_like_skills_cli;
+    use super::{roots_for, sort_like_skills_cli, survey_npx_skills_at, NpxScope};
+    use std::fs;
+
+    /// O-I #740: a world's home sits under the computer's own user's home. Its
+    /// projects' skills are found inside it; the computer's own user's
+    /// `~/.agents/skills` above it is never reported as a project of it.
+    #[test]
+    fn a_project_inside_home_is_found_no_higher_than_home() {
+        let scratch = tempfile::tempdir().unwrap();
+        let native = scratch.path().join("native");
+        let world = native.join("Worlds/Bare");
+        let central = world.join("Central");
+        fs::create_dir_all(native.join(".agents/skills")).unwrap();
+        fs::write(native.join("skills-lock.json"), "{}").unwrap();
+        fs::create_dir_all(&central).unwrap();
+        let labels = |roots: Vec<(String, std::path::PathBuf)>| {
+            roots
+                .into_iter()
+                .filter(|(label, _)| label == "@project-agents")
+                .map(|(_, path)| path)
+                .collect::<Vec<_>>()
+        };
+        assert!(
+            labels(roots_for(&world, &central)).is_empty(),
+            "the native home's skills are not the world's project"
+        );
+        assert!(survey_npx_skills_at(&world, &central, None)
+            .locks
+            .iter()
+            .all(|lock| lock.scope != NpxScope::Project));
+        // A project of the world's own is found as before.
+        let project = world.join("Central/Work/field-notes");
+        fs::create_dir_all(project.join(".agents/skills")).unwrap();
+        fs::create_dir_all(project.join("src")).unwrap();
+        assert_eq!(
+            labels(roots_for(&world, &project.join("src"))),
+            vec![project.join(".agents/skills")]
+        );
+        // A working directory outside home walks to the root as before.
+        let elsewhere = scratch.path().join("elsewhere/repo");
+        fs::create_dir_all(elsewhere.join(".agents/skills")).unwrap();
+        fs::create_dir_all(elsewhere.join("deep/dir")).unwrap();
+        assert_eq!(
+            labels(roots_for(&world, &elsewhere.join("deep/dir"))),
+            vec![elsewhere.join(".agents/skills")]
+        );
+    }
 
     #[test]
     fn skills_cli_sort_preserves_nodes_case_and_unicode_collation() {
