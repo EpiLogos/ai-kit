@@ -171,7 +171,7 @@ fn compose(short: ShortRequest, standing: Standing, at: ulid::Ulid) -> Result<Va
 
 /// A purpose in ref-safe words: lowercase ASCII letters and digits, the rest
 /// one hyphen, at most 48 characters; `task` when nothing is left.
-fn slug(purpose: &str) -> String {
+pub(super) fn slug(purpose: &str) -> String {
     let mut slug = String::new();
     for character in purpose.chars() {
         if character.is_ascii_alphanumeric() {
