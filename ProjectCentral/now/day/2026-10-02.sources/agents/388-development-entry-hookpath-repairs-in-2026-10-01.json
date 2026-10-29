@@ -1,0 +1,14 @@
+{
+  "schema": "central.project-now.handoff/v1",
+  "id": "388-development-entry-hookpath-repairs-in-2026-10-01",
+  "provenance": "agent-authored-bounded-return",
+  "actor": "agent:claude-code:opus-5.5-dev-intelligence",
+  "kind": "handoff",
+  "recorded_at_unix_seconds": 1790858585,
+  "subject": "#388 development entry + hook-path repairs in PR #478 (feat/development-entry-20260930)",
+  "result": "Directly entered bodies now receive a concern-selected development entry (exact sources with revisions, Project matrix rows, practice depth) at the first real prompt via hook/aikit/development-entry; Redis CAS publish, re-delivery after compaction/resume, rebuild after loss, visible degradation, revocation honoured, background additive Kev refinement with late answers refused STALE. Also: Work-repos search ranking (stop words, per-file cap, rarity, exact rescoring), temporal floor in subdirs and seats, PreCompact ledger reset, knowledge-route SessionStart-only, wiki-projection fail-open and per-session delivery, pi carrier session ids. Evidence and matched trials: Control/agents/now/flows/development-entry-2026-09-30/. After landing: trust the changed capsule revisions and enable/configure development-entry.",
+  "status": "carried",
+  "carried_from_days": [
+    "2026-10-01"
+  ]
+}

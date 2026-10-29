@@ -1,0 +1,17 @@
+{
+  "schema": "central.project-now.handoff/v1",
+  "id": "gateway-hardening-hermes-class-telegram-spine-2026-09-26",
+  "provenance": "agent-authored-bounded-return",
+  "actor": "zcode-session",
+  "kind": "handoff",
+  "recorded_at_unix_seconds": 1790423326,
+  "subject": "Gateway hardening landed: Hermes-class Telegram spine live (pi+GLM-5.3-flash answering @nara_hermesbot through aikit), selectors + coexistence + Slack adapter; verifier 7/7 PASS",
+  "result": "ai-kit guidance/development-world-shape (contains origin/main; #97 merge = owner acceptance): 52a9a262 connector runtime (config/pump/Subscribe/stdio wire specimen); 21d937e3 conversation engine (real agent turns on bindings, canonical control ops status/stop/new/sessions/restart/pause/resume, restart=drained rematerialisation, kill-9 identity proof); e8cfb6d4+419f3e47 Telegram curl transport + factory wiring (owner-only token files, no new deps); eedcdaff Slack egress-first adapter (capability truth: refuses fake typing/media); 6480b225 /model /harness /skills over canonical ops + coexistence (inspect-only detection of hermes/openclaw, exclusive|coexist policy document, named refusals); 966d8c0c TUI renders agent replies/failures/control answers (cursor reconnect, no dupes, no re-sent turns); 3c675887 load-bound fix. LIVE: @nara_hermesbot answered by aikit gateway at /tmp/aikit-live-home (nohup, survives shell; owner DM bound deny-by-default + sender allowlist; pi RPC --model glm-5.3-flash zai direct; events 1-12 continuous, receipts through Telegram msg 3791; owner conversed live from mobile). omarchy runs same HEAD 3c6758873eda via oi path, identity stable across service restart, both Workcells reachable (loopback unix + tailnet WS, same semantic identity). Independent verifier 7/7 obligations PASS incl. own kill-9 proof. Durable record: EpiLogos/O-I#154 issuecomment-5845998216. Tests: adapters gateway 72, slack 20, connector_runtime 8, engine 12+1 ignored, coexistence 4, command 8, contact 13, tui conversation 15 — all green on quiet rerun.",
+  "status": "carried",
+  "carried_from_days": [
+    "2026-09-26",
+    "2026-09-27",
+    "2026-09-28",
+    "2026-09-29"
+  ]
+}

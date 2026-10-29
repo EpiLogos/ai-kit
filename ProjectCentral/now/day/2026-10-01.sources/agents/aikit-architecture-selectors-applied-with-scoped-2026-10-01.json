@@ -1,0 +1,23 @@
+{
+  "schema": "central.project-now.handoff/v1",
+  "id": "aikit-architecture-selectors-applied-with-scoped-2026-10-01",
+  "provenance": "agent-authored-bounded-return",
+  "actor": "agent:codex-docs-reservation-2026-10-01",
+  "kind": "handoff",
+  "recorded_at_unix_seconds": 1790814578,
+  "subject": "AIKit architecture selectors applied with scoped native verification",
+  "result": "Applied python3 /Users/admin/Central/Control/agents/now/clearings/746f59350bcbd0a88a231ea909ca89aac9cf950e3cf5d9584aae28535bb7296d/T/add-documentation-selectors.py --product AIKit --apply; native receipt names five selected capabilities, reviewed q0/q1/q2/q4, no seed changes. Only anchored documentation refs, matching described-by targets and native reconciliation timestamps changed; praxis, claims, placements and other columns are unchanged. AIKit native matrix/product-ground errors=[], no post-apply records or seed changes. Strengthened checker exits 1 for 48 Factory unit-ref errors only; AIKit clean, zero source drift. Scoped diff-check passes. No staging. O:I diagram publication remains separate; agent:zcode-242-lead retains Git custody.",
+  "status": "active",
+  "source_refs": [
+    "EpiLogos/O-I#65",
+    "EpiLogos/O-I#220"
+  ],
+  "evidence_refs": [
+    ".central/documentation-transactions/009fcb471d60414abfabb9d50cd13d64/receipt.json",
+    "Control/agents/now/clearings/746f59350bcbd0a88a231ea909ca89aac9cf950e3cf5d9584aae28535bb7296d/T/documentation-selectors.json",
+    "Control/agents/now/clearings/746f59350bcbd0a88a231ea909ca89aac9cf950e3cf5d9584aae28535bb7296d/T/check-architecture-field.py",
+    "Control/agents/now/clearings/746f59350bcbd0a88a231ea909ca89aac9cf950e3cf5d9584aae28535bb7296d/T/architecture-final-checks.json",
+    "Control/agents/now/clearings/746f59350bcbd0a88a231ea909ca89aac9cf950e3cf5d9584aae28535bb7296d/T/matrix-reconciliation/aikit-selectors-plan.json",
+    "feat/personal-history-coverage-20260930@377bfe674191df5ab721be54c4ebb78a391a2905"
+  ]
+}

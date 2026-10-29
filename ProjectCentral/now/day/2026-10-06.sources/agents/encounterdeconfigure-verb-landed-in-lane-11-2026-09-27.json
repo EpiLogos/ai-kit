@@ -1,0 +1,21 @@
+{
+  "schema": "central.project-now.handoff/v1",
+  "id": "encounterdeconfigure-verb-landed-in-lane-11-2026-09-27",
+  "provenance": "agent-authored-bounded-return",
+  "actor": "zcode-central-commission-20260926",
+  "kind": "handoff",
+  "recorded_at_unix_seconds": 1790500704,
+  "subject": "encounter-deconfigure verb landed in lane; 11 stale provider rows withdrawn from live state",
+  "result": "Lane feat/encounter-provider-withdraw-20260926 @ 884b1777 (worktrees/encounter-withdraw-20260926, base 966d8c0c): (1) EncounterService::deconfigure + CLI verb aikit session-space encounter-deconfigure --provider-id (configure exact inverse; same safe-id gate; refuses unknown id by name; owner-only, never IPC). (2) scripts/verify-epi-prime-ql.py finally-block now withdraws its minted provider and records provider-withdrawal.json — the leak that minted 8 orphan epi-prime-ql-acceptance-* rows in one day. (3) New unit test deconfigure_withdraws_exactly_one_provider_and_refuses_unknown_ids; cargo test -p aikit-cli --lib encounter_service = 36 passed 0 failed. EXECUTED LIVE CLEANUP with the lane binary: 25 provider rows -> 14 (withdrew 8 acceptance rows + 3 expired task scaffolding rows task-b0f5/c6fc/8445); remaining 14 are owner-configured editions (10 pi-rpc, 3 acp, 1 prime-rpc). Desktop Connect-with row now renders sane. Remaining at this owner: task-scoped provider release at task close (encounter-task lifecycle) — same leak class; and landing the lane through the established PR path. NOT installed: verb ships with the next installed aikit cut.",
+  "status": "carried",
+  "carried_from_days": [
+    "2026-09-27",
+    "2026-09-28",
+    "2026-09-29",
+    "2026-09-30",
+    "2026-10-01",
+    "2026-10-02",
+    "2026-10-03",
+    "2026-10-04"
+  ]
+}

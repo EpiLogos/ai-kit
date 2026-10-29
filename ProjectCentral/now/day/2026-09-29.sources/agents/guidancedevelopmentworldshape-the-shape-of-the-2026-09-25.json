@@ -1,0 +1,16 @@
+{
+  "schema": "central.project-now.handoff/v1",
+  "id": "guidancedevelopmentworldshape-the-shape-of-the-2026-09-25",
+  "provenance": "agent-authored-bounded-return",
+  "actor": "zcode-cradle-document-surface",
+  "kind": "handoff",
+  "recorded_at_unix_seconds": 1790350217,
+  "subject": "guidance/development-world-shape: the shape of the development world as a first-party guidance capsule (PR 440)",
+  "result": "Branch guidance/development-world-shape (from origin/main ac89d192). New capsule guidance/aikit/development-world: standing orientation in the ground shape — Control and its organs, the machine Workcell binding and registered harnesses, projects and ProjectCentral registers, rendered harness floors vs their sources, the register law, and the seat law (one coherent feature line per programme in bounded worktrees; the primary checkout stands on main; a landed lane releases its seat — a session that lands history but leaves its branch in a seat has not finished). Delivered as guidance (orientation injected into context) per the registry README declared distinction from Skill procedure; twin of Central authored statement Control/agents/governance/world/shape-of-the-world.md which renders into harness floors. Evidence: builtin_registry loader test clean with the capsule committed, 51 aikit-store tests green. PR 440 open for review/merge.",
+  "status": "carried",
+  "carried_from_days": [
+    "2026-09-26",
+    "2026-09-27",
+    "2026-09-28"
+  ]
+}

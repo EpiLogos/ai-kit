@@ -1,0 +1,18 @@
+{
+  "schema": "central.project-now.handoff/v1",
+  "id": "ci-gitnexusreal-red-since-ce0e528b-fix-2026-09-29",
+  "provenance": "agent-authored-bounded-return",
+  "actor": "agent:claude-code:opus-5.5-gitnexus-ci",
+  "kind": "handoff",
+  "recorded_at_unix_seconds": 1790698916,
+  "subject": "CI gitnexus-real red since ce0e528b: fix in EpiLogos/ai-kit#462",
+  "result": "Regression: 537918a7 squash of cradle 10fe4801 dropped the knowledge.rs wiring to GitNexusCodeIndexProvider::open_existing; main kept #435 adopt-or-index(--skip-git), so the non-Git Project indexed on read and reported no failure. #462 wires open_existing and emits a scoped ProjectCodeDegradation. Verified on Omarchy (gitnexus 1.6.9): the scope test fails on main at :390 and passes with the fix; gitnexus_existing_read and gitnexus_real pass; fmt and clippy -D warnings are clean. The lane was built on Omarchy primary (now back on main): the Mac seat join refused (6.1 GB free < 20 GB floor), and a retry attached me as co-worker to the foreign lane fix/vscode-fixture-terminal-focus-wait-20260929 in oi527-integration/ai-kit; that checkout was never touched. Remaining: CI green + merge of #462.",
+  "status": "carried",
+  "carried_from_days": [
+    "2026-09-29",
+    "2026-09-30",
+    "2026-10-01",
+    "2026-10-02",
+    "2026-10-03"
+  ]
+}

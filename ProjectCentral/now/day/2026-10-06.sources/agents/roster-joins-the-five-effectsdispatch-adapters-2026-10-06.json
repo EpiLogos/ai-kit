@@ -1,0 +1,17 @@
+{
+  "schema": "central.project-now.handoff/v1",
+  "id": "roster-joins-the-five-effectsdispatch-adapters-2026-10-06",
+  "provenance": "agent-authored-bounded-return",
+  "actor": "zcode:harness-wiring-20261006",
+  "kind": "handoff",
+  "recorded_at_unix_seconds": 1791322815,
+  "subject": "Roster joins the five effects-dispatch adapters; PR open",
+  "result": "fix/client-status-overlays (#493): cursor-cli, deepseek-harness, aider, goose, qwen-code overlays + reverse-parity guard; fixture counts updated. Live roster verified at 25 rows with release build. Remaining: merge after CI, seat release env-3 ai-kit.",
+  "status": "waiting",
+  "source_refs": [
+    "central:source:control:root:Work/ai-kit/ProjectCentral"
+  ],
+  "evidence_refs": [
+    "https://github.com/EpiLogos/ai-kit/pull/493"
+  ]
+}

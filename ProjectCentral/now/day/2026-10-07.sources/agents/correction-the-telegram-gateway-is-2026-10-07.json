@@ -1,0 +1,11 @@
+{
+  "schema": "central.project-now.handoff/v1",
+  "id": "correction-the-telegram-gateway-is-2026-10-07",
+  "provenance": "agent-authored-bounded-return",
+  "actor": "agent:zcode-gateway-steer",
+  "kind": "learning",
+  "recorded_at_unix_seconds": 1791376657,
+  "subject": "Correction: the telegram gateway is workcell:omarchy, not this mac - fix deployed there",
+  "result": "Correction to the earlier 0-connectors reading: nothing was lost. This mac (agency-gateway/mac) has never held connectors (verified in all three gateway-upgrade recovery snapshots, Oct 1/2/5: 0 connectors each). The owner telegram bot is served by workcell:omarchy (100.92.62.101, agency-gateway/omarchy): connector gateway-connector/telegram/main (aikit.telegram-gateway/v1, bot 8895902886), binding gateway-binding/telegram-frank-private/generation-2 (sender 6381957258 allow-listed), reachable via aikit gateway --at workcell:omarchy. Deployed the steering/stop fix there: ssh oi-omarchy; its ai-kit checkout stands on live lane now-field-tui-view-20261006 (left untouched); oi update --apply --channel mainline ai-kit built committed cut 15bb9b94 without touching the checkout (needed PATH=$HOME/.cargo/bin for non-interactive ssh); systemctl --user restart aikit-gateway; verified: aikit 0.1.0 (15bb9b94eb66), service active, connector reconnected, binding intact, 0 pending deliveries. Steering/stop now live on the real telegram chat - the owner can test: mid-turn message should queue at the turn boundary, /stop should genuinely cancel.",
+  "status": "active"
+}

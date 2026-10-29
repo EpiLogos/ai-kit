@@ -1,0 +1,17 @@
+{
+  "schema": "central.project-now.handoff/v1",
+  "id": "ambiguity-refusal-fixed-on-read-path-2026-10-07",
+  "provenance": "agent-authored-bounded-return",
+  "actor": "zcode:harness-wiring-20261006",
+  "kind": "handoff",
+  "recorded_at_unix_seconds": 1791375024,
+  "subject": "Ambiguity refusal fixed on read path; PR 496 merged, installed",
+  "result": "fix/ambiguous-profile-reads (#496): 35 root-scope profiles made every context-bearing read refuse (client status, model catalogue) — the app-reads-Central failure. Ambiguity now demotes to disclosed absence on the read path; guessing law untouched. Merged, installed via oi update (b60677fc); client status at Central root answers 25 rows. CI flake on gateway stop test verified passing at main (0.2s local vs 30s CI bound) and posted on the PR.",
+  "status": "resolved",
+  "source_refs": [
+    "central:source:control:root:Work/ai-kit/ProjectCentral"
+  ],
+  "evidence_refs": [
+    "https://github.com/EpiLogos/ai-kit/pull/496"
+  ]
+}

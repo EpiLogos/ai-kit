@@ -1,0 +1,22 @@
+{
+  "schema": "central.project-now.handoff/v1",
+  "id": "mac-installed-aikit-moves-to-merged-2026-10-02",
+  "provenance": "agent-authored-bounded-return",
+  "actor": "claude-gateway-ops-2026-10-01",
+  "kind": "note",
+  "recorded_at_unix_seconds": 1790934988,
+  "subject": "Mac installed ai-kit moves to merged main 3ee08a90; gateway restarts once",
+  "result": "Installing ai-kit candidate 3ee08a90 (main: contains the earlier joined cut e8caad2f: main 5a0690f2 plus gateway-ops, now merged) with oi update, then restarting the Mac gateway onto it. Omarchy already runs it. Expect the new aikit and one gateway restart; Communiques persist; the firewall may queue inbound peers until macOS lists the new binary (doctor names the owner command). Rollback: oi update --rollback or aikit gateway upgrade rollback ID.",
+  "status": "carried",
+  "source_refs": [
+    "EpiLogos/ai-kit#275",
+    "EpiLogos/ai-kit#481"
+  ],
+  "evidence_refs": [
+    "https://github.com/EpiLogos/ai-kit/pull/482"
+  ],
+  "carried_from_days": [
+    "2026-10-02",
+    "2026-10-03"
+  ]
+}

@@ -1,0 +1,24 @@
+{
+  "schema": "central.project-now.handoff/v1",
+  "id": "aikit-docs-reservation-checked-against-frozen-2026-10-01",
+  "provenance": "agent-authored-bounded-return",
+  "actor": "agent:codex-docs-reservation-2026-10-01",
+  "kind": "handoff",
+  "recorded_at_unix_seconds": 1790812434,
+  "subject": "AIKit docs reservation checked against frozen architecture field evidence",
+  "result": "Replayed the supplied check-architecture-field.py in memory with only its architecture-final-checks.json write suppressed. Command: python3 -u -c [read script; remove final write_text call; exec with original __file__]. Exit 1 solely for QL-MEF source drift; AIKit repository_scope_errors=[], post_apply_changed_records=[], seed_changes=[]. Six-product check: 61 sources, 58 arrows, six diagrams, 194 documentation refs, 22 native reverse walks; all six native product checks empty. O:I diagram refs remain dependent on separately reserved env-2 O-I docs publication. No AIKit files staged or changed by replay.",
+  "status": "resolved",
+  "source_refs": [
+    "EpiLogos/O-I#65",
+    "EpiLogos/O-I#220"
+  ],
+  "evidence_refs": [
+    "Control/agents/now/clearings/746f59350bcbd0a88a231ea909ca89aac9cf950e3cf5d9584aae28535bb7296d/T/check-architecture-field.py",
+    "Control/agents/now/clearings/746f59350bcbd0a88a231ea909ca89aac9cf950e3cf5d9584aae28535bb7296d/T/architecture-final-checks.json",
+    "Control/agents/now/clearings/746f59350bcbd0a88a231ea909ca89aac9cf950e3cf5d9584aae28535bb7296d/T/matrix-reconciliation/reverse-navigation.json",
+    "env-2/o-i/docs/architecture: reserved publication dependency"
+  ],
+  "preserve_refs": [
+    "ProjectCentral/now/agents/aikit-architecture-selectors-applied-with-scoped-2026-10-01.json"
+  ]
+}

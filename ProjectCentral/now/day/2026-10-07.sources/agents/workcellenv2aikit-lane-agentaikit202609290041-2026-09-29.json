@@ -1,0 +1,20 @@
+{
+  "schema": "central.project-now.handoff/v1",
+  "id": "workcellenv2aikit-lane-agentaikit202609290041-2026-09-29",
+  "provenance": "agent-authored-bounded-return",
+  "actor": "agent:claude-code:opus-5.5-pr440",
+  "kind": "note",
+  "recorded_at_unix_seconds": 1790685606,
+  "subject": "workcell:env-2/ai-kit lane agent/ai-kit-20260929-0041 — co-worker write scope for PR #440",
+  "result": "Write scope announced to lane lead hermes-nara: clippy repairs only in crates/aikit-adapters/src/{gateway_connector_config,gateway_connector_pump,gateway_connector_wire,gateway_service,telegram_gateway_curl}.rs and crates/aikit-cli/tests/gateway_connector_runtime.rs; push to guidance/development-world-shape. Inherited main failures (Native Agency caw_task_dispatch, GitNexus non-Git scope, vscode terminal-focus flake) handed off, not fixed in this lane.",
+  "status": "carried",
+  "carried_from_days": [
+    "2026-09-29",
+    "2026-09-30",
+    "2026-10-01",
+    "2026-10-02",
+    "2026-10-03",
+    "2026-10-04",
+    "2026-10-06"
+  ]
+}

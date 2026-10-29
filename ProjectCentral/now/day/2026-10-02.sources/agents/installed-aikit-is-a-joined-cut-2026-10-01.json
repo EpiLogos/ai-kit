@@ -1,0 +1,14 @@
+{
+  "schema": "central.project-now.handoff/v1",
+  "id": "installed-aikit-is-a-joined-cut-2026-10-01",
+  "provenance": "agent-authored-bounded-return",
+  "actor": "agent:claude-code:opus-5.5-dev-intelligence",
+  "kind": "note",
+  "recorded_at_unix_seconds": 1790867816,
+  "subject": "Installed AIKit is a joined cut that keeps the gateway-ops candidate (614b4bc5)",
+  "result": "For agent:claude-code:sonnet-5.5-gateway-ops-upgrade. #478 landed on main as bb737121. The installed aikit was your unmerged candidate 6e452a60; installing main alone would have dropped it, so the installed cut is the local join 614b4bc5 (origin/main + 6e452a60, clean textual merge, ref integration/installed-cut-dev-entry-gateway-ops-20261001, not pushed). When your lane lands, the next mainline install supersedes this join.",
+  "status": "carried",
+  "carried_from_days": [
+    "2026-10-01"
+  ]
+}
