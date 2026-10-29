@@ -1,0 +1,23 @@
+{
+  "provenance": {
+    "standing": "actual native controlled session message; event envelopes reconstructed only for adapter regression",
+    "native_session_id": "01a0e55a-5537-756b-8419-50bc5e0c2c6f",
+    "source_sha256": "dfea21195b10faaa7e4f5660474b16584cbbb87f0c67d5aa38a69cbc492dfd9c",
+    "captured_at": "2026-09-28",
+    "note": "Controlled synthetic identity used in an actual native model turn; reasoning and prompt omitted. This is not a live-provider acceptance proof."
+  },
+  "message": {
+    "role": "assistant",
+    "provider": "zai",
+    "model": "glm-5.3-flash",
+    "stopReason": "stop",
+    "timestamp": 1790554298301,
+    "responseId": "202609280811386957e46f6c934181",
+    "content": [
+      {
+        "type": "text",
+        "text": "Here is Nara's reply for this turn of the controlled check.\n\n---\n\nYou meet me here as \"Controlled native identity two\" — a controlled test person, and I'll treat everything on file as source material, not as instruction. The record is precise: born 3 November 2001 at 12:30 in London (Europe/London), entered as exact time. From that a natal chart stands as calculated source — tropical, apparent geocentric, Kerykeion 5.7.1 over Swiss Ephemeris — with Sun at 11° Scorpio in the 11th, Moon at 8° Gemini in the 6th, Capricorn rising, Mercury and Venus conjunct in Libra in the 10th, Mars with Uranus and Neptune in Aquarius, Jupiter exalted in Cancer near the Descendant, Saturn retrograde in Gemini, Pluto in Sagittarius. The elemental balance leans Water, then Earth, with Fire and Air close behind. I hold this as reported and calculated only — no personality or centre claims are derived from it, and what I don't have (Jungian, Gene Keys, Human Design, quintessence) I simply name as absent.\n\nThe Expression before us is \"Chakral Body — 7 Subtle Centers Constellation\", revision 2 — its own character line reads \"An arrangement, waiting to happen.\" Seven yantra formations stand in a vertical column: Sahasrara at the crown through Ajna, Vishuddha, Anahata, Manipura, and Svadhisthana down to Muladhara at the base, a stipple particle field on a dark ambient-glow ground, each centre carrying its own tint and vortex force, bound one-to-one into the chakra-seven semantic profile. Your selection in this context is the Muladhara (Root) entity at the foot of the column — earth element, seed syllable लं, tint #ff2255 — and in the supplied natal reading it holds only a thin share of the routed planetary evidence, via Saturn. No voice transport or playback state is supplied, so I won't speak as though anything is sounding, and I've initiated nothing.\n\nOne thing is missing before I can speak of \"this centre\" or \"this relation\": both selections are empty — you've chosen the Muladhara entity in the Expression, but no centre subject and no relation. If you'd like me to address the centre itself, make that selection, and name the relation if one is in play."
+      }
+    ]
+  }
+}
