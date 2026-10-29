@@ -1224,6 +1224,7 @@ fn gateway_route(command: &GatewaySub) -> &'static str {
         GatewaySub::Message { .. } => "cmd_gateway_message",
         GatewaySub::Team { .. } => "cmd_gateway_team",
         GatewaySub::Conversation(_) => "cmd_gateway_conversation",
+        GatewaySub::Heard(_) => "cmd_gateway_heard",
         GatewaySub::Delegate(_) => "cmd_gateway_delegate",
         GatewaySub::Forward(_) => "cmd_gateway_forward",
         GatewaySub::Remote(c) => match &c.command {
@@ -2375,6 +2376,12 @@ pub enum GatewaySub {
     },
     /// Both directions between this Position and another, from the journal.
     Conversation(GatewayConversationArgs),
+    /// Whether one Communique was heard: its delivery standing by its ref —
+    /// held, pending, delivered or escalated, when, and to which occupant
+    /// generation — never its words. The desk that sent a line occupies no
+    /// Position, so it reads what a sender may know; the whole record stays
+    /// its occupant's (`message`).
+    Heard(GatewayHeardArgs),
     /// Cross a Communique into obligation-bearing work: Factory assigns custody
     /// to its recipient Position and the Communique is marked escalated.
     Delegate(GatewayDelegateArgs),
@@ -2748,6 +2755,16 @@ pub struct GatewayConversationArgs {
     /// Project World an @handle is looked up in.
     #[arg(long = "project-world", value_name = "WORLD")]
     pub project_world: Option<String>,
+    #[command(flatten)]
+    pub carrier: GatewayQueryArgs,
+}
+
+/// `aikit gateway heard`.
+#[derive(Debug, Args)]
+pub struct GatewayHeardArgs {
+    /// The Communique (`aikit:communique:…`, as `send` answered it).
+    #[arg(value_name = "COMMUNIQUE_REF")]
+    pub communique_ref: String,
     #[command(flatten)]
     pub carrier: GatewayQueryArgs,
 }

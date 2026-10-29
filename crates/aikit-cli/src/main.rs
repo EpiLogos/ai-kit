@@ -1884,6 +1884,15 @@ fn cmd_gateway_dispatch(command: GatewayCmd, cwd: &std::path::Path) -> Result<Re
                 a.project_world.as_deref(),
             )?)
         }
+        GatewaySub::Heard(a) => {
+            let target = aikit_cli::gateway_ops::carrier_target(&home, &a.carrier)?;
+            let gateway = aikit_cli::gateway_contact::LocalGateway::for_home(&home, target);
+            gateway_data(aikit_cli::gateway_contact::heard(
+                &gateway,
+                &a.communique_ref,
+                |record| aikit_cli::gateway_contact::forwarded_readback(&home, record),
+            )?)
+        }
         GatewaySub::Delegate(a) => {
             let (owners, gateway, cwd) = contact_seams(&home, &a.carrier)?;
             gateway_data(aikit_cli::gateway_contact::delegate(
@@ -2133,6 +2142,7 @@ fn cmd_gateway_dispatch(command: GatewayCmd, cwd: &std::path::Path) -> Result<Re
                 | GatewaySub::Message { .. }
                 | GatewaySub::Team { .. }
                 | GatewaySub::Conversation(_)
+                | GatewaySub::Heard(_)
                 | GatewaySub::Delegate(_)
                 | GatewaySub::Forward(_)
                 | GatewaySub::Remote(_)
@@ -2165,6 +2175,7 @@ fn cmd_gateway_dispatch(command: GatewayCmd, cwd: &std::path::Path) -> Result<Re
                 | GatewaySub::Message { .. }
                 | GatewaySub::Team { .. }
                 | GatewaySub::Conversation(_)
+                | GatewaySub::Heard(_)
                 | GatewaySub::Delegate(_)
                 | GatewaySub::Forward(_)
                 | GatewaySub::Remote(_)
