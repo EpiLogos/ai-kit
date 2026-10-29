@@ -55,10 +55,11 @@ use std::time::Duration;
 
 use aikit_adapters::{
     gateway_command_within, Communique, CommuniqueDraft, CommuniqueForward,
-    CommuniqueForwardOutcome, CommuniqueInstance, CommuniqueInstanceHold, CommuniqueRouting,
-    CommuniqueState, GatewayAskRequest, GatewayAskRoute, GatewayCarrierTarget, GatewayCommand,
-    GatewayResponse, ListenerClass, SenderAttribution, COMMUNIQUE_REF_PREFIX,
-    GATEWAY_FEATURE_COMMUNIQUE_EXACT_INSTANCE, GATEWAY_PROTOCOL_FEATURES,
+    CommuniqueForwardOutcome, CommuniqueHandling, CommuniqueInstance, CommuniqueInstanceHold,
+    CommuniqueRouting, CommuniqueState, GatewayAskRequest, GatewayAskRoute, GatewayCarrierTarget,
+    GatewayCommand, GatewayResponse, ListenerClass, SenderAttribution, COMMUNIQUE_REF_PREFIX,
+    GATEWAY_FEATURE_COMMUNIQUE_EXACT_INSTANCE, GATEWAY_FEATURE_COMMUNIQUE_HANDLING,
+    GATEWAY_PROTOCOL_FEATURES,
 };
 use aikit_core::{AikitError, Result};
 use aikit_store::AikitHome;
@@ -1279,6 +1280,9 @@ pub struct SendRequest<'a> {
     pub require_workcell: Option<&'a str>,
     /// What is asked when the recipient is the owner (`@owner`).
     pub owner: owner_address::OwnerAsk,
+    /// Where it lands while the recipient works: queue (its next turn
+    /// boundary) or steer (into the turn that runs).
+    pub handling: CommuniqueHandling,
 }
 
 /// The Workcell a tenure names, when it names one.
@@ -1873,6 +1877,7 @@ pub fn send(
             to_instance: Some(instance),
             instance_hold: hold,
             body: request.body,
+            handling: request.handling,
             sent_at_unix_ms: now,
             state,
             state_basis,
@@ -1924,6 +1929,7 @@ pub fn send(
         to_instance: None,
         instance_hold: None,
         body: request.body,
+        handling: request.handling,
         sent_at_unix_ms: now,
         state,
         state_basis,
@@ -1993,11 +1999,33 @@ fn accept_and_relay_via(
             }
         }
     }
+    let handling = draft.handling;
+    if !handling.is_queue() {
+        // A steer is handed only to a gateway that keeps it (this Workcell's,
+        // and a relay target that can be asked now); one built before
+        // handling would answer success and keep the words as a queue.
+        if let Some(refusal) =
+            handling_support(gateway.call(GatewayCommand::Protocol), "on this Workcell")
+        {
+            return Err(refusal);
+        }
+        if let Some(entry) = &remote {
+            if let Some(refusal) = handling_support(
+                carrier(entry, GatewayCommand::Protocol),
+                &format!("of Workcell {}", entry.workcell_ref),
+            )
+            .filter(|refusal| refusal.code() == "gateway.handling_unsupported")
+            {
+                return Err(refusal);
+            }
+        }
+    }
     let (mut communique, replayed, accepted_by) =
         expect_accepted(gateway.call(GatewayCommand::SendCommunique {
             draft: Box::new(draft),
         })?)?;
     ensure_instance_kept(expected.as_ref(), &communique, "on this Workcell")?;
+    ensure_handling_kept(handling, &communique, "on this Workcell")?;
     let mut forward = Value::Null;
     if let Some(entry) = remote {
         let (record, report) =
@@ -2180,6 +2208,58 @@ fn exact_instance_support(answer: Result<GatewayResponse>, whose: &str) -> Exact
     ))
 }
 
+/// Whether a gateway keeps a Communique's handling: `None` when it advertises
+/// `communique-handling`, else the refusal (`gateway.handling_unsupported`, or
+/// the carrier's own error when it could not be asked).
+fn handling_support(answer: Result<GatewayResponse>, whose: &str) -> Option<AikitError> {
+    let features = match answer {
+        Ok(GatewayResponse::Protocol { features, .. }) => features,
+        Ok(_) => Vec::new(),
+        Err(error) => return Some(error),
+    };
+    if features
+        .iter()
+        .any(|feature| feature == GATEWAY_FEATURE_COMMUNIQUE_HANDLING)
+    {
+        return None;
+    }
+    Some(three_part(
+        "gateway.handling_unsupported",
+        format!(
+            "The gateway {whose} does not advertise `{GATEWAY_FEATURE_COMMUNIQUE_HANDLING}` in its protocol answer: it predates steer and would keep these words as a queue for the occupant's next turn while answering as if it had taken them."
+        ),
+        nothing_sent(),
+        format!(
+            "Restart that gateway with this aikit (`aikit gateway protocol` must list `{GATEWAY_FEATURE_COMMUNIQUE_HANDLING}`), or send with --handling queue so the words wait for the next turn."
+        ),
+    ))
+}
+
+/// A gateway's echoed record must carry the handling it was handed; a steer
+/// it lost is never reported as one.
+fn ensure_handling_kept(
+    expected: CommuniqueHandling,
+    echoed: &Communique,
+    whose: &str,
+) -> Result<()> {
+    if echoed.handling == expected {
+        return Ok(());
+    }
+    Err(three_part(
+        "gateway.communique_handling_lost",
+        format!(
+            "The gateway {whose} answered for {} as {}, but it was handed {}: where the words land was lost.",
+            echoed.communique_ref,
+            echoed.handling.as_str(),
+            expected.as_str()
+        ),
+        "Its record there waits for the occupant's next turn; it must not be taken as a steer.",
+        format!(
+            "Upgrade that gateway (`aikit gateway upgrade apply` on its machine; `aikit gateway protocol` must list `{GATEWAY_FEATURE_COMMUNIQUE_HANDLING}`)."
+        ),
+    ))
+}
+
 /// A gateway's echoed record must carry exactly the instance binding it was
 /// handed; one that lost it is never reported as an exact-instance route.
 fn ensure_instance_kept(
@@ -2259,6 +2339,18 @@ fn forward_one_via(
                 ExactSupport::Unasked(error) => return Err(error),
             }
         }
+        // A steer is relayed only to a gateway that keeps it, as an exact
+        // instance is: one that cannot be asked now is asked on the next pass.
+        if !communique.handling.is_queue() {
+            if let Some(missing) =
+                handling_support(carrier(remote, GatewayCommand::Protocol), &whose)
+            {
+                if missing.code() == "gateway.handling_unsupported" {
+                    refusal = Some(missing.clone());
+                }
+                return Err(missing);
+            }
+        }
         let accepted = expect_accepted(carrier(
             remote,
             GatewayCommand::IngestCommunique {
@@ -2269,6 +2361,10 @@ fn forward_one_via(
         if let Err(lost) =
             ensure_instance_kept(communique.to_instance.as_ref(), &accepted.0, &whose)
         {
+            refusal = Some(lost.clone());
+            return Err(lost);
+        }
+        if let Err(lost) = ensure_handling_kept(communique.handling, &accepted.0, &whose) {
             refusal = Some(lost.clone());
             return Err(lost);
         }
@@ -2519,6 +2615,7 @@ pub fn route_ask_with_owners(
             to_instance: None,
             instance_hold: None,
             body: ask.message.clone(),
+            handling: Default::default(),
             sent_at_unix_ms: now_unix_ms(),
             state,
             state_basis,
@@ -3918,6 +4015,7 @@ mod exact_instance_binding_tests {
             }),
             instance_hold: None,
             body: "hello".into(),
+            handling: Default::default(),
             sent_at_unix_ms: 1,
             state: CommuniqueState::Pending,
             state_basis: "test".into(),
@@ -3930,6 +4028,7 @@ mod exact_instance_binding_tests {
     fn accepted_from(draft: &CommuniqueDraft) -> Communique {
         let mut communique = record(&draft.communique_ref, "unused", "pending");
         communique.to_instance = draft.to_instance.clone();
+        communique.handling = draft.handling;
         communique
     }
 
@@ -3951,6 +4050,9 @@ mod exact_instance_binding_tests {
     struct StubGateway {
         features: Vec<&'static str>,
         strip: bool,
+        /// Drops `handling` from every record it answers with (an older
+        /// binary's serde keeps it as a queue).
+        drop_handling: bool,
         refuse_standing: Vec<String>,
         queue: Vec<Communique>,
         log: RefCell<Vec<String>>,
@@ -3967,6 +4069,9 @@ mod exact_instance_binding_tests {
         fn answer(&self, mut communique: Communique) -> Communique {
             if self.strip {
                 communique.to_instance = None;
+            }
+            if self.drop_handling {
+                communique.handling = CommuniqueHandling::Queue;
             }
             communique
         }
@@ -4275,6 +4380,61 @@ mod exact_instance_binding_tests {
         assert!(sent["communique"].get("to_instance").is_none());
     }
 
+    fn steer() -> CommuniqueDraft {
+        CommuniqueDraft {
+            handling: CommuniqueHandling::Steer,
+            ..draft(None)
+        }
+    }
+
+    /// Buzz's rule (`crates/buzz-acp/src/acp.rs:1436-1444`): a success from a
+    /// peer that does not know the request must never read as a delivered
+    /// steer. A steer goes only to a gateway that advertises it, keeps it, and
+    /// relays only to one that does; a queue goes anywhere, as before.
+    #[test]
+    fn a_steer_goes_only_to_a_gateway_that_keeps_it_and_a_queue_goes_anywhere() {
+        let none = &|_: &GatewayRemote, _: GatewayCommand| -> Result<GatewayResponse> {
+            unreachable!("no remote")
+        };
+        let old = StubGateway::modern();
+        let error = accept_and_relay_via(&old, steer(), None, json!({}), none).unwrap_err();
+        assert_eq!(code(&error), "gateway.handling_unsupported");
+        assert!(error.message().contains("--handling queue"), "{error}");
+        assert!(!old.saw("send-communique"), "nothing is handed to it");
+        let queued = accept_and_relay_via(&old, draft(None), None, json!({}), none).unwrap();
+        assert!(queued["communique"].get("handling").is_none(), "{queued}");
+
+        let modern = StubGateway {
+            features: vec![
+                GATEWAY_FEATURE_COMMUNIQUE_EXACT_INSTANCE,
+                GATEWAY_FEATURE_COMMUNIQUE_HANDLING,
+            ],
+            ..StubGateway::default()
+        };
+        let sent = accept_and_relay_via(&modern, steer(), None, json!({}), none).unwrap();
+        assert_eq!(sent["communique"]["handling"], "steer");
+
+        let lying = StubGateway {
+            drop_handling: true,
+            features: vec![GATEWAY_FEATURE_COMMUNIQUE_HANDLING],
+            ..StubGateway::default()
+        };
+        let error = accept_and_relay_via(&lying, steer(), None, json!({}), none).unwrap_err();
+        assert_eq!(code(&error), "gateway.communique_handling_lost");
+
+        let old_remote = StubGateway::modern();
+        let error = accept_and_relay_via(
+            &modern,
+            steer(),
+            Some(remote_b()),
+            json!({}),
+            &|_, command| old_remote.call(command),
+        )
+        .unwrap_err();
+        assert_eq!(code(&error), "gateway.handling_unsupported");
+        assert!(!old_remote.saw("ingest-communique"));
+    }
+
     #[test]
     fn an_exact_route_whose_binding_the_local_gateway_drops_is_refused_not_reported() {
         let stripping = StubGateway {
@@ -4480,6 +4640,7 @@ mod forwarded_readback_tests {
                         }),
                         instance_hold: None,
                         body: "Substantive retained source and artifact:exact-change".into(),
+                        handling: Default::default(),
                         sent_at_unix_ms: 123,
                         state: CommuniqueState::Pending,
                         state_basis: "Awaiting native addressed carrying".into(),

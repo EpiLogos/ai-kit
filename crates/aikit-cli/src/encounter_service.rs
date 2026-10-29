@@ -3565,8 +3565,17 @@ impl EncounterService {
                 // them null) and the observed model facts. Consumers that must
                 // require an exact body read them from here, never from a
                 // persisted active flag.
+                //
+                // `last_turn` is how the session's last finished turn stopped,
+                // as the host observed it on the wire (its `TurnStop`, and who
+                // asked for a stop), so a reader can tell a turn that completed
+                // from one that failed and why. Held in memory until the next
+                // turn replaces it: a restarted owner reports none.
+                let last_turn = resident.host.last_turn(&agent_session)?.map(|turn| {
+                    json!({"stop":turn.stop,"interruption":turn.interruption.map(|stop| json!({"origin":stop.origin,"reason":stop.reason})),"last_sequence":turn.last_sequence})
+                });
                 Ok(
-                    json!({"agent_session":agent_session,"native_session_id":identity.binding.native_session_id,"state":format!("{:?}",identity.state),"connection_generation":resident.generation,"error":resident.host.transport_error(),"provider":resident.provider_view(),"model_observation":identity.binding.model_observation,"permissions":self.permissions.lock().map_err(error)?.get(&agent_session).map(|r|r.values().cloned().collect::<Vec<_>>()).unwrap_or_default(),"permission_authority":"native-provider-consent"}),
+                    json!({"agent_session":agent_session,"native_session_id":identity.binding.native_session_id,"state":format!("{:?}",identity.state),"connection_generation":resident.generation,"error":resident.host.transport_error(),"provider":resident.provider_view(),"model_observation":identity.binding.model_observation,"permissions":self.permissions.lock().map_err(error)?.get(&agent_session).map(|r|r.values().cloned().collect::<Vec<_>>()).unwrap_or_default(),"permission_authority":"native-provider-consent","last_turn":last_turn}),
                 )
             }
         }

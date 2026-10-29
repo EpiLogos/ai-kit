@@ -1794,6 +1794,8 @@ fn cmd_gateway_dispatch(command: GatewayCmd, cwd: &std::path::Path) -> Result<Re
                     project_world: a.project_world.as_deref(),
                     instance: a.instance.as_deref(),
                     require_workcell: a.require_workcell.as_deref(),
+                    handling: aikit_adapters::CommuniqueHandling::parse(&a.handling)
+                        .unwrap_or_default(),
                     // No owner ask rides a plain send on this command surface.
                     owner: aikit_cli::gateway_contact::owner_address::OwnerAsk {
                         subject: None,

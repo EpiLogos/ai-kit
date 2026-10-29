@@ -2479,6 +2479,7 @@ impl FixtureAskRouter {
                 to_instance: None,
                 instance_hold: None,
                 body: ask.message.clone(),
+                handling: Default::default(),
                 sent_at_unix_ms: 1_000,
                 state: CommuniqueState::Pending,
                 state_basis: format!(

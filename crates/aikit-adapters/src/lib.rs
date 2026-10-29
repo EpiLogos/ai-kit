@@ -167,9 +167,9 @@ pub use gateway_coexistence::{
 };
 pub use gateway_communique::{
     Communique, CommuniqueCount, CommuniqueDraft, CommuniqueForward, CommuniqueForwardOutcome,
-    CommuniqueInstance, CommuniqueInstanceHold, CommuniqueJournal, CommuniqueRouting,
-    CommuniqueState, CommuniqueTransition, SenderAttribution, COMMUNIQUE_REF_PREFIX,
-    COMMUNIQUE_SCHEMA, MAX_COMMUNIQUE_BODY_BYTES,
+    CommuniqueHandling, CommuniqueInstance, CommuniqueInstanceHold, CommuniqueJournal,
+    CommuniqueRouting, CommuniqueState, CommuniqueTransition, SenderAttribution,
+    COMMUNIQUE_REF_PREFIX, COMMUNIQUE_SCHEMA, MAX_COMMUNIQUE_BODY_BYTES,
 };
 pub use gateway_connector::{
     verify_connector_descriptor, ConnectorCapabilities, ConnectorConformance,
@@ -216,8 +216,8 @@ pub use gateway_runtime::{
     GatewayResponse, GatewayResponseEnvelope, GatewaySnapshot, GatewayStatus, GatewayStreamEvent,
     GatewayStreamJournal, ACTUATION_STREAM_SCHEMA as GATEWAY_ACTUATION_STREAM_SCHEMA,
     AGENCY_GATEWAY_VERSION, GATEWAY_ECOLOGY_AUTHORITY_LAW,
-    GATEWAY_FEATURE_COMMUNIQUE_EXACT_INSTANCE, GATEWAY_INVOCATION_MODES,
-    GATEWAY_OCCUPANCY_READING_SCHEMA, GATEWAY_PROTOCOL_FEATURES,
+    GATEWAY_FEATURE_COMMUNIQUE_EXACT_INSTANCE, GATEWAY_FEATURE_COMMUNIQUE_HANDLING,
+    GATEWAY_INVOCATION_MODES, GATEWAY_OCCUPANCY_READING_SCHEMA, GATEWAY_PROTOCOL_FEATURES,
 };
 pub use gateway_service::{
     acquire_gateway_state_lock, execute_against_state_file, persist_gateway_state,

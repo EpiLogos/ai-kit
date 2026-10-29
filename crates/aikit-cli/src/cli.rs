@@ -2693,6 +2693,13 @@ pub struct GatewaySendArgs {
         requires = "instance"
     )]
     pub require_workcell: Option<String>,
+    /// Where the words land while the recipient's occupant works: `queue`
+    /// waits for its next turn (its next prompt); `steer` reaches the turn
+    /// that runs, at its next tool boundary, framed as a message that arrived
+    /// while it worked. A harness with no mid-turn context channel takes a
+    /// steer at its next turn.
+    #[arg(long, value_name = "queue|steer", default_value = "queue", value_parser = ["queue", "steer"])]
+    pub handling: String,
     #[command(flatten)]
     pub carrier: GatewayQueryArgs,
 }

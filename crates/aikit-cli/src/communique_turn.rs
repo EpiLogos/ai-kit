@@ -22,7 +22,7 @@
 
 use std::sync::Mutex;
 
-use aikit_adapters::{Communique, GatewayCommand, GatewayResponse};
+use aikit_adapters::{Communique, CommuniqueHandling, GatewayCommand, GatewayResponse};
 use aikit_core::hooks::{HookDecision, HookEvent, HookEventKind};
 use aikit_core::Result;
 use serde::{Deserialize, Serialize};
@@ -42,6 +42,33 @@ pub struct TurnOccupant {
     pub workcell_ref: Option<String>,
 }
 
+/// Where in the occupant's turn a delivery lands. `boundary` is its next
+/// prompt, which carries every Communique that waits; `mid-turn` is its next
+/// tool boundary inside the turn that runs, which carries only the steers —
+/// Buzz's mid-turn path (`crates/buzz-acp/src/config.rs:63-88`, steer the
+/// default there, queue waiting for the turn to complete).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum TurnMoment {
+    #[default]
+    Boundary,
+    MidTurn,
+}
+
+impl TurnMoment {
+    pub fn is_boundary(&self) -> bool {
+        matches!(self, Self::Boundary)
+    }
+
+    /// The Communiques this moment carries.
+    fn carries(self, record: &Communique) -> bool {
+        match self {
+            Self::Boundary => true,
+            Self::MidTurn => record.handling == CommuniqueHandling::Steer,
+        }
+    }
+}
+
 /// What one turn will carry and, once written, acknowledge.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TurnDelivery {
@@ -50,6 +77,9 @@ pub struct TurnDelivery {
     pub text: String,
     pub pending_count: usize,
     pub preview_bytes: usize,
+    /// Where in the turn it lands; absent is the turn boundary.
+    #[serde(default, skip_serializing_if = "TurnMoment::is_boundary")]
+    pub moment: TurnMoment,
 }
 
 /// One aggregate budget, including attribution, retrieval commands and JSON
@@ -77,6 +107,14 @@ impl Default for HandoffBudget {
 /// The block's first line; the commit checks the written document for it.
 const BLOCK_HEAD: &str = "[gateway/communiques]";
 
+/// Buzz's framing of a message delivered into a running turn, verbatim
+/// (`crates/buzz-acp/src/queue.rs:1719-1738`, behaviour-tested upstream): it
+/// says the words arrived mid-task and asks the agent to continue, never that
+/// they supersede its work (`queue.rs:2046-2068` asserts a steer carries no
+/// "supersedes").
+pub const STEER_HEAD: &str = "[New message — arrived while you were working]";
+pub const STEER_NOTE: &str = "Note: A new message arrived while you were working. Continue your in-progress work and incorporate the new message if it's relevant; if it's unrelated, you may briefly acknowledge it and carry on.";
+
 static STAGED: Mutex<Option<TurnDelivery>> = Mutex::new(None);
 
 /// The turn text for `occupant`, or `None` when nothing waits.
@@ -92,6 +130,29 @@ pub fn pending_communiques_with_budget(
     gateway: &dyn GatewayAccess,
     budget: HandoffBudget,
 ) -> Result<Option<TurnDelivery>> {
+    pending_communiques_at(occupant, gateway, budget, TurnMoment::Boundary)
+}
+
+/// The steers that wait for `occupant`, framed for the turn that runs, or
+/// `None` when no steer waits (a queued Communique waits for the boundary).
+pub fn pending_steers_mid_turn(
+    occupant: &TurnOccupant,
+    gateway: &dyn GatewayAccess,
+) -> Result<Option<TurnDelivery>> {
+    pending_communiques_at(
+        occupant,
+        gateway,
+        HandoffBudget::default(),
+        TurnMoment::MidTurn,
+    )
+}
+
+pub fn pending_communiques_at(
+    occupant: &TurnOccupant,
+    gateway: &dyn GatewayAccess,
+    budget: HandoffBudget,
+    moment: TurnMoment,
+) -> Result<Option<TurnDelivery>> {
     let records = match gateway.call(GatewayCommand::CommuniqueInbox {
         position_ref: occupant.position_ref.clone(),
     })? {
@@ -103,7 +164,8 @@ pub fn pending_communiques_with_budget(
     let records: Vec<Communique> = records
         .into_iter()
         .filter(|record| {
-            record.deliverable_to(&occupant.generation_ref, occupant.workcell_ref.as_deref())
+            moment.carries(record)
+                && record.deliverable_to(&occupant.generation_ref, occupant.workcell_ref.as_deref())
         })
         .collect();
     if records.is_empty() {
@@ -116,13 +178,14 @@ pub fn pending_communiques_with_budget(
             break;
         }
         carried.push(record);
-        let text = render(occupant, &carried, total, budget.preview_bytes);
+        let text = render(occupant, &carried, total, budget.preview_bytes, moment);
         let candidate = TurnDelivery {
             occupant: occupant.clone(),
             communique_refs: carried.iter().map(|r| r.communique_ref.clone()).collect(),
             text,
             pending_count: total,
             preview_bytes: budget.preview_bytes,
+            moment,
         };
         // Pi retains the offer in details while carrying text in content;
         // include both and bounded session/provenance framing in the budget.
@@ -138,9 +201,10 @@ pub fn pending_communiques_with_budget(
     Ok(Some(TurnDelivery {
         occupant: occupant.clone(),
         communique_refs: carried.iter().map(|r| r.communique_ref.clone()).collect(),
-        text: render(occupant, &carried, total, budget.preview_bytes),
+        text: render(occupant, &carried, total, budget.preview_bytes, moment),
         pending_count: total,
         preview_bytes: budget.preview_bytes,
+        moment,
     }))
 }
 
@@ -160,6 +224,7 @@ fn render(
     records: &[Communique],
     total: usize,
     preview_bytes: usize,
+    moment: TurnMoment,
 ) -> String {
     let mut out = format!(
         "{BLOCK_HEAD} {} Communique{} for {} (occupant generation {}).\n\
@@ -171,6 +236,10 @@ fn render(
         occupant.position_ref,
         occupant.generation_ref,
     );
+    if moment == TurnMoment::MidTurn {
+        out.push_str(STEER_HEAD);
+        out.push('\n');
+    }
     out.push_str(&format!("{} remaining records stay pending. Previews are delivery of this bounded handoff, not completed work. Full bodies remain in the gateway journal.\n", total - records.len()));
     for (index, record) in records.iter().enumerate() {
         let sent = jiff::Timestamp::from_millisecond(record.sent_at_unix_ms as i64)
@@ -226,6 +295,11 @@ fn render(
             ));
         }
     }
+    if moment == TurnMoment::MidTurn {
+        out.push('\n');
+        out.push_str(STEER_NOTE);
+        out.push('\n');
+    }
     out
 }
 
@@ -269,8 +343,22 @@ pub fn turn_occupant(
 
 /// Hook-dispatcher step (one call site in `hook::dispatch`). Adds the block
 /// to the decision and stages the delivery; never fails the hook.
+///
+/// At the occupant's prompt (`UserPromptSubmit`) every Communique that waits
+/// rides the turn. After each of its tool calls (`PostToolUse`), the steers
+/// that wait ride the turn that runs — only where the calling harness carries
+/// context on that event (`hook::carries_context`); elsewhere a steer waits
+/// for the prompt, as Buzz's steer falls back to the next turn when the agent
+/// cannot be steered.
 pub fn offer_at_turn_boundary(decision: &mut HookDecision, event: &HookEvent) {
-    if event.kind != HookEventKind::UserPromptSubmit {
+    let moment = match event.kind {
+        HookEventKind::UserPromptSubmit => TurnMoment::Boundary,
+        HookEventKind::PostToolUse if crate::hook::carries_context(&event.client, &event.kind) => {
+            TurnMoment::MidTurn
+        }
+        _ => return,
+    };
+    if moment == TurnMoment::MidTurn && !steer_waits() {
         return;
     }
     let owners = crate::gateway_owners::ProcessOwners::from_env();
@@ -292,7 +380,11 @@ pub fn offer_at_turn_boundary(decision: &mut HookDecision, event: &HookEvent) {
         }
     };
     let gateway = crate::gateway_contact::LocalGateway::default_for(&home);
-    match pending_communiques_for_turn(&occupant, &gateway) {
+    let pending = match moment {
+        TurnMoment::Boundary => pending_communiques_for_turn(&occupant, &gateway),
+        TurnMoment::MidTurn => pending_steers_mid_turn(&occupant, &gateway),
+    };
+    match pending {
         Ok(Some(delivery)) => {
             decision.injected.push(delivery.text.clone());
             if let Ok(mut staged) = STAGED.lock() {
@@ -305,6 +397,28 @@ pub fn offer_at_turn_boundary(decision: &mut HookDecision, event: &HookEvent) {
             occupant.position_ref
         )),
     }
+}
+
+/// Whether a steer waits for this body's Position: one gateway read, made
+/// before Actuation is asked who occupies it, so a tool call with no steer
+/// waiting costs no occupancy verification. Any failure reads as none here;
+/// the prompt's own delivery reports what it could not read.
+fn steer_waits() -> bool {
+    let Some(position) = std::env::var(POSITION_ENV)
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+    else {
+        return false;
+    };
+    let Ok(home) = aikit_store::AikitHome::discover() else {
+        return false;
+    };
+    let gateway = crate::gateway_contact::LocalGateway::default_for(&home);
+    matches!(
+        gateway.call(GatewayCommand::CommuniqueInbox { position_ref: position }),
+        Ok(GatewayResponse::CommuniqueList { communiques })
+            if communiques.iter().any(|record| record.handling == CommuniqueHandling::Steer)
+    )
 }
 
 /// Take whatever [`offer_at_turn_boundary`] staged in this process.
@@ -449,6 +563,7 @@ pub fn handoff_for_occupant(
             &records,
             delivery.pending_count,
             delivery.preview_bytes,
+            delivery.moment,
         ) != delivery.text
     {
         return Err(aikit_core::AikitError::new(
@@ -585,6 +700,7 @@ mod tests {
                             "artifact:exact-{index}\n{}TAIL-{index}",
                             "😀quoted\"\\\n".repeat(200)
                         ),
+                        handling: Default::default(),
                         sent_at_unix_ms: 100 + index as u64,
                         state,
                         state_basis: "native owner acceptance".into(),
@@ -596,6 +712,117 @@ mod tests {
                 .unwrap();
         }
     }
+    fn send_handled(
+        gateway: &LocalGateway,
+        reference: &str,
+        body: &str,
+        handling: CommuniqueHandling,
+    ) {
+        gateway
+            .call(GatewayCommand::SendCommunique {
+                draft: Box::new(CommuniqueDraft {
+                    communique_ref: format!("aikit:communique:{reference}"),
+                    from_position_ref: Some("central:position:control:root:sender".into()),
+                    from_generation_ref: Some("actuation:generation:sender".into()),
+                    attribution: SenderAttribution::Verified,
+                    attribution_basis: "verified sender occupancy".into(),
+                    to_position_ref: occupant().position_ref,
+                    to_workcell_ref: None,
+                    to_instance: None,
+                    instance_hold: None,
+                    body: body.into(),
+                    handling,
+                    sent_at_unix_ms: 100,
+                    state: CommuniqueState::Pending,
+                    state_basis: "native owner acceptance".into(),
+                    reply_to: None,
+                    forward_to_workcell_ref: None,
+                    routing: None,
+                }),
+            })
+            .unwrap();
+    }
+
+    /// Buzz's mid-turn path: inside the turn that runs only the steers ride,
+    /// framed in Buzz's own words as having arrived while the agent worked —
+    /// never as superseding its work — and a queued Communique waits for the
+    /// next prompt, which carries it (and any steer not yet carried) as before.
+    #[test]
+    fn mid_turn_carries_only_steers_framed_as_arriving_while_the_agent_worked() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = AikitHome::at(dir.path());
+        let gateway = LocalGateway::default_for(&home);
+        send_handled(
+            &gateway,
+            "queued",
+            "Run the tests after this.",
+            CommuniqueHandling::Queue,
+        );
+        send_handled(
+            &gateway,
+            "steered",
+            "Skip the cradle root.",
+            CommuniqueHandling::Steer,
+        );
+
+        let mid = pending_steers_mid_turn(&occupant(), &gateway)
+            .unwrap()
+            .unwrap();
+        assert_eq!(mid.moment, TurnMoment::MidTurn);
+        assert_eq!(mid.communique_refs, ["aikit:communique:steered"]);
+        assert!(mid.text.starts_with(BLOCK_HEAD), "{}", mid.text);
+        assert!(mid
+            .text
+            .contains("[New message — arrived while you were working]"));
+        assert!(mid.text.contains("Note: A new message arrived while you were working. Continue your in-progress work and incorporate the new message if it's relevant; if it's unrelated, you may briefly acknowledge it and carry on."));
+        assert!(mid.text.contains("   | Skip the cradle root."));
+        assert!(!mid.text.contains("Run the tests after this."));
+        assert!(
+            !mid.text.to_lowercase().contains("supersede"),
+            "{}",
+            mid.text
+        );
+
+        // The next prompt carries both, as a boundary always has, unframed.
+        let boundary = pending_communiques_for_turn(&occupant(), &gateway)
+            .unwrap()
+            .unwrap();
+        assert_eq!(boundary.moment, TurnMoment::Boundary);
+        assert_eq!(boundary.communique_refs.len(), 2);
+        assert!(!boundary.text.contains(STEER_HEAD));
+        assert!(!boundary.text.contains(STEER_NOTE));
+
+        // Delivered mid-turn, the steer is gone; nothing more rides mid-turn.
+        assert!(
+            commit_staged_delivery(&mid, &serde_json::to_string(&mid.text).unwrap(), &gateway)
+                .unwrap()
+        );
+        assert!(pending_steers_mid_turn(&occupant(), &gateway)
+            .unwrap()
+            .is_none());
+        let next = pending_communiques_for_turn(&occupant(), &gateway)
+            .unwrap()
+            .unwrap();
+        assert_eq!(next.communique_refs, ["aikit:communique:queued"]);
+
+        // A carried mid-turn delivery reconciles through the same handoff law.
+        send_handled(
+            &gateway,
+            "steered-2",
+            "One more note.",
+            CommuniqueHandling::Steer,
+        );
+        let offered = pending_steers_mid_turn(&occupant(), &gateway)
+            .unwrap()
+            .unwrap();
+        let commit = json!({"delivery":offered,"carried_text":offered.text});
+        let reconciled = handoff_for_occupant(&occupant(), &gateway, Some(commit)).unwrap();
+        assert_eq!(
+            reconciled["acknowledged"],
+            json!(["aikit:communique:steered-2"])
+        );
+    }
+
     #[test]
     fn durable_held_provenance_survives_delivery_and_exact_ack_replay() {
         let dir = tempfile::tempdir().unwrap();
@@ -805,6 +1032,7 @@ mod tests {
                     }),
                     instance_hold: None,
                     body: "Private exact-generation material".into(),
+                    handling: Default::default(),
                     sent_at_unix_ms: 1,
                     state: CommuniqueState::Pending,
                     state_basis: "Exact recipient".into(),

@@ -625,3 +625,57 @@ fn queueing_stays_gated_by_the_full_agency_preflight() {
     );
     assert!(service.store.queued_deliveries(&bare).unwrap().is_empty());
 }
+
+/// A session's status says how its last finished turn stopped, as the host saw
+/// it on the wire, so a reader (Factory's task reading) can tell a turn that
+/// completed from one that failed, and why. None before the first turn.
+#[test]
+fn status_carries_how_the_last_turn_stopped() {
+    let world = QueueWorld::new();
+    let (space, session) = world.attach("last");
+    let service = EncounterService::new(world.home.clone()).unwrap();
+    let opened = world.open(&service, &space, &session, "last");
+    assert_eq!(opened["resident"], json!(true), "{opened}");
+    let status = || {
+        service
+            .apply(EncounterRequest::Status {
+                agent_session: session.clone(),
+            })
+            .unwrap()
+    };
+    let before = status();
+    assert!(before["last_turn"].is_null(), "{before}");
+    assert!(before.get("last_turn").is_some(), "{before}");
+
+    send(
+        &service,
+        &session,
+        turn("live-1", "one live turn", "agent:last", None),
+    )
+    .unwrap();
+    assert_eq!(
+        wait_settled(&service, &session, "live-1")["phase"],
+        json!("returned")
+    );
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let after = loop {
+        let now = status();
+        if !now["last_turn"].is_null() || Instant::now() > deadline {
+            break now;
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    };
+    assert_eq!(
+        after["last_turn"]["stop"],
+        json!({"Completed": {"stop_reason": "end_turn"}}),
+        "{after}"
+    );
+    assert!(after["last_turn"]["interruption"].is_null(), "{after}");
+    assert!(after["last_turn"]["last_sequence"].is_u64(), "{after}");
+    let shutdown = service
+        .apply(EncounterRequest::Shutdown {
+            expected_pid: std::process::id(),
+        })
+        .unwrap();
+    assert_eq!(shutdown["shutdown"], json!(true));
+}

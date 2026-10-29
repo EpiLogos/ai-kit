@@ -200,6 +200,51 @@ pub struct CommuniqueTransition {
     pub generation_ref: Option<String>,
 }
 
+/// Where a Communique lands while its recipient's occupant is working, chosen
+/// by the sender. Ported from Buzz's mid-turn handling (block/buzz `95154bee`,
+/// `crates/buzz-acp/src/config.rs:63-88` `MultipleEventHandling`, Apache-2.0;
+/// decoded in O-I `campaign-evidence/2026-10-07-buzz-grok-agent-messaging-re/
+/// CONTRACT.md` Behaviours 2–3):
+///
+/// - `queue` — it waits for the occupant's next turn boundary (its next
+///   prompt): Buzz's `queue`, and every Communique before this field existed;
+/// - `steer` — it is delivered into the turn that runs, at the occupant's next
+///   tool boundary, framed as a message that arrived while the agent worked
+///   (Buzz's `steer`). A harness with no mid-turn context channel receives it
+///   at its next boundary instead, as Buzz's steer falls back when the agent
+///   advertises no steering.
+///
+/// Absent on the wire means `queue`, so a record written before the field
+/// reads exactly as it did.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum CommuniqueHandling {
+    #[default]
+    Queue,
+    Steer,
+}
+
+impl CommuniqueHandling {
+    pub fn is_queue(&self) -> bool {
+        matches!(self, Self::Queue)
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Queue => "queue",
+            Self::Steer => "steer",
+        }
+    }
+
+    pub fn parse(raw: &str) -> Option<Self> {
+        match raw {
+            "queue" => Some(Self::Queue),
+            "steer" => Some(Self::Steer),
+            _ => None,
+        }
+    }
+}
+
 /// `aikit.communique/v1`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Communique {
@@ -223,6 +268,9 @@ pub struct Communique {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub instance_hold: Option<CommuniqueInstanceHold>,
     pub body: String,
+    /// Where it lands while the recipient works; absent is `queue`.
+    #[serde(default, skip_serializing_if = "CommuniqueHandling::is_queue")]
+    pub handling: CommuniqueHandling,
     pub sent_at_unix_ms: u64,
     pub state: CommuniqueState,
     #[serde(default)]
@@ -307,6 +355,9 @@ pub struct CommuniqueDraft {
     #[serde(default)]
     pub instance_hold: Option<CommuniqueInstanceHold>,
     pub body: String,
+    /// Where it lands while the recipient works (`queue` when absent).
+    #[serde(default, skip_serializing_if = "CommuniqueHandling::is_queue")]
+    pub handling: CommuniqueHandling,
     pub sent_at_unix_ms: u64,
     pub state: CommuniqueState,
     pub state_basis: String,
@@ -585,6 +636,7 @@ impl CommuniqueJournal {
                 && existing.to_position_ref == draft.to_position_ref
                 && existing.to_instance == draft.to_instance
                 && existing.body == draft.body
+                && existing.handling == draft.handling
                 && existing.sent_at_unix_ms == draft.sent_at_unix_ms
                 && existing.reply_to == draft.reply_to;
             if same {
@@ -621,6 +673,7 @@ impl CommuniqueJournal {
             to_instance: draft.to_instance,
             instance_hold: draft.instance_hold,
             body: draft.body,
+            handling: draft.handling,
             sent_at_unix_ms: draft.sent_at_unix_ms,
             state: draft.state,
             delivered_to_generation_ref: None,
@@ -1051,6 +1104,7 @@ mod tests {
             to_instance: None,
             instance_hold: None,
             body: format!("body {reference}"),
+            handling: Default::default(),
             sent_at_unix_ms: 10,
             state,
             state_basis: "fixture".into(),
@@ -1058,6 +1112,45 @@ mod tests {
             forward_to_workcell_ref: None,
             routing: None,
         }
+    }
+
+    /// Where the words land travels with the record: a steer is kept through
+    /// the journal and its state file, a record written before `handling`
+    /// existed reads as a queue, a queue writes nothing new on the wire, and a
+    /// replay that changes where the words land is a different message.
+    #[test]
+    fn handling_is_kept_absent_reads_as_queue_and_a_changed_landing_is_a_rewrite() {
+        let mut journal = CommuniqueJournal::default();
+        let steer = CommuniqueDraft {
+            handling: CommuniqueHandling::Steer,
+            ..draft("steer", Some(A), B, CommuniqueState::Pending)
+        };
+        let (sent, _) = journal.send("g", steer.clone()).unwrap();
+        assert_eq!(sent.handling, CommuniqueHandling::Steer);
+        let wire = serde_json::to_value(&sent).unwrap();
+        assert_eq!(wire["handling"], "steer");
+        let back: Communique = serde_json::from_value(wire.clone()).unwrap();
+        assert_eq!(back.handling, CommuniqueHandling::Steer);
+
+        let (queued, _) = journal
+            .send("g", draft("queue", Some(A), B, CommuniqueState::Pending))
+            .unwrap();
+        let wire = serde_json::to_value(&queued).unwrap();
+        assert!(wire.get("handling").is_none(), "{wire}");
+        let mut older = wire.clone();
+        older.as_object_mut().unwrap().remove("handling");
+        let read: Communique = serde_json::from_value(older).unwrap();
+        assert_eq!(read.handling, CommuniqueHandling::Queue);
+
+        assert!(journal.send("g", steer.clone()).unwrap().1, "exact replay");
+        let rewrite = CommuniqueDraft {
+            handling: CommuniqueHandling::Queue,
+            ..steer
+        };
+        assert_eq!(
+            journal.send("g", rewrite).unwrap_err().code(),
+            "agency_gateway.communique_identity_rewrite"
+        );
     }
 
     #[test]

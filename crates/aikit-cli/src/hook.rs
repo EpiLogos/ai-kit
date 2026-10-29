@@ -389,6 +389,27 @@ pub fn translate_verdict(
     }
 }
 
+/// Whether `client`'s hook output for `event` has a verified context channel
+/// (`hookSpecificOutput.additionalContext`): claude on SessionStart,
+/// UserPromptSubmit, PreToolUse and PostToolUse; zcode on the same four
+/// (its own hooks schema, checked 2026-09-21); codex on the two lifecycle
+/// events its command-output wires carry (0.155.1). Anything else has none.
+pub fn carries_context(client: &str, event: &HookEventKind) -> bool {
+    let lifecycle = matches!(
+        event,
+        HookEventKind::SessionStart | HookEventKind::UserPromptSubmit
+    );
+    let tool = matches!(
+        event,
+        HookEventKind::PreToolUse | HookEventKind::PostToolUse
+    );
+    match client {
+        "claude" | "claude-code" | "zcode" => lifecycle || tool,
+        "codex" => lifecycle,
+        _ => false,
+    }
+}
+
 /// Serialize a complete decision, not just its allowed/denied bit. Claude's
 /// additionalContext is event-specific; strict or unknown harnesses do not get
 /// a guessed schema. Neither emitted bytes nor --json inspection proves loading.
@@ -418,28 +439,7 @@ pub fn translate_decision(
     );
     let context = decision.injected_text();
     let mut warnings = decision.warnings.clone();
-    let supports_context = additional_context_clients
-        && if claude {
-            matches!(
-                event,
-                HookEventKind::SessionStart
-                    | HookEventKind::UserPromptSubmit
-                    | HookEventKind::PreToolUse
-                    | HookEventKind::PostToolUse
-            )
-        } else {
-            // zcode reads additionalContext on the same four events; codex's
-            // verified command-output wires are the two lifecycle events.
-            let zcode = client == "zcode";
-            matches!(
-                event,
-                HookEventKind::SessionStart | HookEventKind::UserPromptSubmit
-            ) || (zcode
-                && matches!(
-                    event,
-                    HookEventKind::PreToolUse | HookEventKind::PostToolUse
-                ))
-        };
+    let supports_context = additional_context_clients && carries_context(client, &event);
     if decision.allowed && !context.is_empty() {
         if supports_context {
             let mut document = verdict
