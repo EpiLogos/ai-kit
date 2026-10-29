@@ -39,6 +39,9 @@ pub struct PrimeRpcConnectionAdapter {
     expected_model: Option<(String, String)>,
     model_observation: Option<NativeModelObservation>,
     stop: Option<(String, Option<String>)>,
+    /// The assistant message this run already delivered, so the terminal
+    /// event's copy of it is recognised rather than delivered twice.
+    last_assistant: Option<Value>,
     abort_acknowledged: bool,
     resume_target: Option<(String, String)>,
     resume_switched: bool,
@@ -58,6 +61,7 @@ impl PrimeRpcConnectionAdapter {
             expected_model: None,
             model_observation: None,
             stop: None,
+            last_assistant: None,
             abort_acknowledged: false,
             resume_target: None,
             resume_switched: false,
@@ -89,6 +93,28 @@ impl PrimeRpcConnectionAdapter {
         }
         self.expected_model = Some((provider.into(), model_id.into()));
         Ok(self)
+    }
+
+    /// Admit one assistant result as this run's terminal evidence: it must
+    /// name the selected provider/model, and its stop reason becomes the
+    /// reading `agent_end` settles on.
+    fn observe_assistant(&mut self, result: &Value) -> Result<()> {
+        if let Some((provider, model)) = &self.expected_model {
+            if result["provider"].as_str() != Some(provider.as_str())
+                || result["model"].as_str() != Some(model.as_str())
+            {
+                return Err(error(
+                    "connection.prime_rpc.response_model_mismatch",
+                    "Prime assistant result does not name the selected provider/model; it is not attributed to the requested Model",
+                ));
+            }
+        }
+        self.stop = Some((
+            result["stopReason"].as_str().unwrap_or("unknown").into(),
+            result["errorMessage"].as_str().map(str::to_owned),
+        ));
+        self.last_assistant = Some(result.clone());
+        Ok(())
     }
 
     fn request(
@@ -355,6 +381,7 @@ impl AgentConnectionAdapter for PrimeRpcConnectionAdapter {
                 )
             })?;
         self.stop = None;
+        self.last_assistant = None;
         self.abort_acknowledged = false;
         // Prime's daemon-backed RPC route keeps input suspended after abort.
         // Its documented follow-up admission resumes an idle session; the
@@ -458,20 +485,7 @@ impl AgentConnectionAdapter for PrimeRpcConnectionAdapter {
             Some("message_end") => {
                 let result = &message["message"];
                 if result["role"] == "assistant" {
-                    if let Some((provider, model)) = &self.expected_model {
-                        if result["provider"].as_str() != Some(provider.as_str())
-                            || result["model"].as_str() != Some(model.as_str())
-                        {
-                            return Err(error(
-                                "connection.prime_rpc.response_model_mismatch",
-                                "Prime assistant result does not name the selected provider/model; it is not attributed to the requested Model",
-                            ));
-                        }
-                    }
-                    self.stop = Some((
-                        result["stopReason"].as_str().unwrap_or("unknown").into(),
-                        result["errorMessage"].as_str().map(str::to_owned),
-                    ));
+                    self.observe_assistant(result)?;
                 }
                 let mut signals = Vec::new();
                 if result["role"] == "assistant" {
@@ -485,21 +499,50 @@ impl AgentConnectionAdapter for PrimeRpcConnectionAdapter {
                 return Ok(signals);
             }
             Some("agent_end") => {
+                let mut signals = Vec::new();
+                // Prime's terminal event carries the run's complete messages.
+                // A daemon snapshot can coalesce the earlier message_end
+                // delivery; only this event's final assistant may supply that
+                // missing terminal evidence. Never search backward across a
+                // tool result.
+                if let Some(messages) = message.get("messages") {
+                    let final_message = messages.as_array().and_then(|rows| rows.last());
+                    if let Some(result) = final_message.filter(|row| row["role"] == "assistant") {
+                        let already_delivered = self.last_assistant.as_ref() == Some(result);
+                        self.observe_assistant(result)?;
+                        if !already_delivered {
+                            if let Some(text) =
+                                crate::pi_rpc_connection::completed_assistant_text(result)
+                            {
+                                signals.push(
+                                    self.signal(ConnectionSignalKind::AgentMessageSegment { text }),
+                                );
+                            }
+                        }
+                    } else {
+                        self.stop = None;
+                    }
+                }
                 let (reason, detail) = self.stop.take().unwrap_or(("unknown".into(), None));
-                Some(match reason.as_str() {
+                self.last_assistant = None;
+                let terminal = match reason.as_str() {
                     "aborted" => ConnectionSignalKind::Cancelled,
                     "unknown" if self.abort_acknowledged => ConnectionSignalKind::Cancelled,
-                    "unknown" => ConnectionSignalKind::Failed {
-                        reason: "Prime ended without a terminal assistant message".into(),
-                    },
                     "error" => ConnectionSignalKind::Failed {
                         reason: detail.unwrap_or_else(|| "Prime reported an assistant error".into()),
                     },
-                    _ => ConnectionSignalKind::Completed {
+                    "stop" | "length" => ConnectionSignalKind::Completed {
                         stop_reason: reason,
                         usage: None,
                     },
-                })
+                    // No terminal assistant, or a final one that stopped to
+                    // use a tool: the run did not complete a reply.
+                    _ => ConnectionSignalKind::Failed {
+                        reason: "Prime ended without a terminal assistant message".into(),
+                    },
+                };
+                signals.push(self.signal(terminal));
+                return Ok(signals);
             }
             Some("tool_execution_start") | Some("tool_execution_update") => {
                 Some(ConnectionSignalKind::ToolCall {
@@ -768,6 +811,94 @@ mod tests {
             adapter.ingest(json!({"type":"agent_end"})).unwrap()[0].kind,
             ConnectionSignalKind::Completed { .. }
         ));
+    }
+
+    #[test]
+    fn native_terminal_message_recovers_coalesced_end_without_duplicate_or_wrong_model() {
+        let captured: Value = serde_json::from_str(include_str!(
+            "../tests/fixtures/prime/controlled-native-terminal.json"
+        ))
+        .unwrap();
+        let message = captured["message"].clone();
+        let expected = crate::pi_rpc_connection::completed_assistant_text(&message).unwrap();
+        // A daemon snapshot can coalesce the message_end; agent_end's final
+        // assistant then carries the reply exactly once either way.
+        for earlier_end in [false, true] {
+            let mut adapter = PrimeRpcConnectionAdapter::new(
+                ResourceRef::parse("connection/prime/native-terminal").unwrap(),
+                "/work".into(),
+                vec![],
+            )
+            .with_selected_model("zai", "glm-5.3-flash")
+            .unwrap();
+            if earlier_end {
+                adapter
+                    .ingest(json!({"type":"message_end","message":message}))
+                    .unwrap();
+            }
+            let signals = adapter
+                .ingest(json!({"type":"agent_end","messages":[message]}))
+                .unwrap();
+            assert_eq!(signals.len(), if earlier_end { 1 } else { 2 });
+            if !earlier_end {
+                assert!(
+                    matches!(&signals[0].kind, ConnectionSignalKind::AgentMessageSegment { text } if text == &expected)
+                );
+            }
+            assert!(
+                matches!(&signals.last().unwrap().kind, ConnectionSignalKind::Completed { stop_reason, .. } if stop_reason == "stop")
+            );
+        }
+        let mut adapter = PrimeRpcConnectionAdapter::new(
+            ResourceRef::parse("connection/prime/native-terminal-negative").unwrap(),
+            "/work".into(),
+            vec![],
+        )
+        .with_selected_model("zai", "glm-5.3-flash")
+        .unwrap();
+        // The terminal assistant is attributed exactly as a message_end is.
+        let mut wrong = message.clone();
+        wrong["model"] = json!("different-model");
+        assert_eq!(
+            adapter
+                .ingest(json!({"type":"agent_end","messages":[wrong]}))
+                .unwrap_err()
+                .code(),
+            "connection.prime_rpc.response_model_mismatch"
+        );
+        // Only the final message may supply terminal evidence: never search
+        // backward across a tool result, and an empty run is no completion.
+        for ending in [json!([]), json!([message, {"role":"toolResult"}])] {
+            adapter
+                .ingest(json!({"type":"message_end","message":message}))
+                .unwrap();
+            assert!(matches!(
+                &adapter
+                    .ingest(json!({"type":"agent_end","messages":ending}))
+                    .unwrap()
+                    .last()
+                    .unwrap()
+                    .kind,
+                ConnectionSignalKind::Failed { .. }
+            ));
+        }
+        let mut not_terminal = message.clone();
+        not_terminal["stopReason"] = json!("toolUse");
+        assert!(matches!(
+            &adapter
+                .ingest(json!({"type":"agent_end","messages":[not_terminal]}))
+                .unwrap()
+                .last()
+                .unwrap()
+                .kind,
+            ConnectionSignalKind::Failed { .. }
+        ));
+        let mut failed = message.clone();
+        failed["stopReason"] = json!("error");
+        failed["errorMessage"] = json!("Native provider failure");
+        assert!(
+            matches!(&adapter.ingest(json!({"type":"agent_end","messages":[failed]})).unwrap().last().unwrap().kind, ConnectionSignalKind::Failed { reason } if reason == "Native provider failure")
+        );
     }
 
     #[test]
