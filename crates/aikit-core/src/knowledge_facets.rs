@@ -240,6 +240,20 @@ pub struct PlaceFacet {
     /// bodies existed keeps its meaning and round-trips byte-equivalent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub body_ref: Option<String>,
+    /// The subject's native relation to the place, verbatim (`ql.techne/v1`
+    /// PlaceFacet.relation: OCCURRED_AT, LOCATED_IN, OPERATED_IN,
+    /// TRAVELLED_TO, MYTH_LOCATED_AT, … — never interchangeable, never
+    /// normalised here). Absent: the place declares no relation, as every
+    /// place written before relations rode the facet.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub relation: Option<String>,
+    /// The place's position in the order of its subject's route of that
+    /// relation: a stop of a route, counted from 1 (O-I #746, a route placed
+    /// stop by stop and walked in order). It needs a relation, and two stops
+    /// of one relation never hold the same position on one subject. Absent:
+    /// no stop, or a stop whose order is read from its validity as before.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sequence: Option<u32>,
 }
 
 impl PlaceFacet {
@@ -256,6 +270,8 @@ impl PlaceFacet {
             uncertainty: None,
             source_ref: None,
             body_ref: None,
+            relation: None,
+            sequence: None,
         }
     }
 }
@@ -657,6 +673,38 @@ fn validate_place_facet(facet: &PlaceFacet) -> Result<()> {
     }
     if let Some(body_ref) = &facet.body_ref {
         require_non_empty("knowledge.facet_invalid_place", body_ref, "place.body_ref")?;
+    }
+    if let Some(relation) = &facet.relation {
+        require_non_empty("knowledge.facet_invalid_place", relation, "place.relation")?;
+    }
+    if let Some(sequence) = facet.sequence {
+        if sequence == 0 || facet.relation.is_none() {
+            return Err(AikitError::new(
+                "knowledge.facet_invalid_place",
+                "`place.sequence` is a stop's position in its relation's route, counted from 1; it needs the place's `relation`",
+            )
+            .with("field", "place.sequence"));
+        }
+    }
+    Ok(())
+}
+
+/// The stops of one subject's facets hold distinct positions in each
+/// relation's route: two stops of one relation never share a `sequence`.
+pub fn validate_route_order(places: &[PlaceFacet]) -> Result<()> {
+    let mut held = std::collections::BTreeSet::new();
+    for facet in places {
+        if let (Some(relation), Some(sequence)) = (&facet.relation, facet.sequence) {
+            if !held.insert((relation.as_str(), sequence)) {
+                return Err(AikitError::new(
+                    "knowledge.facet_invalid_place",
+                    format!(
+                        "two {relation} stops hold the same place in the order ({sequence}); each stop of a route holds its own"
+                    ),
+                )
+                .with("field", "place.sequence"));
+            }
+        }
     }
     Ok(())
 }

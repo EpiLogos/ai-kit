@@ -2,8 +2,8 @@
 //! properties or requiring an otherwise unrelated construction. Persistence
 //! uses the same native Wiki transaction owner as constructive actions.
 use crate::knowledge_facets::{
-    parse_facets_from_extensions, write_facets_to_extensions, PlaceFacet, TemporalFacet,
-    TECHNE_FACET_EXTENSION,
+    parse_facets_from_extensions, validate_route_order, write_facets_to_extensions, PlaceFacet,
+    TemporalFacet, TECHNE_FACET_EXTENSION,
 };
 use crate::knowledge_wiki::WikiSpace;
 use crate::knowledge_wiki_write::{apply_wiki_mutation, WikiDocument};
@@ -295,6 +295,7 @@ pub(crate) fn replace(extensions: &mut BTreeMap<String, Value>, change: &Change)
                     "at most 256 place facts, each with a native source basis, are required",
                 ));
             }
+            validate_route_order(places)?;
             let mut facets = parse_facets_from_extensions(extensions)?;
             facets.spatial = places.clone();
             next.remove(TECHNE_FACET_EXTENSION);
@@ -736,6 +737,71 @@ mod tests {
             ]}]),
         );
         assert!(refusal(&register(), &blank).contains("place.body_ref"));
+    }
+
+    #[test]
+    fn a_stop_of_a_route_carries_its_relation_and_its_place_in_the_order() {
+        // A route is a subject's places of one relation in order (O-I #746; DLW manual §17.2 "choose Route as the place kind and
+        // join them in order"): each stop names the relation verbatim and its place in the order; both are read back as written.
+        // A place without them is a place as before and serialises exactly as it did.
+        let route = json!([{"change":"place_set","places":[
+            {"place_ref":"wiki:place:athens","precision":"approximate","source_ref":"central:file:notes",
+             "geometry":{"type":"point","coordinates":[23.72,37.98]},"relation":"TRAVELLED_TO","sequence":2},
+            {"place_ref":"wiki:place:syracuse","precision":"approximate","source_ref":"central:file:notes",
+             "geometry":{"type":"point","coordinates":[15.29,37.08]},"relation":"TRAVELLED_TO","sequence":1},
+            {"place_ref":"wiki:place:home","precision":"exact","source_ref":"central:file:notes"}
+        ]}]);
+        let saved = apply(
+            &register(),
+            &request(
+                json!({"kind":"node","ref":"wiki:a"}),
+                1,
+                "operation:route",
+                route,
+            ),
+        )
+        .unwrap();
+        let read = inspect(&saved.content, &ResourceRef::parse("wiki:a").unwrap()).unwrap();
+        let spatial = &read["object"]["aikit.techne-facet/v1"]["spatial"];
+        assert_eq!(spatial[0]["relation"], "TRAVELLED_TO");
+        assert_eq!(spatial[0]["sequence"], 2);
+        assert_eq!(spatial[1]["sequence"], 1);
+        assert!(
+            spatial[2].get("relation").is_none() && spatial[2].get("sequence").is_none(),
+            "a place that is no stop carries neither"
+        );
+        let stops = |places: Value| {
+            request(
+                json!({"kind":"node","ref":"wiki:a"}),
+                1,
+                "operation:bad-route",
+                json!([{"change":"place_set","places":places}]),
+            )
+        };
+        let unrelated = stops(json!([
+            {"place_ref":"wiki:place:x","precision":"approximate","source_ref":"central:file:notes","sequence":1}
+        ]));
+        assert!(
+            refusal(&register(), &unrelated).contains("place.sequence"),
+            "an order is an order within a relation's route"
+        );
+        let blank = stops(json!([
+            {"place_ref":"wiki:place:x","precision":"approximate","source_ref":"central:file:notes","relation":" "}
+        ]));
+        assert!(refusal(&register(), &blank).contains("place.relation"));
+        let twice = stops(json!([
+            {"place_ref":"wiki:place:x","precision":"approximate","source_ref":"central:file:notes","relation":"TRAVELLED_TO","sequence":1},
+            {"place_ref":"wiki:place:y","precision":"approximate","source_ref":"central:file:notes","relation":"TRAVELLED_TO","sequence":1}
+        ]));
+        assert!(
+            refusal(&register(), &twice).contains("same place in the order"),
+            "two stops of one route never hold one place in its order"
+        );
+        let other_routes = stops(json!([
+            {"place_ref":"wiki:place:x","precision":"approximate","source_ref":"central:file:notes","relation":"TRAVELLED_TO","sequence":1},
+            {"place_ref":"wiki:place:y","precision":"approximate","source_ref":"central:file:notes","relation":"OPERATED_IN","sequence":1}
+        ]));
+        apply(&register(), &other_routes).expect("each relation's route keeps its own order");
     }
 
     #[test]
