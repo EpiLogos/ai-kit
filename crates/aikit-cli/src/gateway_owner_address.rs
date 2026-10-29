@@ -310,6 +310,7 @@ pub fn owner_reply_pass(
                 to_instance: None,
                 instance_hold: None,
                 body: reply_body(&record),
+                handling: Default::default(),
                 sent_at_unix_ms,
                 state: routing.state,
                 state_basis: routing.state_basis,

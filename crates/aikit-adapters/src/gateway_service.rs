@@ -2271,6 +2271,7 @@ mod tests {
             to_instance: None,
             instance_hold: None,
             body: "offline".into(),
+            handling: Default::default(),
             sent_at_unix_ms: 1,
             state: crate::gateway_communique::CommuniqueState::Held,
             state_basis: "test".into(),

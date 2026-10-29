@@ -207,6 +207,7 @@ fn seed_state(home: &Path) {
                 to_instance: None,
                 instance_hold: None,
                 body: "carry me to the other Workcell".into(),
+                handling: Default::default(),
                 sent_at_unix_ms: 1,
                 state: CommuniqueState::Held,
                 state_basis: "vacant; held for its next occupant".into(),

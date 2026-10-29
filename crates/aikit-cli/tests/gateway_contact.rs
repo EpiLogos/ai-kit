@@ -282,6 +282,38 @@ impl<'a> Body<'a> {
         }
     }
 
+    /// One finished tool call inside the occupant's running turn, through the
+    /// real hook dispatcher, as `client` reports it.
+    fn tool_used(&self, client: &str) -> (String, String) {
+        let mut child = self
+            .command(&["hook", "dispatch", client, "PostToolUse"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(
+                json!({"cwd": self.home, "tool_name": "Read", "tool_input": {"file_path": "README.md"}, "tool_response": {"ok": true}})
+                    .to_string()
+                    .as_bytes(),
+            )
+            .unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        (
+            String::from_utf8_lossy(&output.stdout).to_string(),
+            String::from_utf8_lossy(&output.stderr).to_string(),
+        )
+    }
+
     /// The occupant's next prompt through the real hook dispatcher.
     fn prompt(&self, json_mode: bool) -> (String, String) {
         let mut args = vec!["hook", "dispatch", "claude", "UserPromptSubmit"];
@@ -1546,6 +1578,104 @@ fn the_turn_boundary_delivers_quoted_communiques_and_marks_them_only_once_writte
     // The next turn carries nothing new.
     let (document, _) = steward.prompt(false);
     assert!(!document.contains("[gateway/communiques]"));
+}
+
+/// Buzz's steer and queue (buzz-acp `config.rs:63-88`), through the real
+/// binary: a steer reaches the turn that runs at the occupant's next tool
+/// boundary, in Buzz's framing, and is marked delivered only once written; a
+/// queue waits for the next prompt; a harness with no mid-turn context channel
+/// (codex) takes nothing mid-turn, so the steer waits for its prompt instead.
+#[test]
+fn a_steer_reaches_the_running_turn_at_its_next_tool_call_and_a_queue_waits_for_the_prompt() {
+    let world = World::new();
+    let base = body(&world, "a", "workcell:a", "agency-gateway/a");
+    let guardian = base.as_occupant(GUARDIAN, "guardian-1");
+    let steward = base.as_occupant(STEWARD, "steward-1");
+
+    // A running gateway advertises that it keeps where the words land.
+    let service = Gateway::serve(&base, None);
+    let protocol = base.ok(&["gateway", "protocol"]);
+    service.stop();
+    assert!(
+        protocol["features"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("communique-handling")),
+        "{protocol}"
+    );
+    let queued = guardian.ok(&[
+        "gateway",
+        "send",
+        "--to",
+        STEWARD,
+        "--body",
+        "Run the tests next.",
+    ]);
+    assert!(queued["communique"].get("handling").is_none(), "{queued}");
+    let steered = guardian.ok(&[
+        "gateway",
+        "send",
+        "--to",
+        STEWARD,
+        "--handling",
+        "steer",
+        "--body",
+        "Skip the cradle root.",
+    ]);
+    assert_eq!(steered["communique"]["handling"], "steer", "{steered}");
+    let steer_ref = steered["communique"]["communique_ref"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let queue_ref = queued["communique"]["communique_ref"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+
+    // A harness that carries no context after a tool call takes nothing then.
+    let (codex, _) = steward.tool_used("codex");
+    assert!(!codex.contains("[gateway/communiques]"), "{codex}");
+
+    // The running turn's next tool call carries the steer, framed as Buzz frames it.
+    let (document, _) = steward.tool_used("claude");
+    let wire: Value = serde_json::from_str(document.trim()).unwrap();
+    assert_eq!(wire["hookSpecificOutput"]["hookEventName"], "PostToolUse");
+    let context = wire["hookSpecificOutput"]["additionalContext"]
+        .as_str()
+        .unwrap();
+    assert!(
+        context.contains("[gateway/communiques] 1 Communique for"),
+        "{context}"
+    );
+    assert!(context.contains("[New message — arrived while you were working]"));
+    assert!(context.contains(
+        "Continue your in-progress work and incorporate the new message if it's relevant"
+    ));
+    assert!(context.contains("   | Skip the cradle root."));
+    assert!(!context.contains("Run the tests next."));
+    let journal = state_file_communiques(&base.home);
+    let state = |reference: &str| {
+        journal
+            .iter()
+            .find(|record| record["communique_ref"] == reference)
+            .unwrap()["state"]
+            .clone()
+    };
+    assert_eq!(state(&steer_ref), "delivered");
+    assert_eq!(state(&queue_ref), "pending");
+
+    // The next tool call carries nothing more; the prompt carries the queue.
+    let (again, _) = steward.tool_used("claude");
+    assert!(!again.contains("[gateway/communiques]"), "{again}");
+    let (document, _) = steward.prompt(false);
+    let wire: Value = serde_json::from_str(document.trim()).unwrap();
+    let context = wire["hookSpecificOutput"]["additionalContext"]
+        .as_str()
+        .unwrap();
+    assert!(context.contains("   | Run the tests next."), "{context}");
+    assert!(!context.contains("arrived while you were working"));
+    let journal = state_file_communiques(&base.home);
+    assert!(journal.iter().all(|record| record["state"] == "delivered"));
 }
 
 #[test]

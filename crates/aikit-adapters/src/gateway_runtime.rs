@@ -50,10 +50,20 @@ pub const GATEWAY_OCCUPANCY_READING_SCHEMA: &str = "aikit.gateway-occupancy-read
 /// route, so a client never hands it one.
 pub const GATEWAY_FEATURE_COMMUNIQUE_EXACT_INSTANCE: &str = "communique-exact-instance";
 
+/// Protocol feature: this gateway keeps a Communique's `handling` (steer or
+/// queue) through send, ingest, relay and its state file. A gateway built
+/// before it ignores the field and keeps every Communique as `queue`, so a
+/// steer is never handed to one: a success that dropped the field would read
+/// as a delivered steer and silently change where the words land (Buzz's own
+/// rule against probing an agent that answers unknown requests with success,
+/// `crates/buzz-acp/src/acp.rs:1436-1444`).
+pub const GATEWAY_FEATURE_COMMUNIQUE_HANDLING: &str = "communique-handling";
+
 /// Every protocol feature this gateway advertises in its `protocol` answer.
 pub const GATEWAY_FEATURE_NATIVE_OWNER: &str = "native-owner/v1";
-pub const GATEWAY_PROTOCOL_FEATURES: [&str; 3] = [
+pub const GATEWAY_PROTOCOL_FEATURES: [&str; 4] = [
     GATEWAY_FEATURE_COMMUNIQUE_EXACT_INSTANCE,
+    GATEWAY_FEATURE_COMMUNIQUE_HANDLING,
     GATEWAY_FEATURE_NATIVE_OWNER,
     // Relay advertisement rides the service: a peer that sees it may route an
     // EncounterRelay here, and the serving gateway answers it through its
