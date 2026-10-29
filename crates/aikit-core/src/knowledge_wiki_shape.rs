@@ -32,7 +32,7 @@ pub const WIKI_QL_SHAPE_VERSION: &str = "aikit.wiki-ql-shape/v1";
 pub const WIKI_QL_SHAPED_FLOW_VERSION: &str = "aikit.wiki-ql-shaped-flow/v1";
 pub const QL_SHAPE_CONTRACT_VERSION: &str = "1.0.0";
 pub const QL_SHAPE_CONTRACT_REF: &str = "ql.shape@1.0.0";
-pub const QL_SHAPE_UPSTREAM_BLOB: &str = "9056a460a9ce25e727cab83e6db25355e60a0b85";
+pub const QL_SHAPE_UPSTREAM_BLOB: &str = "57c7e419691781aca3e8dbadeb6167202583cb6d";
 pub const QL_STRUCTURAL_CONTRACT_VERSION: &str = "2.0.0";
 pub const QL_SIX_BY_SIX_SHAPE_REF: &str = "ql:shape:1.0.0:6x6:direct-conjugate";
 pub const QL_RELATIONAL_SIXFOLD_SHAPE_REF: &str = "ql:shape:1.0.0:6-plus-6-prime";
@@ -87,6 +87,7 @@ pub enum WikiQlConstellationGrain {
     FourPlusOneGround,
     FourPlusOneSynthesis,
     SixFold,
+    PartialConjugate7,
     PartialConjugate8,
     PartialConjugate9,
     PartialConjugate10,
@@ -106,6 +107,7 @@ impl WikiQlConstellationGrain {
             Self::FourPlusOneGround => "four-plus-one-ground",
             Self::FourPlusOneSynthesis => "four-plus-one-synthesis",
             Self::SixFold => "sixfold",
+            Self::PartialConjugate7 => "partial-conjugate-7",
             Self::PartialConjugate8 => "partial-conjugate-8",
             Self::PartialConjugate9 => "partial-conjugate-9",
             Self::PartialConjugate10 => "partial-conjugate-10",
@@ -312,6 +314,7 @@ pub fn wiki_constellation_grain(
     }
     if direct.as_slice() == [0, 1, 2, 3, 4, 5] {
         return Ok(match conjugate.len() {
+            1 => WikiQlConstellationGrain::PartialConjugate7,
             2 => WikiQlConstellationGrain::PartialConjugate8,
             3 => WikiQlConstellationGrain::PartialConjugate9,
             4 => WikiQlConstellationGrain::PartialConjugate10,
@@ -1034,6 +1037,44 @@ mod tests {
         assert_eq!(
             fixture["relational_sixfold"]["operator_ref"],
             QL_RELATIONAL_SIXFOLD_OPERATOR_REF
+        );
+    }
+
+    /// A full sixfold with conjugates on some of its positions is a partial
+    /// conjugate: seven members is QL's `partial-conjugate-7`, twelve its
+    /// `twelvefold`. The grain AIKit computes for each count is the one the
+    /// pinned contract's fold reading names for that count, so a draft QL
+    /// binds is never refused for a grain AIKit does not know.
+    #[test]
+    fn a_sixfold_with_conjugates_takes_the_grain_the_pinned_contract_names_for_its_count() {
+        let fixture: Value = serde_json::from_str(include_str!(
+            "../../../fixtures/knowledge/ql-shape-contract-v1.json"
+        ))
+        .unwrap();
+        let reading = fixture["constellation_fold_reading"]
+            .as_object()
+            .expect("the pinned contract reads each constellation grain's fold count");
+        for conjugates in 1_u8..=6 {
+            let mut constellation = complete_constellation();
+            constellation
+                .members
+                .retain(|member| !member.conjugate || member.position.unwrap() < conjugates);
+            let grain = wiki_constellation_grain(&constellation).unwrap();
+            let count = 6 + u64::from(conjugates);
+            assert_eq!(
+                reading.get(grain.as_str()).and_then(Value::as_u64),
+                Some(count),
+                "{count} members compute `{}`, which the pinned contract does not read as a {count}-fold",
+                grain.as_str()
+            );
+        }
+        let mut seven = complete_constellation();
+        seven
+            .members
+            .retain(|member| !member.conjugate || member.position == Some(0));
+        assert_eq!(
+            wiki_constellation_grain(&seven).unwrap().as_str(),
+            "partial-conjugate-7"
         );
     }
 }

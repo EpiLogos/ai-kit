@@ -3,10 +3,11 @@
   "version": "1.0.0",
   "upstream": {
     "repository": "EpiLogos/QL-MEF",
-    "issue": 85,
+    "issue": 204,
     "path": "fixtures/kernel/ql-shape-contract-v1.json",
-    "blob": "9056a460a9ce25e727cab83e6db25355e60a0b85"
+    "blob": "57c7e419691781aca3e8dbadeb6167202583cb6d"
   },
+  "geometry_extension_version": "1.1.0",
   "structural_contract_version": "2.0.0",
   "whole_anchor": "0/1",
   "pair_families": {
@@ -19,12 +20,47 @@
     "D2": 3,
     "D3": 4
   },
+  "constellation_fold_reading": {
+    "anchor-only": 1,
+    "twofold": 2,
+    "threefold-123": 3,
+    "threefold-450": 3,
+    "fourfold-1234": 4,
+    "four-plus-one-ground": 5,
+    "four-plus-one-synthesis": 5,
+    "sixfold": 6,
+    "partial-conjugate-7": 7,
+    "partial-conjugate-8": 8,
+    "partial-conjugate-9": 9,
+    "partial-conjugate-10": 10,
+    "partial-conjugate-11": 11,
+    "twelvefold": 12,
+    "onefold_note": "0/1 is one geometric whole while remaining zero positional members in structural-v2"
+  },
+  "compression": {
+    "presented_shape": "ql:shape:1.0.0:constellation:anchor-only",
+    "accepted_disclosed_folds": [2, 3],
+    "two_to_one_operator_ref": "ql:shape:1.1.0:compression:disclosed-to-0-1",
+    "three_to_one_operator_ref": "ql:shape:1.1.0:compression:3-to-1-recognition",
+    "threefold_123_recognition_superset": "ql:shape:1.0.0:constellation:fourfold-1234",
+    "law": "compression preserves the disclosed shape through derivation provenance"
+  },
   "four_by_four": {
     "source": "D3",
     "coordinate_order": ["left/direct", "right/direct", "left/conjugate", "right/conjugate"],
     "axis_cardinality": 4,
     "address_cardinality": 16,
     "shape_ref_template": "ql:shape:1.0.0:4x4:{family}:{pair_index}"
+  },
+  "four_by_four_by_four": {
+    "owner": "M3/Mahamaya fold body",
+    "site_cardinality": 3,
+    "binary_properties_per_site": 2,
+    "states_per_site": 4,
+    "binary_expression": "2^6",
+    "quaternary_expression": "4^3",
+    "address_cardinality": 64,
+    "shape_ref": "ql:shape:1.1.0:4x4x4:m3-three-quaternary-sites"
   },
   "six_by_six": {
     "row_face": "direct",
@@ -45,10 +81,44 @@
     "operator_ref": "ql:shape:1.0.0:generation:same-position-direct-conjugate",
     "return_through": "0/1"
   },
+  "eighteen_fold": {
+    "expression": "6 + 6-prime + relational-6",
+    "sixfold_cardinality": 6,
+    "sixfold_count": 3,
+    "fold_cardinality": 18,
+    "compression": "18/6=3",
+    "compressed_fold_cardinality": 3,
+    "compression_operator_ref": "ql:shape:1.1.0:compression:18-by-6-to-threefold",
+    "shape_ref": "ql:shape:1.1.0:18-fold:6-plus-6-prime-plus-relational-6",
+    "return_through": "0/1"
+  },
+  "ten_by_ten": {
+    "standing": "derived Geometry projection of Second Spanda; not a replacement for the 4x4x4|6x6 body",
+    "axis": "4+6",
+    "axis_cardinality": 10,
+    "blocks": [16, 24, 24, 36],
+    "m3_partition_cardinality": 64,
+    "m2_partition_cardinality": 36,
+    "address_cardinality": 100,
+    "shape_ref": "ql:shape:1.1.0:10x10:second-spanda-4-plus-6"
+  },
+  "second_spanda": {
+    "canonical_body": "4^3 + 6^2",
+    "equivalent_binary_body": "2^6 + 6^2",
+    "m3_shape_ref": "ql:shape:1.1.0:4x4x4:m3-three-quaternary-sites",
+    "m3_cardinality": 64,
+    "m2_shape_ref": "ql:shape:1.0.0:6x6:direct-conjugate",
+    "m2_cardinality": 36,
+    "totality": 100,
+    "decadic_projection_ref": "ql:shape:1.1.0:10x10:second-spanda-4-plus-6"
+  },
   "laws": {
     "shape_address_asserts_semantic_relation": false,
     "pair_family_provenance_is_load_bearing": true,
     "partial_shapes_are_valid_disclosed_wholes": true,
-    "generated_semantic_content_is_client_attributable": true
+    "generated_semantic_content_is_client_attributable": true,
+    "compression_preserves_disclosed_basis": true,
+    "second_spanda_canonical_body_is_m3_4cubed_plus_m2_6squared": true,
+    "decadic_projection_preserves_64_36_partition": true
   }
 }
