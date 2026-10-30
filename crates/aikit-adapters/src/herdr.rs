@@ -59,6 +59,10 @@ pub struct HerdrAgentObservation {
     pub pane_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
+    /// The agent Herdr recognises or was told runs in the pane (`agent`:
+    /// `claude`, `codex`, `pi`, ...), as Herdr reports it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent: Option<String>,
     pub status: HerdrAgentStatus,
 }
 
@@ -227,6 +231,7 @@ pub fn parse_herdr_snapshot(raw: &str) -> Result<HerdrSnapshot> {
                 native_id,
                 pane_id,
                 name: string_field(agent, "name"),
+                agent: string_field(agent, "agent"),
                 status: agent_status_field(agent)?,
             })
         })
@@ -562,6 +567,18 @@ impl<R: CommandRunner> HerdrWorkingEnvironment<R> {
     /// Read only the pane bound by this provider's persisted plan and fresh
     /// snapshot. No workspace creation, focus or input occurs here.
     pub fn capture_surface(&self, subject: &ResourceRef, lines: u16) -> Result<(String, String)> {
+        self.capture_surface_with_agent(subject, lines)
+            .map(|(native, text, _)| (native, text))
+    }
+
+    /// [`Self::capture_surface`], with the agent Herdr reports in the pane at
+    /// the end of the read (its lifecycle state: `blocked` is an agent that
+    /// waits for the person), when Herdr reports one there.
+    pub fn capture_surface_with_agent(
+        &self,
+        subject: &ResourceRef,
+        lines: u16,
+    ) -> Result<(String, String, Option<HerdrAgentObservation>)> {
         if !(1..=2000).contains(&lines) {
             return Err(AikitError::new(
                 "herdr.capture_limit",
@@ -590,14 +607,54 @@ impl<R: CommandRunner> HerdrWorkingEnvironment<R> {
             &lines.to_string(),
             "--raw",
         ])?;
-        let after = self.observation(self.snapshot()?);
+        let snapshot = self.snapshot()?;
+        let agent = snapshot
+            .agents
+            .iter()
+            .find(|agent| agent.pane_id == native)
+            .cloned();
+        let after = self.observation(snapshot);
         if after.canonical_native_id(subject) != Some(native.as_str()) {
             return Err(AikitError::new(
                 "herdr.surface_changed",
                 "The working pane changed during capture; retry its current binding",
             ));
         }
-        Ok((native, text))
+        Ok((native, text, agent))
+    }
+
+    /// Send keys to only the pane bound by this provider's persisted plan and
+    /// fresh snapshot, as the bytes a terminal sends for them (`pane
+    /// send-text` writes them to the pane's terminal as they are, control
+    /// bytes included). A pane that is not live is refused; nothing is
+    /// created or focused.
+    pub fn send_surface_input(&self, subject: &ResourceRef, text: &str) -> Result<String> {
+        let snapshot = self.snapshot()?;
+        let live = snapshot.pane_ids.clone();
+        let observation = self.observation(snapshot);
+        // A recorded pane Herdr no longer reports is closed (Herdr never
+        // reuses pane ids): keys are never sent to it.
+        let native = observation
+            .canonical_native_id(subject)
+            .filter(|native| live.iter().any(|pane| pane == native))
+            .ok_or_else(|| {
+                AikitError::new(
+                    "herdr.surface_not_live",
+                    "The persisted working Surface has no currently observed Herdr pane",
+                )
+            })?
+            .to_string();
+        self.run_argv(
+            vec![
+                "herdr".into(),
+                "pane".into(),
+                "send-text".into(),
+                native.clone(),
+                text.into(),
+            ],
+            "herdr.input_failed",
+        )?;
+        Ok(native)
     }
 
     pub fn create_workspace(&mut self) -> Result<HerdrWorkspaceCreation> {
@@ -1169,6 +1226,86 @@ mod tests {
         assert_eq!(snapshot.focused_pane_id.as_deref(), Some("w1:p2"));
         assert_eq!(snapshot.agents[0].status, HerdrAgentStatus::Blocked);
         assert_eq!(snapshot.agents[0].pane_id, "w1:p2");
+    }
+
+    fn input_snapshot(agents: &str) -> String {
+        format!(
+            r#"{{"id":"s","result":{{"type":"session_snapshot","snapshot":{{
+              "version":"0.9.1","protocol":8,"focused_workspace_id":"w7","focused_pane_id":"w7:p1",
+              "workspaces":[{{"workspace_id":"w7"}}],"tabs":[],
+              "panes":[{{"pane_id":"w7:p1"}},{{"pane_id":"w7:p2"}}],
+              "layouts":[{{"workspace_id":"w7","tab_id":"w7:t1","focused_pane_id":"w7:p1","panes":[{{"pane_id":"w7:p1"}},{{"pane_id":"w7:p2"}}]}}],
+              "agents":[{agents}]}}}}}}"#
+        )
+    }
+
+    #[test]
+    fn input_reaches_only_the_bound_live_pane_as_the_bytes_typed() {
+        let surface = r("surface/terminal/main/shell");
+        let runner = Arc::new(
+            ScriptedRunner::new()
+                .on("api snapshot", &input_snapshot(""))
+                .on("pane send-text", "{}"),
+        );
+        let provider = HerdrWorkingEnvironment::new(runner.clone(), r("provider/herdr/current"))
+            .bind_surface(surface.clone(), "w7:p2");
+        let native = provider
+            .send_surface_input(&surface, "-n ls\r\x1b[A")
+            .unwrap();
+        assert_eq!(native, "w7:p2");
+        let calls = runner.calls();
+        let sent: Vec<_> = calls
+            .iter()
+            .filter(|argv| argv.get(1).map(String::as_str) == Some("pane"))
+            .collect();
+        assert_eq!(
+            sent,
+            vec![&vec![
+                "herdr".to_string(),
+                "pane".into(),
+                "send-text".into(),
+                "w7:p2".into(),
+                "-n ls\r\x1b[A".into(),
+            ]],
+            "the text goes to the bound pane exactly as typed, and nothing else is sent"
+        );
+
+        // A Surface no live pane carries is refused: nothing is sent.
+        let runner = Arc::new(ScriptedRunner::new().on("api snapshot", &input_snapshot("")));
+        let provider = HerdrWorkingEnvironment::new(runner.clone(), r("provider/herdr/current"))
+            .bind_surface(surface.clone(), "w7:p9");
+        let error = provider.send_surface_input(&surface, "ls\r").unwrap_err();
+        assert_eq!(error.code(), "herdr.surface_not_live");
+        assert!(!runner
+            .call_lines()
+            .iter()
+            .any(|line| line.contains("send-text")));
+    }
+
+    #[test]
+    fn a_capture_carries_the_agent_herdr_reports_in_the_pane() {
+        let surface = r("surface/terminal/main/shell");
+        let runner = Arc::new(
+            ScriptedRunner::new()
+                .on(
+                    "api snapshot",
+                    &input_snapshot(
+                        r#"{"terminal_id":"term-9","agent":"claude","pane_id":"w7:p2","agent_status":"blocked"},
+                           {"terminal_id":"term-1","agent":"codex","pane_id":"w7:p1","agent_status":"working"}"#,
+                    ),
+                )
+                .on("pane read", "Allow rm? (y/n) "),
+        );
+        let provider = HerdrWorkingEnvironment::new(runner, r("provider/herdr/current"))
+            .bind_surface(surface.clone(), "w7:p2");
+        let (native, text, agent) = provider.capture_surface_with_agent(&surface, 40).unwrap();
+        assert_eq!(
+            (native.as_str(), text.as_str()),
+            ("w7:p2", "Allow rm? (y/n) ")
+        );
+        let agent = agent.expect("Herdr reports an agent in the bound pane");
+        assert_eq!(agent.agent.as_deref(), Some("claude"));
+        assert_eq!(agent.status, HerdrAgentStatus::Blocked);
     }
 
     #[test]

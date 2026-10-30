@@ -856,3 +856,232 @@ fn herdr_working_surface_open_persists_evidence_and_reobserves_the_same_pane() {
         }
     }
 }
+
+/// Typing into a room is the working-surface owner's act over the exact
+/// persisted binding, through the public verb, on a private real tmux server:
+/// a pane that is not live is refused without being created; once open, keys
+/// an agent sends and keys a person sends both reach the pane's process; the
+/// capture names, for each input AIKit delivered, who sent it, and keeps an
+/// agent's text but only the count of a person's keys.
+#[test]
+fn input_reaches_the_live_tmux_room_and_the_capture_names_who_sent_it() {
+    if !tmux_installed() {
+        eprintln!("SKIP working Surface input proof: tmux is not installed");
+        return;
+    }
+    let temp = tempfile::tempdir().unwrap();
+    let home = AikitHome::at(temp.path().join("aikit-home"));
+    home.ensure_layout().unwrap();
+    let store = SessionSpaceApplicationStore::new(home.clone());
+    let space = SessionSpaceRef::parse("session-space/input-tmux").unwrap();
+    let agent = r("agent-session/input-tmux");
+    let surface = r("surface/terminal/main/shell");
+    let provider = r("provider/tmux/current");
+    let binding = r("working-surface/input-tmux-shell");
+    let create = store
+        .stage(
+            None,
+            SessionSpaceMutation::Create {
+                id: space.clone(),
+                label: Some("input tmux".into()),
+            },
+        )
+        .unwrap();
+    store.apply(&create).unwrap();
+    apply(
+        &store,
+        &space,
+        SessionSpaceMutation::AttachAgentSession {
+            attachment: SessionSpaceAgentAttachmentIntent {
+                agent_session: agent.clone(),
+                purpose: Some("input proof".into()),
+                provenance: vec!["test".into()],
+            },
+        },
+    );
+    apply(
+        &store,
+        &space,
+        SessionSpaceMutation::AttachSurface {
+            attachment: SessionSpaceSurfaceAttachmentIntent {
+                surface: surface.clone(),
+                component: None,
+                purpose: Some("exact terminal Surface".into()),
+                provenance: vec!["test".into()],
+            },
+        },
+    );
+    apply(
+        &store,
+        &space,
+        SessionSpaceMutation::BindNativeReference {
+            binding: SessionSpaceNativeReferenceBinding {
+                reference: provider.clone(),
+                kind: SessionSpaceNativeReferenceKind::Provider,
+                owner: None,
+                provider: None,
+                host: None,
+                purpose: Some("tmux provider".into()),
+                provenance: vec!["test".into()],
+            },
+        },
+    );
+    // The pane's shell keeps no history file: a test never writes the
+    // person's own shell history.
+    let plan = SessionSpec::from_toml_str(
+        r#"
+schema = 1
+id = "aikit-input-surface"
+name = "aikit-input-surface"
+
+[[views]]
+id = "main"
+[[views.panes]]
+id = "shell"
+focus = true
+command = ["env", "HISTFILE=/dev/null", "PS1=$ ", "sh"]
+"#,
+    )
+    .unwrap()
+    .compile()
+    .unwrap();
+    apply(
+        &store,
+        &space,
+        SessionSpaceMutation::BindWorkingSurface {
+            binding: Box::new(SessionSpaceWorkingSurfaceBinding {
+                binding: binding.clone(),
+                surface: surface.clone(),
+                agent_session: agent.clone(),
+                provider: provider.clone(),
+                plan,
+                plan_key: "main/shell".into(),
+                provenance: vec!["input test binding".into()],
+            }),
+        },
+    );
+    let socket = format!(
+        "aikit-input-surface-{}-{}",
+        std::process::id(),
+        COUNTER.fetch_add(1, Ordering::SeqCst)
+    );
+    let _guard = SocketGuard(socket.clone());
+    // Each verb runs as its own process with its own environment, so the
+    // private socket never leaks into another test's process state.
+    let verb = |args: &[&str]| {
+        let output = Command::new(cargo_bin("aikit"))
+            .arg("-C")
+            .arg(temp.path())
+            .args(["session-space", "working-surface"])
+            .args(args)
+            .env("AIKIT_HOME", home.root())
+            .env("AIKIT_TMUX_SOCKET", &socket)
+            .output()
+            .unwrap();
+        let document: serde_json::Value =
+            serde_json::from_slice(&output.stdout).unwrap_or(serde_json::Value::Null);
+        (
+            output.status.success(),
+            document,
+            String::from_utf8_lossy(&output.stderr).into_owned(),
+        )
+    };
+    let space_arg = space.to_string();
+    let (space_arg, binding_arg) = (space_arg.as_str(), binding.as_str());
+
+    let (ok, _, stderr) = verb(&[
+        "input",
+        space_arg,
+        binding_arg,
+        "--text",
+        "echo absent\r",
+        "--by",
+        "human",
+    ]);
+    assert!(!ok, "keys to a pane that is not live are refused");
+    assert!(stderr.contains("mux.tmux_surface_not_live"), "{stderr}");
+    let has_session = Command::new("tmux")
+        .args(["-L", &socket, "has-session", "-t", "aikit-input-surface"])
+        .output()
+        .unwrap();
+    assert!(
+        !has_session.status.success(),
+        "a refused input never creates the room"
+    );
+
+    let (ok, _, stderr) = verb(&["open", space_arg, binding_arg]);
+    assert!(ok, "{stderr}");
+
+    let (ok, sent, stderr) = verb(&[
+        "input",
+        space_arg,
+        binding_arg,
+        "--text",
+        "printf 'AQ_%s\\n' AGENT_RAN\r",
+        "--by",
+        agent.as_str(),
+    ]);
+    assert!(ok, "{stderr}");
+    assert_eq!(
+        sent["schema"],
+        "aikit.session-space-working-surface-input/v1"
+    );
+    assert_eq!(sent["input"]["state"], "delivered");
+    assert_eq!(sent["by"], agent.as_str());
+    let typed = "printf 'AQ_%s\\n' HUMAN_TYPED\r";
+    let (ok, _, stderr) = verb(&[
+        "input",
+        space_arg,
+        binding_arg,
+        "--text",
+        typed,
+        "--by",
+        "human",
+    ]);
+    assert!(ok, "{stderr}");
+    let (ok, _, stderr) = verb(&[
+        "input",
+        space_arg,
+        binding_arg,
+        "--text",
+        "x",
+        "--by",
+        "not a sender",
+    ]);
+    assert!(!ok);
+    assert!(
+        stderr.contains("session_space.input_sender_invalid"),
+        "{stderr}"
+    );
+
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let capture = loop {
+        let (ok, capture, stderr) = verb(&["capture", space_arg, binding_arg, "--lines", "50"]);
+        assert!(ok, "{stderr}");
+        let text = capture["capture"]["text"].as_str().unwrap_or_default();
+        let ran = |marker: &str| text.lines().any(|line| line.trim() == marker);
+        if ran("AQ_AGENT_RAN") && ran("AQ_HUMAN_TYPED") {
+            break capture;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "both inputs did not run in the room: {text}"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    assert_eq!(capture["input"]["state"], "accepts");
+    let inputs = capture["inputs"]
+        .as_array()
+        .expect("the capture carries the journal");
+    assert_eq!(inputs.len(), 2, "{inputs:?}");
+    assert_eq!(inputs[0]["by"], agent.as_str());
+    assert_eq!(inputs[0]["text"], "printf 'AQ_%s\\n' AGENT_RAN\r");
+    assert_eq!(inputs[0]["binding"], binding.as_str());
+    assert_eq!(inputs[1]["by"], "human");
+    assert!(
+        inputs[1].get("text").is_none(),
+        "a person's keys are never kept: {:?}",
+        inputs[1]
+    );
+    assert_eq!(inputs[1]["bytes"], typed.len());
+}

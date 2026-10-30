@@ -245,6 +245,30 @@ impl<R: CommandRunner> Tmux<R> {
         Ok((native, output.stdout))
     }
 
+    /// Send keys to only a currently AIKit-tagged logical pane, as the bytes
+    /// a terminal sends for them (`send-keys -l`: no key-name lookup, so the
+    /// text reaches the pane's process as typed, control bytes included).
+    /// This never opens, focuses or recreates a provider session; a pane that
+    /// is not live is refused. Native ids stay provenance.
+    pub fn send_surface_input(
+        &self,
+        plan: &SessionPlan,
+        logical_key: &str,
+        text: &str,
+    ) -> Result<String> {
+        let (native, _) = self.attach_surface_command(plan, logical_key)?;
+        self.runner
+            .run_with_timeout(
+                &self.argv(&["send-keys", "-t", &native, "-l", "--", text]),
+                std::time::Duration::from_secs(2),
+            )?
+            .require(
+                &self.argv(&["send-keys", "-t", &native]),
+                "mux.tmux_input_failed",
+            )?;
+        Ok(native)
+    }
+
     /// Every pane in a window as `(pane id, plan tag)`.
     ///
     /// An empty tag means a person created that pane.

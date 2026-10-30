@@ -1303,3 +1303,67 @@ fn full_runner_with_workspaces(listing: &str) -> ScriptedRunner {
             &fixture("list-pane-surfaces-root.json"),
         )
 }
+
+// ---------------------------------------------------------------------------
+// Capture: cmux's own read of the owned surface
+// ---------------------------------------------------------------------------
+
+#[test]
+fn a_capture_reads_only_the_owned_surface_through_cmux_read_screen() {
+    let runner = full_runner_with_workspaces(
+        r#"{"workspaces":[{"id":"workspace:88","title":"payments · main · ses_CMUXSESSION000000000000","window":"window:4"}]}"#,
+    )
+    .on(
+        "list-pane-surfaces",
+        r#"{"surfaces":[{"ref":"surface:20","title":"AIKit · ses_CMUXSESSION000000000000/payments/main/shell"}]}"#,
+    )
+    .on("read-screen", "$ cargo test\nok\n$ ");
+    let adapter = cmux(runner);
+
+    let (native, text) = adapter
+        .capture_surface(&single_pane_plan("payments"), "main/shell", 50)
+        .unwrap();
+
+    assert_eq!(native, "surface:20");
+    assert_eq!(text, "$ cargo test\nok\n$ ");
+    let lines = adapter.runner().call_lines();
+    assert!(
+        lines.iter().any(|line| line
+            .ends_with("read-screen --workspace workspace:88 --surface surface:20 --lines 50")),
+        "the owned surface is read by its handle, bounded: {lines:?}"
+    );
+    assert!(
+        !lines.iter().any(|line| {
+            line.contains("new-")
+                || line.contains("send")
+                || line.contains("focus-")
+                || line.contains("select-workspace")
+                || line.contains("respawn-")
+        }),
+        "a capture is physically read-only: {lines:?}"
+    );
+}
+
+#[test]
+fn a_surface_the_markers_no_longer_bind_is_refused_not_read() {
+    let runner = full_runner_with_workspaces(
+        r#"{"workspaces":[{"id":"workspace:88","title":"payments · main · ses_CMUXSESSION000000000000","window":"window:4"}]}"#,
+    )
+    .on(
+        "list-pane-surfaces",
+        r#"{"surfaces":[{"ref":"surface:20","title":"AIKit · ses_CMUXSESSION000000000000/payments/main/editor"}]}"#,
+    )
+    .on("read-screen", "someone else's screen");
+    let adapter = cmux(runner);
+
+    let error = adapter
+        .capture_surface(&single_pane_plan("payments"), "main/shell", 50)
+        .unwrap_err();
+
+    assert_eq!(error.code(), "mux.cmux_surface_not_live");
+    assert!(!adapter
+        .runner()
+        .call_lines()
+        .iter()
+        .any(|line| line.contains("read-screen")));
+}
