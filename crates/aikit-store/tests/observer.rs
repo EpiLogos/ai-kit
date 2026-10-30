@@ -70,6 +70,7 @@ fn run(command: &str, by: &str, at: Timestamp) -> ObservedRun {
         at,
         session: Some("ses_1".to_string()),
         exit_code: Some(0),
+        panes: Vec::new(),
     }
 }
 
@@ -412,4 +413,134 @@ fn status_lists_what_is_repeating_and_whether_it_was_offered() {
     assert_eq!(repeating[0].count, 2);
     assert_eq!(repeating[0].by, "human");
     assert!(repeating[0].offered.is_none());
+}
+
+// ---------------------------------------------------------------------------
+// Panes: which commands a harness ran in which terminal pane
+// ---------------------------------------------------------------------------
+
+impl Rig {
+    fn observe_run(&self, run: ObservedRun) -> aikit_store::observer::Observed {
+        self.observer
+            .observe(
+                run,
+                Policy::default(),
+                &Inbox::new(&self.home, &self.index),
+                &self.catalog,
+            )
+            .unwrap()
+    }
+}
+
+fn in_panes(command: &str, by: &str, panes: &[&str], exit_code: Option<i32>) -> ObservedRun {
+    ObservedRun {
+        panes: panes.iter().map(|pane| pane.to_string()).collect(),
+        exit_code,
+        ..run(command, by, Timestamp::now())
+    }
+}
+
+#[test]
+fn a_run_in_a_pane_is_kept_for_that_pane_whether_or_not_it_counts_as_a_habit() {
+    let rig = rig();
+    let tmux = "tmux:%3@/private/tmp/tmux-501/aikit,4242";
+    let herdr = "herdr:w1:p1@/private/tmp/herdr/herdr.sock";
+    let agent = "agent-session/builder";
+
+    // Counted toward a habit, and kept for its pane.
+    let counted = rig.observe_run(in_panes(COMMAND, agent, &[tmux], Some(0)));
+    assert!(counted.recorded);
+    assert_eq!(counted.panes, vec![tmux.to_string()]);
+    // Too ordinary to count, and still the agent's in that pane.
+    let noise = rig.observe_run(in_panes("ls -la src", agent, &[tmux], Some(0)));
+    assert!(matches!(noise.skipped, Some(Skip::Noise(_))));
+    assert_eq!(noise.panes, vec![tmux.to_string()]);
+    // A failed run is not a habit, and it still ran there; a harness inside a
+    // multiplexer inside another is in both panes.
+    let failed = rig.observe_run(in_panes("make test", agent, &[herdr, tmux], Some(2)));
+    assert!(matches!(failed.skipped, Some(Skip::FailedRun(2))));
+    assert_eq!(failed.panes.len(), 2);
+    // A command holding a secret is kept nowhere, for no pane.
+    let secret = "ghp_A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8";
+    let held = rig.observe_run(in_panes(
+        &format!("curl -H 'Authorization: token {secret}' https://api.github.com/user"),
+        agent,
+        &[tmux],
+        Some(0),
+    ));
+    assert!(matches!(held.skipped, Some(Skip::Secret(_))));
+    assert!(held.panes.is_empty(), "{:?}", held.panes);
+    // A run that names no pane is kept for none.
+    rig.observe_run(in_panes("cargo build --release", "human", &[], Some(0)));
+
+    let in_tmux = rig.observer.in_panes(&[tmux.to_string()], 50).unwrap();
+    let commands: Vec<&str> = in_tmux.iter().map(|run| run.command.as_str()).collect();
+    assert_eq!(
+        commands,
+        vec![COMMAND, "ls -la src", "make test"],
+        "oldest first"
+    );
+    assert!(in_tmux
+        .iter()
+        .all(|run| run.by == agent && run.pane == tmux));
+    assert_eq!(in_tmux[2].exit_code, Some(2));
+    assert_eq!(in_tmux[0].session.as_deref(), Some("ses_1"));
+
+    let in_herdr = rig.observer.in_panes(&[herdr.to_string()], 50).unwrap();
+    assert_eq!(in_herdr.len(), 1);
+    assert_eq!(in_herdr[0].command, "make test");
+    // Several keys read as one pane's history, each run once.
+    let both = rig
+        .observer
+        .in_panes(&[tmux.to_string(), herdr.to_string()], 50)
+        .unwrap();
+    assert_eq!(both.len(), 3, "{both:?}");
+    // The newest N, still oldest first.
+    let last = rig.observer.in_panes(&[tmux.to_string()], 2).unwrap();
+    let last: Vec<&str> = last.iter().map(|run| run.command.as_str()).collect();
+    assert_eq!(last, vec!["ls -la src", "make test"]);
+    assert!(rig
+        .observer
+        .in_panes(&["tmux:%9@/elsewhere,1".to_string()], 50)
+        .unwrap()
+        .is_empty());
+
+    // What counts as a habit is unchanged: one counted run of one command.
+    assert!(rig.observer.repeating(DAY * 7).unwrap().is_empty());
+    // The secret is in none of the store's files.
+    for entry in std::fs::read_dir(rig.home.state()).unwrap().flatten() {
+        let name = entry.file_name().to_string_lossy().to_string();
+        if name.starts_with("observations.sqlite3") {
+            let bytes = std::fs::read(entry.path()).unwrap();
+            assert!(!String::from_utf8_lossy(&bytes).contains(secret), "{name}");
+        }
+    }
+}
+
+#[test]
+fn a_store_written_before_panes_opens_and_reads_no_pane_history() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home = AikitHome::at(tmp.path().join("home"));
+    home.ensure_layout().unwrap();
+    // The store as an earlier aikit left it: observations and filings only.
+    let path = aikit_store::observer::store_path(&home);
+    let conn = rusqlite::Connection::open(&path).unwrap();
+    conn.execute_batch(
+        "CREATE TABLE observations (id INTEGER PRIMARY KEY AUTOINCREMENT, key TEXT NOT NULL, \
+         command TEXT NOT NULL, cwd TEXT, by TEXT NOT NULL, session TEXT, at_ns INTEGER NOT NULL);\
+         CREATE TABLE filings (key TEXT PRIMARY KEY, candidate TEXT NOT NULL, filed_ns INTEGER NOT NULL);\
+         INSERT INTO observations (key, command, by, at_ns) VALUES ('k', 'cargo test', 'human', 1);",
+    )
+    .unwrap();
+    drop(conn);
+    let observer = RunObserver::open(&home).unwrap();
+    assert!(observer
+        .in_panes(&["tmux:%0".into()], 10)
+        .unwrap()
+        .is_empty());
+    // A reader of a home with no store yet creates none.
+    let fresh = AikitHome::at(tmp.path().join("fresh"));
+    fresh.ensure_layout().unwrap();
+    assert!(RunObserver::open_existing(&fresh).unwrap().is_none());
+    assert!(!aikit_store::observer::store_path(&fresh).exists());
 }

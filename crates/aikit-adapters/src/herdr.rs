@@ -564,6 +564,23 @@ impl<R: CommandRunner> HerdrWorkingEnvironment<R> {
         parse_herdr_snapshot(&self.run(&["api", "snapshot"])?)
     }
 
+    /// The socket of the Herdr server this provider addresses, as `herdr
+    /// status server` reports it: the server a pane lives in, which Herdr
+    /// also hands each pane as `HERDR_SOCKET_PATH`. `None` when the status
+    /// names no socket.
+    pub fn server_socket(&self) -> Result<Option<String>> {
+        let status = self.run_argv(
+            vec!["herdr".into(), "status".into(), "server".into()],
+            "herdr.status_failed",
+        )?;
+        Ok(status
+            .lines()
+            .find_map(|line| line.trim().strip_prefix("socket:"))
+            .map(str::trim)
+            .filter(|socket| !socket.is_empty())
+            .map(str::to_owned))
+    }
+
     /// Read only the pane bound by this provider's persisted plan and fresh
     /// snapshot. No workspace creation, focus or input occurs here.
     pub fn capture_surface(&self, subject: &ResourceRef, lines: u16) -> Result<(String, String)> {
@@ -1280,6 +1297,23 @@ mod tests {
             .call_lines()
             .iter()
             .any(|line| line.contains("send-text")));
+    }
+
+    #[test]
+    fn the_server_a_pane_lives_in_is_named_by_the_socket_herdr_reports() {
+        let runner = Arc::new(ScriptedRunner::new().on(
+            "status server",
+            "status: running\nversion: 0.8.2\nprotocol: 20\ncompatible: yes\nsocket: /h/.config/herdr/sessions/a/herdr.sock\n",
+        ));
+        let provider = HerdrWorkingEnvironment::new(runner, r("provider/herdr/current"));
+        assert_eq!(
+            provider.server_socket().unwrap().as_deref(),
+            Some("/h/.config/herdr/sessions/a/herdr.sock")
+        );
+        // A status that names no socket names no server.
+        let runner = Arc::new(ScriptedRunner::new().on("status server", "status: running\n"));
+        let provider = HerdrWorkingEnvironment::new(runner, r("provider/herdr/current"));
+        assert_eq!(provider.server_socket().unwrap(), None);
     }
 
     #[test]

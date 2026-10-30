@@ -37,11 +37,16 @@ reason}`. Both stores resolve together.
 
 ## `aikit observe run | status`
 
-Feed contract: one run by flags (`--command --cwd --by --at --session --exit-code`), many as
-JSON lines on stdin (`--stdin-jsonl`: `command, cwd, by, at, session, exit_code`), or one
-harness event (`--from-hook`). `--threshold N` (3), `--window SPAN` (7d).
+Feed contract: one run by flags (`--command --cwd --by --at --session --exit-code --pane`), many
+as JSON lines on stdin (`--stdin-jsonl`: `command, cwd, by, at, session, exit_code, pane|panes`),
+or one harness event (`--from-hook`). `--threshold N` (3), `--window SPAN` (7d).
 Reply: `{runs:[{command, by, recorded, skipped, detail, count, threshold, window_seconds,
-offered:{candidate, inbox_item, proposal, new}|null}], recorded, skipped, offered, ignored}`.
+offered:{candidate, inbox_item, proposal, new}|null, panes}], recorded, skipped, offered, ignored}`.
+A run names the terminal panes it ran in as `tmux:%3@<socket>,<server pid>`,
+`herdr:w1:p1@<socket>` or `cmux:surface:20`; a hook names them itself from `TMUX_PANE`/`TMUX`,
+`HERDR_PANE_ID`/`HERDR_SOCKET_PATH` and `CMUX_SURFACE_ID`. A secret-free run is kept for its
+panes even when it does not count (a staple, a failed run), and a working Surface's capture
+reads that pane history as `observed` (`session-space working-surface capture`).
 `skipped` is one of `empty, too-long, failed-run, noise, secret, decided`; a command holding
 a secret is never stored. `status` returns `{repeating:[{command, by, count, first, last,
 offered, waiting}], count, window_seconds}`.

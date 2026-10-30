@@ -1198,6 +1198,22 @@ fn run(cli: Cli) -> Result<()> {
                     crate::session_space_working_surface::capture(&state, &binding, lines)?;
                 capture.inputs = SessionSpaceApplicationStore::new(home.clone())
                     .working_surface_inputs(state.id(), &binding, 500)?;
+                // What harnesses ran in this pane, as the observer kept it by
+                // the pane's name; a home with no observer store has none.
+                if let crate::working_environment_field::WorkingEnvironmentCapture::Captured {
+                    pane: Some(pane),
+                    ..
+                } = &capture.capture
+                {
+                    if let Some(observer) = aikit_store::observer::RunObserver::open_existing(home)?
+                    {
+                        capture.observed = observer
+                            .in_panes(std::slice::from_ref(pane), 200)?
+                            .into_iter()
+                            .map(Into::into)
+                            .collect();
+                    }
+                }
                 emit(&capture)
             }
             WorkingSurfaceCommand::Input {
@@ -1236,7 +1252,26 @@ fn run(cli: Cli) -> Result<()> {
                 )?)
             }
             WorkingSurfaceCommand::Open { space, binding } => {
-                let state = home.session_space_show(&space_ref(&space)?)?;
+                let mut state = home.session_space_show(&space_ref(&space)?)?;
+                // A cmux room is owned by the AIKit session id its plan
+                // records. One minted for a plan that has none is persisted
+                // before cmux is asked to build anything, so an open that
+                // fails part-way leaves no surface named by an id nobody kept.
+                let bound = aikit_core::ResourceRef::parse(binding.clone())?;
+                if let Some(owned) = state
+                    .working_surfaces
+                    .get(&bound)
+                    .and_then(crate::session_space_working_surface::cmux_ownership)
+                {
+                    let preview = home.session_space_stage(
+                        Some(&space_ref(&space)?),
+                        SessionSpaceMutation::BindWorkingSurface {
+                            binding: Box::new(owned),
+                        },
+                    )?;
+                    home.session_space_apply(&preview)?;
+                    state = home.session_space_show(&space_ref(&space)?)?;
+                }
                 let result = crate::session_space_working_surface::open(
                     &state,
                     &aikit_core::ResourceRef::parse(binding)?,

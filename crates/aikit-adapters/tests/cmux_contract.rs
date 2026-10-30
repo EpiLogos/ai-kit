@@ -1367,3 +1367,119 @@ fn a_surface_the_markers_no_longer_bind_is_refused_not_read() {
         .iter()
         .any(|line| line.contains("read-screen")));
 }
+
+// ---------------------------------------------------------------------------
+// Input: cmux's own send, to the owned live surface only
+// ---------------------------------------------------------------------------
+
+#[test]
+fn input_reaches_only_the_owned_live_surface_through_cmux_send() {
+    let runner = full_runner_with_workspaces(
+        r#"{"workspaces":[{"id":"workspace:88","title":"payments · main · ses_CMUXSESSION000000000000","window":"window:4"}]}"#,
+    )
+    .on(
+        "list-pane-surfaces",
+        r#"{"surfaces":[{"ref":"surface:20","title":"AIKit · ses_CMUXSESSION000000000000/payments/main/shell"}]}"#,
+    )
+    .on("send", "OK");
+    let adapter = cmux(runner);
+
+    let native = adapter
+        .send_surface_input(&single_pane_plan("payments"), "main/shell", "-n ls\r")
+        .unwrap();
+
+    assert_eq!(native, "surface:20");
+    let calls = adapter.runner().calls();
+    let sent: Vec<&Vec<String>> = calls
+        .iter()
+        .filter(|argv| argv.get(1).map(String::as_str) == Some("send"))
+        .collect();
+    assert_eq!(
+        sent,
+        vec![&vec![
+            "cmux".to_string(),
+            "send".into(),
+            "--workspace".into(),
+            "workspace:88".into(),
+            "--surface".into(),
+            "surface:20".into(),
+            "--".into(),
+            "-n ls\r".into(),
+        ]],
+        "the text goes to the owned surface by its handle, as typed, after `--`"
+    );
+    assert!(
+        !adapter.runner().call_lines().iter().any(|line| {
+            line.contains("new-")
+                || line.contains("focus-")
+                || line.contains("select-workspace")
+                || line.contains("respawn-")
+                || line.contains("send-key")
+        }),
+        "input never opens, focuses or recreates: {:?}",
+        adapter.runner().call_lines()
+    );
+}
+
+#[test]
+fn input_to_a_surface_the_markers_no_longer_bind_is_refused_and_nothing_is_sent() {
+    let runner = full_runner_with_workspaces(
+        r#"{"workspaces":[{"id":"workspace:88","title":"payments · main · ses_CMUXSESSION000000000000","window":"window:4"}]}"#,
+    )
+    .on(
+        "list-pane-surfaces",
+        r#"{"surfaces":[{"ref":"surface:20","title":"AIKit · ses_CMUXSESSION000000000000/payments/main/editor"}]}"#,
+    )
+    .on("send", "OK");
+    let adapter = cmux(runner);
+
+    let error = adapter
+        .send_surface_input(&single_pane_plan("payments"), "main/shell", "ls\r")
+        .unwrap_err();
+
+    assert_eq!(error.code(), "mux.cmux_surface_not_live");
+    assert!(!adapter
+        .runner()
+        .call_lines()
+        .iter()
+        .any(|line| line.contains(" send")));
+
+    // No AIKit session id: cmux cannot name which surface is AIKit's, so
+    // nothing is read and nothing is sent.
+    let unowned = Cmux::new(ScriptedRunner::new().on("send", "OK"));
+    let error = unowned
+        .send_surface_input(&single_pane_plan("payments"), "main/shell", "ls\r")
+        .unwrap_err();
+    assert_eq!(error.code(), "mux.cmux_identity_missing");
+    assert!(unowned.runner().calls().is_empty());
+}
+
+// ---------------------------------------------------------------------------
+// Where a process in a cmux surface runs: the caller, never the focused one
+// ---------------------------------------------------------------------------
+
+#[test]
+fn a_callers_surface_is_resolved_by_cmux_identify_and_never_guessed_from_focus() {
+    let runner = ScriptedRunner::new().on(
+        "identify",
+        r#"{"caller":{"workspace_ref":"workspace:88","surface_ref":"surface:20"},"focused":{"workspace_ref":"workspace:2","surface_ref":"surface:7"}}"#,
+    );
+    let adapter = Cmux::new(runner);
+    let surface = adapter
+        .caller_surface(
+            "8A2C1F0E-0000-4000-8000-000000000001",
+            "6B1D0E9F-0000-4000-8000-000000000002",
+        )
+        .unwrap();
+    assert_eq!(surface.as_deref(), Some("surface:20"));
+    assert!(adapter.runner().call_lines().iter().any(|line| line.ends_with(
+        "identify --workspace 8A2C1F0E-0000-4000-8000-000000000001 --surface 6B1D0E9F-0000-4000-8000-000000000002"
+    )));
+
+    // cmux names no caller: the focused surface is someone else's, never this one.
+    let runner = ScriptedRunner::new().on(
+        "identify",
+        r#"{"focused":{"workspace_ref":"workspace:2","surface_ref":"surface:7"}}"#,
+    );
+    assert_eq!(Cmux::new(runner).caller_surface("w", "s").unwrap(), None);
+}

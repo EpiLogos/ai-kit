@@ -1085,3 +1085,349 @@ command = ["env", "HISTFILE=/dev/null", "PS1=$ ", "sh"]
     );
     assert_eq!(inputs[1]["bytes"], typed.len());
 }
+
+/// A command a harness ran in the room's own pane (its observer hook, which
+/// names the pane from the pane's own TMUX variables) reaches the room's
+/// capture as that agent's, and a run in any other pane does not. Runs over a
+/// private tmux socket; the pane's shell keeps no history file.
+#[test]
+fn a_command_a_harness_ran_in_the_rooms_pane_is_in_its_capture_as_the_agents() {
+    if !tmux_installed() {
+        eprintln!("SKIP pane-observation join proof: tmux is not installed");
+        return;
+    }
+    let temp = tempfile::tempdir().unwrap();
+    let home = AikitHome::at(temp.path().join("aikit-home"));
+    home.ensure_layout().unwrap();
+    let store = SessionSpaceApplicationStore::new(home.clone());
+    let space = SessionSpaceRef::parse("session-space/observed-tmux").unwrap();
+    let agent = r("agent-session/observed-tmux");
+    let surface = r("surface/terminal/main/shell");
+    let provider = r("provider/tmux/current");
+    let binding = r("working-surface/observed-tmux-shell");
+    let create = store
+        .stage(
+            None,
+            SessionSpaceMutation::Create {
+                id: space.clone(),
+                label: Some("observed tmux".into()),
+            },
+        )
+        .unwrap();
+    store.apply(&create).unwrap();
+    apply(
+        &store,
+        &space,
+        SessionSpaceMutation::AttachAgentSession {
+            attachment: SessionSpaceAgentAttachmentIntent {
+                agent_session: agent.clone(),
+                purpose: Some("observed proof".into()),
+                provenance: vec!["test".into()],
+            },
+        },
+    );
+    apply(
+        &store,
+        &space,
+        SessionSpaceMutation::AttachSurface {
+            attachment: SessionSpaceSurfaceAttachmentIntent {
+                surface: surface.clone(),
+                component: None,
+                purpose: Some("exact terminal Surface".into()),
+                provenance: vec!["test".into()],
+            },
+        },
+    );
+    apply(
+        &store,
+        &space,
+        SessionSpaceMutation::BindNativeReference {
+            binding: SessionSpaceNativeReferenceBinding {
+                reference: provider.clone(),
+                kind: SessionSpaceNativeReferenceKind::Provider,
+                owner: None,
+                provider: None,
+                host: None,
+                purpose: Some("tmux provider".into()),
+                provenance: vec!["test".into()],
+            },
+        },
+    );
+    let plan = SessionSpec::from_toml_str(&format!(
+        r#"
+schema = 1
+id = "aikit-observed-surface"
+name = "aikit-observed-surface"
+root = "{}"
+
+[[views]]
+id = "main"
+[[views.panes]]
+id = "shell"
+focus = true
+command = ["env", "HISTFILE=/dev/null", "PS1=$ ", "sh"]
+"#,
+        temp.path().display()
+    ))
+    .unwrap()
+    .compile()
+    .unwrap();
+    apply(
+        &store,
+        &space,
+        SessionSpaceMutation::BindWorkingSurface {
+            binding: Box::new(SessionSpaceWorkingSurfaceBinding {
+                binding: binding.clone(),
+                surface: surface.clone(),
+                agent_session: agent.clone(),
+                provider: provider.clone(),
+                plan,
+                plan_key: "main/shell".into(),
+                provenance: vec!["observed test binding".into()],
+            }),
+        },
+    );
+    let socket = format!(
+        "aikit-observed-surface-{}-{}",
+        std::process::id(),
+        COUNTER.fetch_add(1, Ordering::SeqCst)
+    );
+    let _guard = SocketGuard(socket.clone());
+    let verb = |args: &[&str]| {
+        let output = Command::new(cargo_bin("aikit"))
+            .arg("-C")
+            .arg(temp.path())
+            .args(["session-space", "working-surface"])
+            .args(args)
+            .env("AIKIT_HOME", home.root())
+            .env("AIKIT_TMUX_SOCKET", &socket)
+            // The room's server, and so its pane, carries no other
+            // multiplexer's pane: the runner's own never leaks in.
+            .env_remove("HERDR_PANE_ID")
+            .env_remove("HERDR_SOCKET_PATH")
+            .env_remove("CMUX_WORKSPACE_ID")
+            .env_remove("CMUX_SURFACE_ID")
+            .env_remove("CMUX_SOCKET_PATH")
+            .output()
+            .unwrap();
+        let document: serde_json::Value =
+            serde_json::from_slice(&output.stdout).unwrap_or(serde_json::Value::Null);
+        (
+            output.status.success(),
+            document,
+            String::from_utf8_lossy(&output.stderr).into_owned(),
+        )
+    };
+    let space_arg = space.to_string();
+    let (space_arg, binding_arg) = (space_arg.as_str(), binding.as_str());
+    let (ok, _, stderr) = verb(&["open", space_arg, binding_arg]);
+    assert!(ok, "{stderr}");
+    let pane = Command::new("tmux")
+        .args(["-L", &socket, "list-panes", "-a", "-F", "#{pane_id}"])
+        .output()
+        .unwrap();
+    let pane = String::from_utf8_lossy(&pane.stdout).trim().to_owned();
+    assert!(pane.starts_with('%'), "{pane}");
+
+    // The harness's hook runs inside the pane, as a harness in that pane would
+    // run it after its shell tool: the pane's TMUX variables name the pane.
+    let payload = serde_json::json!({
+        "session_id": "ses_observed", "cwd": temp.path(), "hook_event_name": "PostToolUse",
+        "tool_name": "Bash", "tool_input": {"command": "make lane-av-observed"},
+        "tool_response": {"stdout": "", "stderr": "", "interrupted": false}
+    })
+    .to_string();
+    let payload_file = temp.path().join("payload.json");
+    std::fs::write(&payload_file, &payload).unwrap();
+    let hook_out = temp.path().join("hook.json");
+    let line = format!(
+        "AIKIT_HOME={} AIKIT_ACTOR={} {} observe run --from-hook --json < {} > {}.part && mv {}.part {}\r",
+        shell_words::quote(&home.root().display().to_string()),
+        agent.as_str(),
+        shell_words::quote(&cargo_bin("aikit").display().to_string()),
+        shell_words::quote(&payload_file.display().to_string()),
+        shell_words::quote(&hook_out.display().to_string()),
+        shell_words::quote(&hook_out.display().to_string()),
+        shell_words::quote(&hook_out.display().to_string()),
+    );
+    let sent = Command::new("tmux")
+        .args(["-L", &socket, "send-keys", "-t", &pane, "-l", "--", &line])
+        .output()
+        .unwrap();
+    assert!(sent.status.success());
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while !hook_out.exists() {
+        assert!(
+            Instant::now() < deadline,
+            "the hook in the pane did not run"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let hooked: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&hook_out).unwrap()).unwrap();
+    let keys = hooked["data"]["runs"][0]["panes"]
+        .as_array()
+        .unwrap()
+        .clone();
+    assert_eq!(keys.len(), 1, "{hooked}");
+    assert!(
+        keys[0]
+            .as_str()
+            .unwrap()
+            .starts_with(&format!("tmux:{pane}@")),
+        "{keys:?}"
+    );
+    // The same command run in another pane is that pane's, never this room's.
+    let elsewhere = Command::new(cargo_bin("aikit"))
+        .args([
+            "observe",
+            "run",
+            "--json",
+            "--command",
+            "make lane-av-elsewhere",
+        ])
+        .args(["--by", agent.as_str(), "--pane", "tmux:%999@/elsewhere,1"])
+        .current_dir(temp.path())
+        .env("AIKIT_HOME", home.root())
+        .output()
+        .unwrap();
+    assert!(elsewhere.status.success());
+
+    let (ok, capture, stderr) = verb(&["capture", space_arg, binding_arg, "--lines", "50"]);
+    assert!(ok, "{stderr}");
+    assert_eq!(capture["capture"]["pane"], keys[0], "{capture}");
+    let observed = capture["observed"]
+        .as_array()
+        .expect("the capture carries the pane's observed runs");
+    assert_eq!(observed.len(), 1, "{observed:?}");
+    assert_eq!(observed[0]["command"], "make lane-av-observed");
+    assert_eq!(observed[0]["by"], agent.as_str());
+    assert!(observed[0]["at_unix_ms"].as_u64().unwrap() > 0);
+}
+
+/// A cmux room AIKit opens is owned by a session id AIKit mints and records
+/// in the binding's plan (`[backend.cmux] session-id`) before cmux is asked
+/// to build anything: an open that cannot finish leaves the id kept, and
+/// every later open, capture and input names the room's surfaces by it. No
+/// cmux is reachable here (the verbs' CMUX_SOCKET_PATH names no socket), so
+/// nothing is ever built, read or sent.
+#[test]
+fn a_cmux_room_keeps_the_session_id_aikit_minted_for_it_even_when_cmux_cannot_open_it() {
+    let temp = tempfile::tempdir().unwrap();
+    let home = AikitHome::at(temp.path().join("aikit-home"));
+    home.ensure_layout().unwrap();
+    let store = SessionSpaceApplicationStore::new(home.clone());
+    let space = SessionSpaceRef::parse("session-space/owned-cmux").unwrap();
+    let agent = r("agent-session/owned-cmux");
+    let surface = r("surface/terminal/main/shell");
+    let provider = r("provider/cmux/current");
+    let binding = r("working-surface/owned-cmux-shell");
+    let create = store
+        .stage(
+            None,
+            SessionSpaceMutation::Create {
+                id: space.clone(),
+                label: Some("owned cmux".into()),
+            },
+        )
+        .unwrap();
+    store.apply(&create).unwrap();
+    apply(
+        &store,
+        &space,
+        SessionSpaceMutation::AttachAgentSession {
+            attachment: SessionSpaceAgentAttachmentIntent {
+                agent_session: agent.clone(),
+                purpose: Some("cmux ownership proof".into()),
+                provenance: vec!["test".into()],
+            },
+        },
+    );
+    apply(
+        &store,
+        &space,
+        SessionSpaceMutation::AttachSurface {
+            attachment: SessionSpaceSurfaceAttachmentIntent {
+                surface: surface.clone(),
+                component: None,
+                purpose: Some("exact terminal Surface".into()),
+                provenance: vec!["test".into()],
+            },
+        },
+    );
+    apply(
+        &store,
+        &space,
+        SessionSpaceMutation::BindNativeReference {
+            binding: SessionSpaceNativeReferenceBinding {
+                reference: provider.clone(),
+                kind: SessionSpaceNativeReferenceKind::Provider,
+                owner: None,
+                provider: None,
+                host: None,
+                purpose: Some("cmux provider".into()),
+                provenance: vec!["test".into()],
+            },
+        },
+    );
+    apply(
+        &store,
+        &space,
+        SessionSpaceMutation::BindWorkingSurface {
+            binding: Box::new(SessionSpaceWorkingSurfaceBinding {
+                binding: binding.clone(),
+                surface: surface.clone(),
+                agent_session: agent.clone(),
+                provider: provider.clone(),
+                plan: plan("aikit-owned-cmux"),
+                plan_key: "main/shell".into(),
+                provenance: vec!["cmux ownership binding".into()],
+            }),
+        },
+    );
+    let no_cmux = temp.path().join("no-cmux.sock");
+    let verb = |args: &[&str]| {
+        let output = Command::new(cargo_bin("aikit"))
+            .arg("-C")
+            .arg(temp.path())
+            .args(["session-space", "working-surface"])
+            .args(args)
+            .env("AIKIT_HOME", home.root())
+            .env("CMUX_SOCKET_PATH", &no_cmux)
+            .env_remove("CMUX_WORKSPACE_ID")
+            .env_remove("CMUX_SURFACE_ID")
+            .output()
+            .unwrap();
+        (
+            output.status.success(),
+            serde_json::from_slice::<serde_json::Value>(&output.stdout)
+                .unwrap_or(serde_json::Value::Null),
+        )
+    };
+    let recorded = || {
+        SessionSpaceApplicationStore::new(home.clone())
+            .load(&space)
+            .unwrap()
+            .working_surfaces[&binding]
+            .plan
+            .backend_extensions
+            .get("cmux")
+            .and_then(|table| table.get("session-id"))
+            .and_then(|value| value.as_str())
+            .map(str::to_owned)
+    };
+    assert_eq!(recorded(), None, "the bound plan names no owner yet");
+    let (space_arg, binding_arg) = (space.to_string(), binding.as_str().to_owned());
+
+    // cmux is not reachable (or not installed): the open does not build the
+    // room, and the id it minted is kept all the same.
+    let _ = verb(&["open", &space_arg, &binding_arg]);
+    let minted = recorded().expect("the open recorded the id the room is owned by");
+    aikit_core::SessionId::parse(&minted).unwrap();
+    let _ = verb(&["open", &space_arg, &binding_arg]);
+    assert_eq!(
+        recorded().as_deref(),
+        Some(minted.as_str()),
+        "a later open owns the room by the same id"
+    );
+}

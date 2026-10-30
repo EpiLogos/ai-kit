@@ -32,6 +32,16 @@
 //! inbox channel). It is offered once per command and actor: the fourth run does
 //! not offer again, and a command that was turned down or is already a saved
 //! capsule is not offered at all.
+//!
+//! ## Which pane a run ran in
+//!
+//! A source may say which terminal pane a run ran in (an agent harness's hook
+//! names the pane it runs in from the multiplexer's own variables). Such a run is
+//! kept for that pane as well, whether or not it counts as a habit: a shell
+//! staple or a failed run is still what that actor did there. The pane history
+//! is what a working Surface's capture joins to say whose command a line is. A
+//! run holding a secret is kept for no pane, like everywhere else, and the pane
+//! history is pruned on the same thirty days.
 
 use std::time::Duration;
 
@@ -72,7 +82,24 @@ CREATE TABLE IF NOT EXISTS filings (
     candidate TEXT NOT NULL,
     filed_ns  INTEGER NOT NULL
 );
+CREATE TABLE IF NOT EXISTS pane_runs (
+    id        INTEGER PRIMARY KEY AUTOINCREMENT,
+    run       TEXT NOT NULL,
+    pane      TEXT NOT NULL,
+    command   TEXT NOT NULL,
+    cwd       TEXT,
+    by        TEXT NOT NULL,
+    session   TEXT,
+    exit_code INTEGER,
+    at_ns     INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS pane_runs_by_pane ON pane_runs(pane, at_ns);
 "#;
+
+/// The most panes one run is kept for (a harness inside a multiplexer inside
+/// another is in each), and the longest name one pane may carry.
+const MAX_PANES: usize = 4;
+const MAX_PANE_BYTES: usize = 512;
 
 // ---------------------------------------------------------------------------
 // Input
@@ -91,6 +118,10 @@ pub struct ObservedRun {
     /// When the source knows how the command ended. A failed run is not a habit
     /// worth saving.
     pub exit_code: Option<i32>,
+    /// The terminal panes the run ran in, as the source names them
+    /// (`tmux:%3@<socket>,<server pid>`, `herdr:w1:p1@<socket>`,
+    /// `cmux:surface:20`). Empty when the source does not know.
+    pub panes: Vec<String>,
 }
 
 /// What counts as a repeat.
@@ -177,6 +208,21 @@ pub struct Observed {
     pub window: Duration,
     /// Set on the run that reached the threshold.
     pub offered: Option<Offered>,
+    /// The panes this run was kept for, counted or not.
+    pub panes: Vec<String>,
+}
+
+/// One run as a pane's history keeps it: what ran there, who ran it, when.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PaneRun {
+    /// The pane name it was read by.
+    pub pane: String,
+    pub command: String,
+    pub cwd: Option<String>,
+    pub by: String,
+    pub session: Option<String>,
+    pub exit_code: Option<i32>,
+    pub at: Timestamp,
 }
 
 /// One command that is repeating, for `observe status`.
@@ -200,6 +246,15 @@ pub struct RunObserver {
 }
 
 impl RunObserver {
+    /// Open the observation store under `home` only when it exists: a reader
+    /// that finds no store reads no runs and creates nothing.
+    pub fn open_existing(home: &AikitHome) -> Result<Option<Self>> {
+        if !store_path(home).is_file() {
+            return Ok(None);
+        }
+        Self::open(home).map(Some)
+    }
+
     /// Open (creating if need be) the observation store under `home`.
     pub fn open(home: &AikitHome) -> Result<Self> {
         let path = home.state().join("observations.sqlite3");
@@ -231,7 +286,7 @@ impl RunObserver {
         } else {
             run.by.trim().to_string()
         };
-        let skipped = |skip: Skip, command: String| Observed {
+        let skipped = |skip: Skip, command: String, panes: &[String]| Observed {
             command,
             by: by.clone(),
             recorded: false,
@@ -240,37 +295,42 @@ impl RunObserver {
             threshold: policy.threshold,
             window: policy.window,
             offered: None,
+            panes: panes.to_vec(),
         };
 
         if command.is_empty() {
-            return Ok(skipped(Skip::Empty, command));
+            return Ok(skipped(Skip::Empty, command, &[]));
         }
         if command.len() > MAX_COMMAND_BYTES {
-            return Ok(skipped(Skip::TooLong, String::new()));
+            return Ok(skipped(Skip::TooLong, String::new(), &[]));
         }
         // The scan comes before everything that stores or even repeats the text:
         // a command with a secret in it is reported by rule name and nothing else.
         let findings = inbox.scan(&command);
         if !findings.is_empty() {
             let rules = findings.iter().map(|f| f.rule.to_string()).collect();
-            return Ok(skipped(Skip::Secret(rules), String::new()));
+            return Ok(skipped(Skip::Secret(rules), String::new(), &[]));
         }
+        // What ran in a pane is that pane's history whether or not it counts.
+        let panes = self.keep_for_panes(&run, &command, &by)?;
         if let Some(code) = run.exit_code.filter(|code| *code != 0) {
-            return Ok(skipped(Skip::FailedRun(code), command));
+            return Ok(skipped(Skip::FailedRun(code), command, &panes));
         }
         if let Some(why) = noise(&command) {
-            return Ok(skipped(Skip::Noise(why), command));
+            return Ok(skipped(Skip::Noise(why), command, &panes));
         }
         if inbox.was_rejected(&command)? {
             return Ok(skipped(
                 Skip::Decided("turned down before".to_string()),
                 command,
+                &panes,
             ));
         }
         if let Some(saved) = inbox.already_saved(&command, catalog) {
             return Ok(skipped(
                 Skip::Decided(format!("already saved as {saved}")),
                 command,
+                &panes,
             ));
         }
 
@@ -353,6 +413,7 @@ impl RunObserver {
             threshold: policy.threshold,
             window: policy.window,
             offered: None,
+            panes,
         };
         if !reserved {
             return Ok(observed);
@@ -387,6 +448,92 @@ impl RunObserver {
                 Err(error)
             }
         }
+    }
+
+    /// Keep one secret-free run for each pane it names (deduplicated, bounded),
+    /// pruning the pane history to the retention window in the same write.
+    /// Returns the panes it was kept for.
+    fn keep_for_panes(&self, run: &ObservedRun, command: &str, by: &str) -> Result<Vec<String>> {
+        let mut panes: Vec<String> = Vec::new();
+        for pane in &run.panes {
+            let pane = pane.trim();
+            if pane.is_empty() || pane.len() > MAX_PANE_BYTES || panes.iter().any(|p| p == pane) {
+                continue;
+            }
+            panes.push(pane.to_string());
+            if panes.len() == MAX_PANES {
+                break;
+            }
+        }
+        if panes.is_empty() {
+            return Ok(panes);
+        }
+        // One run kept for several panes reads back once, whichever it is read by.
+        let id = aikit_core::id::EventId::generate().to_string();
+        let now = Timestamp::now().as_nanos();
+        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)
+            .map_err(|e| sql_error("observer.write_failed", &e))?;
+        tx.execute(
+            "DELETE FROM pane_runs WHERE at_ns < ?1",
+            params![now - RETENTION.as_nanos() as i64],
+        )
+        .map_err(|e| sql_error("observer.write_failed", &e))?;
+        for pane in &panes {
+            tx.execute(
+                "INSERT INTO pane_runs (run, pane, command, cwd, by, session, exit_code, at_ns) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                params![
+                    id,
+                    pane,
+                    command,
+                    run.cwd,
+                    by,
+                    run.session,
+                    run.exit_code,
+                    run.at.as_nanos()
+                ],
+            )
+            .map_err(|e| sql_error("observer.write_failed", &e))?;
+        }
+        tx.commit()
+            .map_err(|e| sql_error("observer.write_failed", &e))?;
+        Ok(panes)
+    }
+
+    /// The newest `limit` runs kept for any of `panes`, oldest first: what ran
+    /// in a terminal pane, by whom. Several names of one pane read as one
+    /// history, each run once.
+    pub fn in_panes(&self, panes: &[String], limit: usize) -> Result<Vec<PaneRun>> {
+        if panes.is_empty() || limit == 0 {
+            return Ok(Vec::new());
+        }
+        let marks = vec!["?"; panes.len()].join(", ");
+        let mut stmt = self
+            .conn
+            .prepare(&format!(
+                "SELECT MIN(pane), command, cwd, by, session, exit_code, at_ns, MIN(id) \
+                 FROM pane_runs WHERE pane IN ({marks}) GROUP BY run \
+                 ORDER BY at_ns DESC, MIN(id) DESC LIMIT {limit}"
+            ))
+            .map_err(|e| sql_error("observer.query_failed", &e))?;
+        let rows = stmt
+            .query_map(rusqlite::params_from_iter(panes.iter()), |row| {
+                Ok(PaneRun {
+                    pane: row.get(0)?,
+                    command: row.get(1)?,
+                    cwd: row.get(2)?,
+                    by: row.get(3)?,
+                    session: row.get(4)?,
+                    exit_code: row.get(5)?,
+                    at: Timestamp::from_nanos(row.get(6)?),
+                })
+            })
+            .map_err(|e| sql_error("observer.query_failed", &e))?;
+        let mut runs = rows
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(|e| sql_error("observer.query_failed", &e))?;
+        runs.reverse();
+        Ok(runs)
     }
 
     /// Commands repeating inside `window`, most repeated first. Only those seen

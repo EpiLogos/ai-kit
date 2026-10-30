@@ -5,8 +5,8 @@
 //!
 //! * **flags** — one run: `--command`, `--cwd`, `--by`, `--at`, `--session`.
 //! * **JSON lines on stdin** — many runs, one object per line with the same names
-//!   (`command`, `cwd`, `by`, `at`, `session`, `exit_code`). This is the contract a
-//!   terminal pane or a Factory frame feeds.
+//!   (`command`, `cwd`, `by`, `at`, `session`, `exit_code`, and `pane` or `panes`).
+//!   This is the contract a terminal pane or a Factory frame feeds.
 //! * **a hook payload on stdin** — an agent harness's `PostToolUse` event. The
 //!   shell tool's call carries the command line, the working directory and the
 //!   session; nothing in it names the agent, so the actor comes from the
@@ -20,6 +20,17 @@
 //! `apply_patch` and MCP tools (`mcp__*`) are not shell commands and are ignored.
 //! The argv array form some harnesses send (`["bash", "-lc", "<script>"]`) is
 //! handled defensively: the script is the command.
+//!
+//! ## The pane a run ran in
+//!
+//! A hook runs inside the harness's own process tree, so it carries the
+//! variables each multiplexer hands the processes in its panes: tmux's
+//! `TMUX_PANE` (and `TMUX`, naming its server), herdr's `HERDR_PANE_ID` (and
+//! `HERDR_SOCKET_PATH`), cmux's `CMUX_SURFACE_ID`. The hook names each pane
+//! present ([`panes_from_env`]) the way a working Surface's capture names its
+//! own ([`crate::working_environment_field::pane_key`]), so the capture can
+//! say which commands on its screen an agent ran. A flag or JSON-lines feed
+//! names its runs' panes itself (`--pane`, `pane`/`panes`).
 
 use std::time::Duration;
 
@@ -28,6 +39,8 @@ use serde_json::Value;
 use aikit_core::{AikitError, Result};
 use aikit_store::observer::ObservedRun;
 use aikit_store::Timestamp;
+
+use crate::working_environment_field::pane_key;
 
 /// The tools whose calls are a shell command line.
 const SHELL_TOOLS: [&str; 5] = ["Bash", "bash", "shell", "local_shell", "run_shell_command"];
@@ -117,6 +130,15 @@ pub fn run_from_object(object: &Value, default_by: &str) -> Result<ObservedRun> 
             .get("exit_code")
             .and_then(Value::as_i64)
             .map(|code| code as i32),
+        panes: match (object.get("panes"), text("pane")) {
+            (Some(Value::Array(panes)), _) => panes
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::to_string)
+                .collect(),
+            (_, Some(pane)) => vec![pane],
+            _ => Vec::new(),
+        },
     })
 }
 
@@ -193,7 +215,53 @@ pub fn run_from_hook(payload: &Value, by: &str) -> Option<ObservedRun> {
             .and_then(Value::as_str)
             .map(str::to_string),
         exit_code,
+        // The hook's caller names the pane from its environment.
+        panes: Vec::new(),
     })
+}
+
+/// The terminal panes a process runs in, named from the variables each
+/// multiplexer hands the processes in its panes, innermost or not: a harness
+/// inside one multiplexer inside another is in both, and each pane's screen
+/// shows its commands. tmux names a pane on its server (`TMUX`'s socket and
+/// pid); herdr on its socket. A cmux surface already named by its ref
+/// (`surface:N`) needs no question; one named any other way (a UUID) is
+/// resolved to its ref through `resolve_cmux(workspace, surface)`, and kept as
+/// named when cmux cannot say.
+pub fn panes_from_env<F, C>(env: F, resolve_cmux: C) -> Vec<String>
+where
+    F: Fn(&str) -> Option<String>,
+    C: Fn(&str, &str) -> Option<String>,
+{
+    let set = |name: &str| env(name).filter(|value| !value.trim().is_empty());
+    let mut panes = Vec::new();
+    if let Some(pane) = set("TMUX_PANE") {
+        // `TMUX` is `<socket>,<server pid>,<session>`: the server is the first two.
+        let server = set("TMUX").map(|tmux| {
+            let mut parts = tmux.rsplitn(2, ',');
+            let _session = parts.next();
+            parts.next().unwrap_or_default().to_string()
+        });
+        panes.push(pane_key("tmux", pane.trim(), server.as_deref()));
+    }
+    if let Some(pane) = set("HERDR_PANE_ID") {
+        panes.push(pane_key(
+            "herdr",
+            pane.trim(),
+            set("HERDR_SOCKET_PATH").as_deref(),
+        ));
+    }
+    if let Some(surface) = set("CMUX_SURFACE_ID") {
+        let surface = surface.trim();
+        let named = if surface.starts_with("surface:") {
+            surface.to_string()
+        } else {
+            resolve_cmux(&set("CMUX_WORKSPACE_ID").unwrap_or_default(), surface)
+                .unwrap_or_else(|| surface.to_string())
+        };
+        panes.push(pane_key("cmux", &named, None));
+    }
+    panes
 }
 
 /// Who a feed that does not say is, taken from the environment: the Position an
@@ -204,4 +272,113 @@ pub fn actor_from_env<F: Fn(&str) -> Option<String>>(env: F, fallback: &str) -> 
         .iter()
         .find_map(|name| env(name).filter(|value| !value.trim().is_empty()))
         .unwrap_or_else(|| fallback.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn env<'a>(pairs: &'a [(&'a str, &'a str)]) -> impl Fn(&str) -> Option<String> + 'a {
+        move |name| {
+            pairs
+                .iter()
+                .find(|(key, _)| *key == name)
+                .map(|(_, value)| value.to_string())
+        }
+    }
+
+    #[test]
+    fn a_hook_names_the_terminal_pane_it_runs_in_from_the_multiplexers_own_variables() {
+        let never = |_: &str, _: &str| -> Option<String> { panic!("no cmux is asked here") };
+        // tmux: the pane, on the server the TMUX variable names (socket, pid).
+        assert_eq!(
+            panes_from_env(
+                env(&[
+                    ("TMUX", "/private/tmp/tmux-501/aikit,4242,0"),
+                    ("TMUX_PANE", "%3")
+                ]),
+                never
+            ),
+            vec!["tmux:%3@/private/tmp/tmux-501/aikit,4242".to_string()]
+        );
+        // herdr: the pane, in the session whose socket the pane carries.
+        assert_eq!(
+            panes_from_env(
+                env(&[
+                    ("HERDR_PANE_ID", "w1:p1"),
+                    ("HERDR_SOCKET_PATH", "/x/sessions/a/herdr.sock")
+                ]),
+                never
+            ),
+            vec!["herdr:w1:p1@/x/sessions/a/herdr.sock".to_string()]
+        );
+        // cmux: a surface already named by its ref needs no question.
+        assert_eq!(
+            panes_from_env(
+                env(&[
+                    ("CMUX_WORKSPACE_ID", "workspace:88"),
+                    ("CMUX_SURFACE_ID", "surface:20")
+                ]),
+                never
+            ),
+            vec!["cmux:surface:20".to_string()]
+        );
+        // Nowhere: no pane.
+        assert!(panes_from_env(env(&[]), never).is_empty());
+    }
+
+    #[test]
+    fn a_cmux_surface_named_by_its_uuid_is_resolved_to_its_ref_and_kept_raw_when_cmux_cannot_say() {
+        let pairs = [
+            ("CMUX_WORKSPACE_ID", "8A2C1F0E-0000-4000-8000-000000000001"),
+            ("CMUX_SURFACE_ID", "6B1D0E9F-0000-4000-8000-000000000002"),
+        ];
+        let resolved = panes_from_env(env(&pairs), |workspace, surface| {
+            assert_eq!(workspace, "8A2C1F0E-0000-4000-8000-000000000001");
+            assert_eq!(surface, "6B1D0E9F-0000-4000-8000-000000000002");
+            Some("surface:20".into())
+        });
+        assert_eq!(resolved, vec!["cmux:surface:20".to_string()]);
+        let unresolved = panes_from_env(env(&pairs), |_, _| None);
+        assert_eq!(
+            unresolved,
+            vec!["cmux:6B1D0E9F-0000-4000-8000-000000000002".to_string()]
+        );
+    }
+
+    #[test]
+    fn a_harness_inside_one_multiplexer_inside_another_is_in_both_panes() {
+        let panes = panes_from_env(
+            env(&[
+                ("TMUX", "/private/tmp/tmux-501/default,99,1"),
+                ("TMUX_PANE", "%0"),
+                ("HERDR_PANE_ID", "w2:p3"),
+                ("HERDR_SOCKET_PATH", "/h.sock"),
+            ]),
+            |_, _| None,
+        );
+        assert_eq!(
+            panes,
+            vec![
+                "tmux:%0@/private/tmp/tmux-501/default,99".to_string(),
+                "herdr:w2:p3@/h.sock".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn a_feed_names_its_runs_panes() {
+        let one = run_from_object(
+            &serde_json::json!({"command": "make proof", "pane": "tmux:%1@/s,1"}),
+            "agent",
+        )
+        .unwrap();
+        assert_eq!(one.panes, vec!["tmux:%1@/s,1".to_string()]);
+        let many = run_from_object(
+            &serde_json::json!({"command": "make proof", "panes": ["tmux:%1@/s,1", "herdr:w1:p1@/h"]}),
+            "agent",
+        )
+        .unwrap();
+        assert_eq!(many.panes.len(), 2);
+    }
 }

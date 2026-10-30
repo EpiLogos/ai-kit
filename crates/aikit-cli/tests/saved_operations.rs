@@ -17,6 +17,16 @@ use std::process::{Command, Output};
 use serde_json::Value;
 use tempfile::TempDir;
 
+const PANE_VARIABLES: [&str; 7] = [
+    "TMUX",
+    "TMUX_PANE",
+    "HERDR_PANE_ID",
+    "HERDR_SOCKET_PATH",
+    "CMUX_WORKSPACE_ID",
+    "CMUX_SURFACE_ID",
+    "CMUX_SOCKET_PATH",
+];
+
 struct World {
     _tmp: TempDir,
     aikit_home: PathBuf,
@@ -61,6 +71,11 @@ impl World {
             .env_remove("AIKIT_CONTEXT_ID")
             .env_remove("AIKIT_SESSION_ID")
             .current_dir(&self.project);
+        // A test never names the pane its runner happens to sit in, and never
+        // asks the person's cmux where that is.
+        for name in PANE_VARIABLES {
+            command.env_remove(name);
+        }
         command
     }
 
@@ -1415,4 +1430,85 @@ fn saved_reads_what_is_saved_from_where_by_whom_at_which_revision_and_how_often_
         .find(|r| r["id"] == "script/personal/deploy")
         .unwrap();
     assert_eq!(deploy["reviewed"], true);
+}
+
+#[test]
+fn a_hook_run_inside_a_terminal_pane_is_kept_with_that_pane() {
+    let world = World::new();
+    let bash = |command: &str| {
+        serde_json::json!({
+            "session_id": "ses_9", "cwd": "/work/app", "hook_event_name": "PostToolUse",
+            "tool_name": "Bash", "tool_input": { "command": command },
+            "tool_response": { "stdout": "", "stderr": "", "interrupted": false }
+        })
+        .to_string()
+    };
+    let feed = |payload: &str, env: &[(&str, &str)]| -> Value {
+        let out = world.with_stdin(
+            &["observe", "run", "--from-hook", "--json"],
+            payload,
+            &[&[("AIKIT_ACTOR", "agent-session/av")], env].concat(),
+        );
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        serde_json::from_slice(&out.stdout).unwrap()
+    };
+
+    // A harness in a tmux pane: the pane, on the server TMUX names.
+    let tmux = feed(
+        &bash("make lane-av-proof"),
+        &[
+            ("TMUX", "/private/tmp/tmux-501/aikit-walk,4242,0"),
+            ("TMUX_PANE", "%3"),
+        ],
+    );
+    assert_eq!(
+        tmux["data"]["runs"][0]["panes"],
+        serde_json::json!(["tmux:%3@/private/tmp/tmux-501/aikit-walk,4242"])
+    );
+    // Even a shell staple is kept for its pane, though it never counts.
+    let staple = feed(
+        &bash("ls -la"),
+        &[
+            ("HERDR_PANE_ID", "w1:p1"),
+            ("HERDR_SOCKET_PATH", "/h/herdr.sock"),
+        ],
+    );
+    assert_eq!(staple["data"]["runs"][0]["skipped"], "noise");
+    assert_eq!(
+        staple["data"]["runs"][0]["panes"],
+        serde_json::json!(["herdr:w1:p1@/h/herdr.sock"])
+    );
+    // A harness in no pane names none.
+    let nowhere = feed(&bash("make lane-av-proof"), &[]);
+    assert_eq!(nowhere["data"]["runs"][0]["panes"], serde_json::json!([]));
+
+    // A feed names a run's pane itself, by flag or by field.
+    let flagged = world.json(&[
+        "observe",
+        "run",
+        "--command",
+        "make lane-av-proof",
+        "--by",
+        "agent-session/av",
+        "--pane",
+        "cmux:surface:20",
+    ]);
+    assert_eq!(
+        flagged["data"]["runs"][0]["panes"],
+        serde_json::json!(["cmux:surface:20"])
+    );
+    let fed = world.with_stdin(
+        &["observe", "run", "--stdin-jsonl", "--json"],
+        r#"{"command":"make lane-av-proof","by":"agent-session/av","pane":"tmux:%3@/private/tmp/tmux-501/aikit-walk,4242"}"#,
+        &[],
+    );
+    let fed: Value = serde_json::from_slice(&fed.stdout).unwrap();
+    assert_eq!(
+        fed["data"]["runs"][0]["panes"],
+        serde_json::json!(["tmux:%3@/private/tmp/tmux-501/aikit-walk,4242"])
+    );
 }

@@ -269,6 +269,29 @@ impl<R: CommandRunner> Tmux<R> {
         Ok(native)
     }
 
+    /// The server a pane lives on, the way tmux hands each pane its `TMUX`
+    /// variable: `<socket path>,<server pid>`. A pane id alone is only unique
+    /// on one server, for that server's life.
+    pub fn pane_server(&self, native: &str) -> Result<String> {
+        let output = self
+            .runner
+            .run_with_timeout(
+                &self.argv(&[
+                    "display-message",
+                    "-p",
+                    "-t",
+                    native,
+                    "#{socket_path},#{pid}",
+                ]),
+                std::time::Duration::from_secs(2),
+            )?
+            .require(
+                &self.argv(&["display-message", "-t", native]),
+                "mux.tmux_query_failed",
+            )?;
+        Ok(output.stdout.trim().to_owned())
+    }
+
     /// Every pane in a window as `(pane id, plan tag)`.
     ///
     /// An empty tag means a person created that pane.
