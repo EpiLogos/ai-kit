@@ -25,7 +25,7 @@
 //! self-hosted endpoint has no price source, so there is no tariff here and
 //! none is invented; usage is still required and recorded on every answer.
 
-use crate::cli::{DecideInvokeArgs, DecideStatusArgs};
+use crate::cli::{DecideAsksArgs, DecideInvokeArgs, DecideStatusArgs};
 use crate::jev_now::{fail, minted_invocation_ref, read_bytes, read_json};
 use aikit_adapters::decision_endpoint::{
     probe_models, DecisionEndpoint, DecisionInvocation, EndpointDecisionProvider,
@@ -521,10 +521,14 @@ fn diagnostic_probe(
 }
 
 /// `aikit decide invoke`: one real typed invocation through the elected
-/// provider, returning its bounded receipt.
+/// provider, returning its bounded receipt. The ask and its answer, or why
+/// none came, are kept against the asking agent session (`--agent-session`,
+/// else this process's own `AIKIT_SESSION_ID`); with neither, nowhere.
 pub fn decide_invoke(args: DecideInvokeArgs) -> Result<Value> {
+    let home = aikit_store::AikitHome::discover()?;
+    let asking = asking_session(args.agent_session.as_deref())?;
     let provider_file = crate::local_services_election::resolve_file(
-        &aikit_store::AikitHome::discover()?,
+        &home,
         crate::local_services_election::Election::Decision,
         args.provider_file.clone(),
     )?;
@@ -545,12 +549,192 @@ pub fn decide_invoke(args: DecideInvokeArgs) -> Result<Value> {
     let receipt = invoke_selected(
         &config,
         &request,
-        invocation_ref,
+        invocation_ref.clone(),
         args.curl,
         args.allow_env_import,
         &mut no_revalidate,
+    );
+    if let Some((session_id, agent_session)) = &asking {
+        keep_ask(
+            &home,
+            session_id,
+            agent_session.as_ref(),
+            &request,
+            &invocation_ref,
+            receipt.as_ref(),
+        )?;
+    }
+    serde_json::to_value(receipt?).map_err(|e| fail("decision.encode", format!("receipt: {e}")))
+}
+
+/// `aikit.decision-ask/v1`: one typed request an agent session put to the
+/// decision helper, kept with that session (O-I #684; DLW manual §19.4, the
+/// thread's Ask row): the questions with the labels each allowed, and the
+/// answer or why none came. An answer is evidence that the engine checks: it
+/// is never a receipt and never stands for what the agent saw. The shared
+/// state the questions were asked over is not kept; its digest is.
+pub const DECISION_ASK_SCHEMA: &str = "aikit.decision-ask/v1";
+/// `aikit decide asks`: one session's kept asks, oldest first.
+pub const DECISION_ASKS_SCHEMA: &str = "aikit.decision-asks/v1";
+const ASKS_FILE: &str = "decision-asks.jsonl";
+/// The most asks one read returns: the latest, with the count of earlier ones.
+const ASKS_READ_LIMIT: usize = 256;
+const ASKS_BYTES_LIMIT: u64 = 16 * 1024 * 1024;
+
+/// The session an ask is kept against: the one named, else the one this
+/// process runs as (AIKit gives an agent session's process `AIKIT_SESSION_ID`,
+/// `SessionId::of_agent_session`), else none.
+fn asking_session(
+    named: Option<&str>,
+) -> Result<Option<(aikit_core::SessionId, Option<ResourceRef>)>> {
+    if let Some(named) = named {
+        let session = ResourceRef::parse(named)?;
+        return Ok(Some((
+            aikit_core::SessionId::of_agent_session(&session),
+            Some(session),
+        )));
+    }
+    match std::env::var("AIKIT_SESSION_ID") {
+        Ok(own) if !own.trim().is_empty() => {
+            Ok(Some((aikit_core::SessionId::parse(own.trim())?, None)))
+        }
+        _ => Ok(None),
+    }
+}
+
+fn asks_path(home: &aikit_store::AikitHome, session: &aikit_core::SessionId) -> PathBuf {
+    home.session_dir(session).join(ASKS_FILE)
+}
+
+/// Append one ask to its session's record, under the session's ask lock.
+fn keep_ask(
+    home: &aikit_store::AikitHome,
+    session_id: &aikit_core::SessionId,
+    agent_session: Option<&ResourceRef>,
+    request: &JevRequest,
+    invocation_ref: &ResourceRef,
+    outcome: std::result::Result<&DecisionReceipt, &AikitError>,
+) -> Result<()> {
+    let mut ask = json!({
+        "schema": DECISION_ASK_SCHEMA,
+        "asked_at": aikit_store::Timestamp::now().to_string(),
+        "session_id": session_id.as_str(),
+        "invocation_ref": invocation_ref.as_str(),
+        "request_digest": request.digest()?,
+        "model": request.model,
+        "questions": request.questions,
+    });
+    if let Some(agent_session) = agent_session {
+        ask["agent_session"] = json!(agent_session.as_str());
+    }
+    match outcome {
+        Ok(receipt) => match receipt.answer().filter(|_| receipt.outcome_completed()) {
+            Some(answer) => {
+                ask["outcome"] = json!("answered");
+                ask["answered_by"] = json!(answer.model);
+                ask["answers"] = json!(answer.answers);
+            }
+            None => {
+                ask["outcome"] = json!("unanswered");
+                ask["failure"] = json!(receipt
+                    .failure_message()
+                    .unwrap_or_else(|| "The provider returned no answer".into()));
+            }
+        },
+        Err(error) => {
+            ask["outcome"] = json!("unanswered");
+            ask["failure"] = json!(error.to_string());
+        }
+    }
+    let line =
+        serde_json::to_string(&ask).map_err(|e| fail("decision.encode", format!("ask: {e}")))?;
+    let _lock = aikit_store::ContextLock::acquire(
+        home,
+        &format!("decision-asks-{}", session_id.as_str()),
+        aikit_store::LockOptions::default().with_purpose("keep a decision ask"),
     )?;
-    serde_json::to_value(receipt).map_err(|e| fail("decision.encode", format!("receipt: {e}")))
+    home.ensure_session_dir(session_id)?;
+    let path = asks_path(home, session_id);
+    let unkept = |e: std::io::Error| {
+        fail(
+            "decision.ask_unkept",
+            format!(
+                "The answer came, but it could not be kept with the session at {}: {e}",
+                path.display()
+            ),
+        )
+    };
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+        .map_err(unkept)?;
+    use std::io::Write as _;
+    file.write_all(format!("{line}\n").as_bytes())
+        .map_err(unkept)
+}
+
+/// `aikit decide asks --agent-session <ref>`: the asks kept against that
+/// session, oldest first. Read-only; a session that asked nothing has none.
+pub fn decide_asks(args: DecideAsksArgs) -> Result<Value> {
+    let home = aikit_store::AikitHome::discover()?;
+    let session = ResourceRef::parse(&args.agent_session)?;
+    let session_id = aikit_core::SessionId::of_agent_session(&session);
+    let path = asks_path(&home, &session_id);
+    let mut asks = Vec::new();
+    let mut unreadable = 0usize;
+    match std::fs::File::open(&path) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => {
+            return Err(fail(
+                "decision.asks_unreadable",
+                format!("{}: {error}", path.display()),
+            ))
+        }
+        Ok(file) => {
+            use std::io::{Read as _, Seek as _};
+            let mut file = file;
+            let length = file.metadata().map(|m| m.len()).unwrap_or(0);
+            let skip = length.saturating_sub(ASKS_BYTES_LIMIT);
+            file.seek(std::io::SeekFrom::Start(skip))
+                .and_then(|_| {
+                    let mut text = String::new();
+                    file.read_to_string(&mut text).map(|_| text)
+                })
+                .map_err(|e| {
+                    fail(
+                        "decision.asks_unreadable",
+                        format!("{}: {e}", path.display()),
+                    )
+                })
+                .map(|text| {
+                    // A tail read starts mid-line: its first, partial line is not an ask.
+                    for line in text.lines().skip(usize::from(skip > 0)) {
+                        match serde_json::from_str::<Value>(line) {
+                            Ok(ask)
+                                if ask["schema"] == DECISION_ASK_SCHEMA
+                                    && ask["session_id"] == session_id.as_str() =>
+                            {
+                                asks.push(ask)
+                            }
+                            // A line torn by an interrupted write, or another record, is counted, never shown.
+                            _ if !line.trim().is_empty() => unreadable += 1,
+                            _ => {}
+                        }
+                    }
+                })?;
+        }
+    }
+    let earlier = asks.len().saturating_sub(ASKS_READ_LIMIT);
+    let asks = asks.split_off(earlier);
+    Ok(json!({
+        "schema": DECISION_ASKS_SCHEMA,
+        "agent_session": session.as_str(),
+        "session_id": session_id.as_str(),
+        "asks": asks,
+        "earlier": earlier,
+        "unreadable": unreadable,
+    }))
 }
 
 /// Parse a decision-provider configuration from bytes already read elsewhere

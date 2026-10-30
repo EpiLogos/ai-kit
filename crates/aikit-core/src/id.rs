@@ -293,6 +293,19 @@ prefixed_id!(
     "ses_",
     "A session space: a tmux session, a cmux workspace (group), or a plain terminal context."
 );
+
+impl SessionId {
+    /// The runtime identity AIKit gives an agent session's own process (`AIKIT_SESSION_ID`), derived from the session's
+    /// ref. What the session does under that identity reads back by its ref: the decision helper's answers it asked for
+    /// are kept under it (O-I #684).
+    pub fn of_agent_session(session: &crate::ResourceRef) -> Self {
+        Self::parse(&format!(
+            "ses_{}",
+            &blake3::hash(session.as_str().as_bytes()).to_hex()[..24]
+        ))
+        .expect("canonical derived SessionId")
+    }
+}
 prefixed_id!(
     ContextId,
     "ctx_",
