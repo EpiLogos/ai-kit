@@ -1096,6 +1096,7 @@ fn decide_route(command: &DecideSub) -> &'static str {
     match command {
         DecideSub::Status(_) => "cmd_decide_status",
         DecideSub::Invoke(_) => "cmd_decide_invoke",
+        DecideSub::Asks(_) => "cmd_decide_asks",
         DecideSub::Service(c) => match &c.command {
             DecideServiceSub::Provision(_) => "cmd_decide_service_provision",
             DecideServiceSub::Start(_) => "cmd_decide_service_start",
@@ -1600,6 +1601,10 @@ pub enum DecideSub {
     /// Invoke the selected decision provider with typed questions and return
     /// its bounded invocation receipt.
     Invoke(DecideInvokeArgs),
+    /// The typed questions an agent session put to the decision helper, each
+    /// with the labels it allowed and the answer (or why none came), as kept
+    /// against that session by `decide invoke`. Read-only.
+    Asks(DecideAsksArgs),
     /// Provision, start, inspect, stop, restart and upgrade a locally served
     /// decision model through AIKit's own lifecycle — no Workcell involved.
     Service(DecideServiceCmd),
@@ -1751,6 +1756,19 @@ pub struct DecideInvokeArgs {
     /// Permit a deliberately supplied env:// secret reference.
     #[arg(long = "allow-env-import")]
     pub allow_env_import: bool,
+    /// The agent session asking (`agent-session/<id>`). The ask and its
+    /// answer are kept against it; without this flag, against the session
+    /// this process runs as (`AIKIT_SESSION_ID`), and nowhere when neither.
+    #[arg(long = "agent-session", value_name = "RESOURCE_REF")]
+    pub agent_session: Option<String>,
+}
+
+/// `aikit decide asks`.
+#[derive(Debug, Args)]
+pub struct DecideAsksArgs {
+    /// The agent session whose asks to read (`agent-session/<id>`).
+    #[arg(long = "agent-session", value_name = "RESOURCE_REF")]
+    pub agent_session: String,
 }
 
 #[derive(Debug, Args)]

@@ -308,6 +308,7 @@ fn status_and_invoke_against_a_controlled_local_endpoint_report_served_facts() {
         invocation_ref: None,
         curl: None,
         allow_env_import: false,
+        agent_session: None,
     })
     .unwrap();
     assert_eq!(receipt["outcome"], "completed");

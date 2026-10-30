@@ -1305,6 +1305,7 @@ fn cmd_decide(command: DecideCmd) -> Result<Reply> {
     let data = match command.command {
         DecideSub::Status(args) => aikit_cli::decide::decide_status(args)?,
         DecideSub::Invoke(args) => aikit_cli::decide::decide_invoke(args)?,
+        DecideSub::Asks(args) => aikit_cli::decide::decide_asks(args)?,
         DecideSub::Service(service) => match service.command {
             DecideServiceSub::Provision(args) => {
                 aikit_cli::decide_service::service_provision(args)?

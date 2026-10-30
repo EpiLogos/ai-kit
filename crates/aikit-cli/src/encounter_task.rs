@@ -934,11 +934,7 @@ fn prepare_published(
 /// Child runtime scope derives from the actual retained AgentSession, not an
 /// inherited parent overlay or a fabricated Position tenure.
 fn task_session_id(session: &ResourceRef) -> aikit_core::SessionId {
-    aikit_core::SessionId::parse(&format!(
-        "ses_{}",
-        &blake3::hash(session.as_str().as_bytes()).to_hex()[..24]
-    ))
-    .expect("canonical derived SessionId")
+    aikit_core::SessionId::of_agent_session(session)
 }
 fn isolate_task_identity(
     command: &mut Command,
