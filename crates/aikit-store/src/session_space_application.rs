@@ -44,6 +44,32 @@ pub struct SessionSpaceReceipt {
     pub applied_at_unix_ms: u128,
 }
 
+/// One input AIKit delivered to a SessionSpace's working Surface: who sent
+/// it, how many bytes, and when. It is the working-surface owner's record of
+/// whose keys reached the room through it; keys that reach the pane any other
+/// way (a person at the provider itself, a process inside the pane) are not in
+/// it, and nothing here infers them. A person's keys are never kept, only
+/// their count: what a person types into a terminal may be a password. What
+/// another sender sent is kept as sent, so a reader can see what it ran.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkingSurfaceInputRecord {
+    /// The working-surface binding (`working-surface/...`) the input reached.
+    pub binding: aikit_core::resource::ResourceRef,
+    /// Who sent it: `human`, an agent ref (`agent-session/...`), or `unknown`.
+    pub by: String,
+    /// The bytes as sent; absent for a person's keys.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub text: Option<String>,
+    pub bytes: usize,
+    /// The provider-native pane it was delivered to (provenance).
+    pub native_id: String,
+    pub at_unix_ms: u64,
+}
+
+/// A binding's input journal is compacted to its newest records past this size.
+const INPUT_JOURNAL_COMPACT_BYTES: u64 = 256 * 1024;
+const INPUT_JOURNAL_KEEP: usize = 1000;
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct SessionSpaceCanonicalFile {
     version: String,
@@ -281,6 +307,103 @@ impl SessionSpaceApplicationStore {
         Ok(explain_session_space(&authored, reconstruction))
     }
 
+    /// Record one delivered input in the binding's journal, beside the space's
+    /// canonical state. Appends; a journal past its size is compacted to its
+    /// newest records.
+    pub fn record_working_surface_input(
+        &self,
+        space: &SessionSpaceRef,
+        record: &WorkingSurfaceInputRecord,
+    ) -> Result<()> {
+        let path = self.input_journal(space, &record.binding);
+        let parent = path.parent().expect("an input journal always has a parent");
+        create_dir_all(parent)?;
+        let mut line = serde_json::to_vec(record).map_err(|error| {
+            AikitError::new(
+                "session_space.input_unserializable",
+                format!("could not encode a working-surface input record: {error}"),
+            )
+        })?;
+        line.push(b'\n');
+        let mut output = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+            .map_err(|error| io_error("session_space.input_record_failed", &path, &error))?;
+        output
+            .write_all(&line)
+            .map_err(|error| io_error("session_space.input_record_failed", &path, &error))?;
+        let size = output.metadata().map(|meta| meta.len()).unwrap_or(0);
+        drop(output);
+        if size > INPUT_JOURNAL_COMPACT_BYTES {
+            // Keep the newest records within half the size, so the next
+            // appends do not compact again at once.
+            let mut lines: Vec<Vec<u8>> = Vec::new();
+            let mut kept_bytes = 0u64;
+            for record in self.read_input_journal(&path)?.iter().rev() {
+                let Ok(mut line) = serde_json::to_vec(record) else {
+                    continue;
+                };
+                line.push(b'\n');
+                if lines.len() >= INPUT_JOURNAL_KEEP
+                    || kept_bytes + line.len() as u64 > INPUT_JOURNAL_COMPACT_BYTES / 2
+                {
+                    break;
+                }
+                kept_bytes += line.len() as u64;
+                lines.push(line);
+            }
+            let encoded: Vec<u8> = lines.into_iter().rev().flatten().collect();
+            let temp = parent.join(format!(".inputs-{}.tmp", std::process::id()));
+            fs::write(&temp, &encoded)
+                .map_err(|error| io_error("session_space.input_record_failed", &temp, &error))?;
+            fs::rename(&temp, &path)
+                .map_err(|error| io_error("session_space.input_record_failed", &path, &error))?;
+        }
+        Ok(())
+    }
+
+    /// The newest `limit` inputs AIKit delivered to one binding, oldest first.
+    /// A binding no input reached has an empty journal.
+    pub fn working_surface_inputs(
+        &self,
+        space: &SessionSpaceRef,
+        binding: &aikit_core::resource::ResourceRef,
+        limit: usize,
+    ) -> Result<Vec<WorkingSurfaceInputRecord>> {
+        let path = self.input_journal(space, binding);
+        if !path.is_file() {
+            return Ok(Vec::new());
+        }
+        let mut records = self.read_input_journal(&path)?;
+        records.retain(|record| &record.binding == binding);
+        let from = records.len().saturating_sub(limit);
+        Ok(records.split_off(from))
+    }
+
+    fn read_input_journal(&self, path: &Path) -> Result<Vec<WorkingSurfaceInputRecord>> {
+        let bytes = fs::read(path)
+            .map_err(|error| io_error("session_space.input_read_failed", path, &error))?;
+        // A torn last line (a writer that died mid-append) is not a record.
+        Ok(bytes
+            .split(|byte| *byte == b'\n')
+            .filter(|line| !line.is_empty())
+            .filter_map(|line| serde_json::from_slice(line).ok())
+            .collect())
+    }
+
+    fn input_journal(
+        &self,
+        space: &SessionSpaceRef,
+        binding: &aikit_core::resource::ResourceRef,
+    ) -> PathBuf {
+        let digest = blake3::hash(binding.as_str().as_bytes()).to_hex();
+        self.root()
+            .join(space_key(space))
+            .join("working-surface-inputs")
+            .join(format!("{}.jsonl", &digest.as_str()[..24]))
+    }
+
     fn load_file(&self, space: &SessionSpaceRef) -> Result<SessionSpaceCanonicalFile> {
         let path = self.state_file(space);
         if !path.is_file() {
@@ -421,6 +544,64 @@ mod tests {
         let home = AikitHome::at(dir.path());
         home.ensure_layout().unwrap();
         (dir, SessionSpaceApplicationStore::new(home))
+    }
+
+    #[test]
+    fn the_input_journal_keeps_each_bindings_newest_inputs_and_compacts() {
+        let (_dir, store) = store();
+        let space = SessionSpaceRef::parse("session-space/journal").unwrap();
+        let room = ResourceRef::parse("working-surface/room").unwrap();
+        let other = ResourceRef::parse("working-surface/other").unwrap();
+        let record =
+            |binding: &ResourceRef, by: &str, text: &str, at: u64| WorkingSurfaceInputRecord {
+                binding: binding.clone(),
+                by: by.into(),
+                text: (by != "human").then(|| text.into()),
+                bytes: text.len(),
+                native_id: "%1".into(),
+                at_unix_ms: at,
+            };
+        assert!(store
+            .working_surface_inputs(&space, &room, 10)
+            .unwrap()
+            .is_empty());
+        store
+            .record_working_surface_input(&space, &record(&room, "agent-session/a", "ls\r", 1))
+            .unwrap();
+        store
+            .record_working_surface_input(&space, &record(&other, "agent-session/b", "pwd\r", 2))
+            .unwrap();
+        store
+            .record_working_surface_input(&space, &record(&room, "human", "y\r", 3))
+            .unwrap();
+        let read = store.working_surface_inputs(&space, &room, 10).unwrap();
+        assert_eq!(read.len(), 2, "only this binding's inputs: {read:?}");
+        assert_eq!(read[0].text.as_deref(), Some("ls\r"));
+        assert_eq!(
+            (read[1].by.as_str(), read[1].text.as_deref()),
+            ("human", None)
+        );
+        assert_eq!(
+            store.working_surface_inputs(&space, &room, 1).unwrap()[0].at_unix_ms,
+            3
+        );
+
+        let long = "x".repeat(400);
+        for at in 0..1200 {
+            store
+                .record_working_surface_input(
+                    &space,
+                    &record(&room, "agent-session/a", &long, 10 + at),
+                )
+                .unwrap();
+        }
+        let kept = store.working_surface_inputs(&space, &room, 5000).unwrap();
+        assert!(kept.len() < 1200, "the journal compacts: {}", kept.len());
+        assert_eq!(
+            kept.last().unwrap().at_unix_ms,
+            10 + 1199,
+            "the newest input is kept"
+        );
     }
 
     fn create(store: &SessionSpaceApplicationStore, name: &str) -> SessionSpaceReceipt {

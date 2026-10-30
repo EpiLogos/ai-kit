@@ -145,7 +145,7 @@ pub use scan::{Finding, Scanner};
 pub use session_lifecycle::{SessionLifecycleStore, SESSION_LIFECYCLE_STORE_VERSION};
 pub use session_space_application::{
     SessionSpaceApplicationStore, SessionSpaceHistoryComparison, SessionSpaceReceipt,
-    SESSION_SPACE_STORE_VERSION,
+    WorkingSurfaceInputRecord, SESSION_SPACE_STORE_VERSION,
 };
 pub use session_space_evidence::{
     explain_session_space_with_receipts, SessionSpaceExplainEvidence,

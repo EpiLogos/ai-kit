@@ -14,6 +14,7 @@ use std::path::PathBuf;
 use std::str::FromStr;
 
 use aikit_store::home::AikitHome;
+use aikit_store::SessionSpaceApplicationStore;
 
 use crate::app::Service;
 use crate::SessionSpaceServiceOps;
@@ -478,6 +479,19 @@ enum WorkingSurfaceCommand {
         binding: String,
         #[arg(long, default_value_t = 500)]
         lines: u16,
+    },
+    /// Send keys to the exact live provider Surface, as the bytes a terminal
+    /// sends for them, and record who sent them. Never opens or recreates it.
+    Input {
+        space: String,
+        binding: String,
+        /// The bytes to send, as typed (control bytes included).
+        #[arg(long, allow_hyphen_values = true)]
+        text: String,
+        /// Who sends them: `human`, or an agent ref (agent-session/<id>).
+        /// Unnamed input is recorded as `unknown`.
+        #[arg(long, default_value = "unknown")]
+        by: String,
     },
     /// Read the provider's verified attachment command without starting a client.
     Attachment { space: String, binding: String },
@@ -1179,11 +1193,33 @@ fn run(cli: Cli) -> Result<()> {
                 lines,
             } => {
                 let state = home.session_space_show(&space_ref(&space)?)?;
-                emit(&crate::session_space_working_surface::capture(
+                let binding = aikit_core::ResourceRef::parse(binding)?;
+                let mut capture =
+                    crate::session_space_working_surface::capture(&state, &binding, lines)?;
+                capture.inputs = SessionSpaceApplicationStore::new(home.clone())
+                    .working_surface_inputs(state.id(), &binding, 500)?;
+                emit(&capture)
+            }
+            WorkingSurfaceCommand::Input {
+                space,
+                binding,
+                text,
+                by,
+            } => {
+                let state = home.session_space_show(&space_ref(&space)?)?;
+                let input = crate::session_space_working_surface::input(
                     &state,
                     &aikit_core::ResourceRef::parse(binding)?,
-                    lines,
-                )?)
+                    &text,
+                    &by,
+                )?;
+                // The delivery happened; its record is this verb's separate
+                // write, beside the space's canonical state.
+                if let Some(record) = &input.record {
+                    SessionSpaceApplicationStore::new(home.clone())
+                        .record_working_surface_input(state.id(), record)?;
+                }
+                emit(&input)
             }
             WorkingSurfaceCommand::Attachment { space, binding } => {
                 let state = home.session_space_show(&space_ref(&space)?)?;

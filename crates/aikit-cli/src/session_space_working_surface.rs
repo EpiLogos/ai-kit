@@ -78,6 +78,115 @@ pub struct WorkingSurfaceCapture {
     pub plan_name: String,
     pub observed_at_unix_ms: u64,
     pub capture: working_environment_field::WorkingEnvironmentCapture,
+    /// Whether keys reach this room through AIKit (`working-surface input`),
+    /// and why not when they do not.
+    pub input: WorkingSurfaceInputRoute,
+    /// The newest inputs AIKit delivered to this room, oldest first: who sent
+    /// each. Filled by the caller from the SessionSpace's input journal.
+    pub inputs: Vec<aikit_store::WorkingSurfaceInputRecord>,
+}
+
+/// Whether a room takes keys through AIKit's working-surface owner.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "state", rename_all = "kebab-case")]
+pub enum WorkingSurfaceInputRoute {
+    Accepts,
+    NotExposed { reason: String },
+}
+
+impl WorkingSurfaceInputRoute {
+    fn of(provider: &ResourceRef) -> Self {
+        match working_environment_field::input_route(provider) {
+            Ok(()) => Self::Accepts,
+            Err(reason) => Self::NotExposed { reason },
+        }
+    }
+}
+
+pub const SESSION_SPACE_WORKING_SURFACE_INPUT_VERSION: &str =
+    "aikit.session-space-working-surface-input/v1";
+
+/// The receipt of one input sent to an exact persisted working Surface.
+#[derive(Debug, Clone, Serialize)]
+pub struct WorkingSurfaceInput {
+    pub schema: &'static str,
+    pub space: SessionSpaceRef,
+    pub binding: ResourceRef,
+    pub surface: ResourceRef,
+    pub agent_session: ResourceRef,
+    pub provider: ResourceRef,
+    pub by: String,
+    pub input: working_environment_field::WorkingEnvironmentInput,
+    /// The journal record of a delivered input, for the caller to persist.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub record: Option<aikit_store::WorkingSurfaceInputRecord>,
+}
+
+/// Who may be named as an input's sender: `human`, `unknown`, or a ref of the
+/// shape `<kind>/<id>` (an agent session, a Position), whitespace-free.
+fn sender(by: &str) -> Result<String> {
+    let by = by.trim();
+    let is_ref = by.len() <= 256
+        && by
+            .split_once('/')
+            .is_some_and(|(kind, id)| !kind.is_empty() && !id.is_empty())
+        && !by.chars().any(|c| c.is_whitespace() || c.is_control());
+    if by == "human" || by == "unknown" || is_ref {
+        Ok(by.to_owned())
+    } else {
+        Err(AikitError::new(
+            "session_space.input_sender_invalid",
+            format!("`{by}` names no sender: use `human`, `unknown`, or a ref such as agent-session/<id>"),
+        ))
+    }
+}
+
+/// Send keys to the exact persisted binding's live pane through its
+/// provider. A pane that is not live, or a provider without an input
+/// operation, is refused; nothing is opened, focused or recreated. The
+/// delivered input's journal record travels back for the caller to persist;
+/// a person's keys are recorded by count only.
+pub fn input(
+    state: &SessionSpaceAuthoredState,
+    binding_ref: &ResourceRef,
+    text: &str,
+    by: &str,
+) -> Result<WorkingSurfaceInput> {
+    let bound = binding(state, binding_ref)?;
+    let by = sender(by)?;
+    let input =
+        working_environment_field::input(&bound.plan, &bound.provider, &bound.surface, text)?;
+    let record = match &input {
+        working_environment_field::WorkingEnvironmentInput::Delivered { native_id, bytes } => {
+            Some(aikit_store::WorkingSurfaceInputRecord {
+                binding: bound.binding.clone(),
+                text: (by != "human").then(|| text.to_owned()),
+                bytes: *bytes,
+                by: by.clone(),
+                native_id: native_id.clone(),
+                at_unix_ms: now_unix_ms(),
+            })
+        }
+        working_environment_field::WorkingEnvironmentInput::NotExposed { .. } => None,
+    };
+    Ok(WorkingSurfaceInput {
+        schema: SESSION_SPACE_WORKING_SURFACE_INPUT_VERSION,
+        space: state.id().clone(),
+        binding: bound.binding.clone(),
+        surface: bound.surface.clone(),
+        agent_session: bound.agent_session.clone(),
+        provider: bound.provider.clone(),
+        by,
+        input,
+        record,
+    })
+}
+
+fn now_unix_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
 }
 
 /// Read-only capture never opens a missing place or changes binding state.
@@ -97,11 +206,10 @@ pub fn capture(
         agent_session: bound.agent_session.clone(),
         provider: bound.provider.clone(),
         plan_name: bound.plan.name.clone(),
-        observed_at_unix_ms: std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_millis() as u64,
+        observed_at_unix_ms: now_unix_ms(),
         capture,
+        input: WorkingSurfaceInputRoute::of(&bound.provider),
+        inputs: Vec::new(),
     })
 }
 

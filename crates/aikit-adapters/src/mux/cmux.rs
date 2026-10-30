@@ -732,6 +732,57 @@ impl<R: CommandRunner> Cmux<R> {
         })
     }
 
+    /// Read the text of only a currently owned logical pane — cmux's own
+    /// `read-screen` over the surface this session's markers bind — as plain
+    /// text. Inspection is read-only: nothing is opened, focused or created,
+    /// and a pane the markers no longer bind is refused. The surface is
+    /// re-resolved after the read, so a recycled handle is not passed off as
+    /// the same pane. Native handles stay provenance.
+    pub fn capture_surface(
+        &self,
+        plan: &SessionPlan,
+        logical_key: &str,
+        lines: u16,
+    ) -> Result<(String, String)> {
+        if !(1..=2000).contains(&lines) {
+            return Err(AikitError::new(
+                "mux.capture_limit",
+                "Capture lines must be between 1 and 2000",
+            ));
+        }
+        let (workspace, surface) = self.live_surface(plan, logical_key)?;
+        let out = self.must(&[
+            "read-screen",
+            "--workspace",
+            &workspace,
+            "--surface",
+            &surface,
+            "--lines",
+            &lines.to_string(),
+        ])?;
+        if self.live_surface(plan, logical_key)? != (workspace, surface.clone()) {
+            return Err(AikitError::new(
+                "mux.cmux_surface_changed",
+                "The working pane changed during capture; retry its current binding",
+            ));
+        }
+        Ok((surface, out.stdout))
+    }
+
+    /// The workspace and surface this session's markers bind for one logical
+    /// pane, read without changing anything.
+    fn live_surface(&self, plan: &SessionPlan, logical_key: &str) -> Result<(String, String)> {
+        let binding = self.inspect_session(plan)?;
+        let view = logical_key.split('/').next().unwrap_or_default();
+        match (binding.views.get(view), binding.surfaces.get(logical_key)) {
+            (Some(workspace), Some(surface)) => Ok((workspace.clone(), surface.clone())),
+            _ => Err(AikitError::new(
+                "mux.cmux_surface_not_live",
+                format!("cmux has no live AIKit surface for `{logical_key}`"),
+            )),
+        }
+    }
+
     // -----------------------------------------------------------------------
     // Sidebar
     // -----------------------------------------------------------------------
