@@ -17,6 +17,7 @@
 use aikit_adapters::herdr::created_place_bindings;
 use aikit_adapters::mux::{tmux::Tmux, MuxAdapter};
 use aikit_adapters::place_technology::{PlaceTechnologyReading, PlaceTechnologyRegistry};
+use aikit_adapters::runner::SystemRunner;
 use aikit_adapters::{MuxWorkingEnvironment, WorkingEnvironmentProvider};
 use aikit_core::platform::PlaceTechnology;
 use aikit_core::resource::ResourceRef;
@@ -59,6 +60,12 @@ pub enum WorkingEnvironmentCapture {
         /// when it reports one (Herdr's agent lifecycle).
         #[serde(skip_serializing_if = "Option::is_none")]
         agent: Option<WorkingEnvironmentAgent>,
+        /// The pane by the name a harness's observer hook gives the pane it
+        /// runs in ([`pane_key`]), so what ran there can be joined to the
+        /// screen. Absent when the provider does not say which server the
+        /// pane lives on.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pane: Option<String>,
     },
     Unavailable {
         reason: String,
@@ -101,21 +108,63 @@ fn cmux_recorded_session(plan: &SessionPlan) -> Option<aikit_core::SessionId> {
 
 const CMUX_UNOWNED: &str =
     "cmux names the panes AIKit owns by AIKit's durable session id, and this \
-     binding's plan records none (`[backend.cmux] session-id`), so AIKit cannot find its surface";
+     binding's plan records none (`[backend.cmux] session-id`), so AIKit cannot find its surface; \
+     opening the room through AIKit records one";
+
+/// The cmux adapter that owns a plan's surfaces: identified by the AIKit
+/// session id the plan records, so cmux's markers name exactly this room's
+/// surfaces. A plan that records none yields an adapter that refuses every
+/// owned operation with `mux.cmux_identity_missing`.
+fn cmux_owning<R: aikit_adapters::runner::CommandRunner>(
+    adapter: aikit_adapters::mux::cmux::Cmux<R>,
+    plan: &SessionPlan,
+) -> aikit_adapters::mux::cmux::Cmux<R> {
+    adapter.with_identity(aikit_adapters::mux::SessionIdentity {
+        session_id: cmux_recorded_session(plan),
+        ..Default::default()
+    })
+}
+
+/// A bounded cmux for one read or one input over a plan's owned surfaces.
+fn cmux_bounded(plan: &SessionPlan) -> aikit_adapters::mux::cmux::Cmux<SystemRunner> {
+    cmux_owning(
+        aikit_adapters::mux::cmux::Cmux::new(
+            SystemRunner::new().with_timeout(std::time::Duration::from_secs(2)),
+        ),
+        plan,
+    )
+}
+
+/// The name of one terminal pane that a harness's observer hook and a
+/// working Surface's capture both give it: `<technology>:<pane>@<server>`,
+/// the server being where the pane id is unique (tmux: `<socket>,<pid>`;
+/// herdr: its socket). cmux has one server, and its surface refs are named
+/// bare.
+pub fn pane_key(technology: &str, native: &str, server: Option<&str>) -> String {
+    match server.map(str::trim).filter(|server| !server.is_empty()) {
+        Some(server) => format!("{technology}:{native}@{server}"),
+        None => format!("{technology}:{native}"),
+    }
+}
 
 /// Whether keys can reach a Surface of this provider through AIKit, and the
-/// reason in words when they cannot. tmux and Herdr publish an input
-/// operation over the exact bound pane; no other provider does here.
-pub fn input_route(provider: &ResourceRef) -> std::result::Result<(), String> {
+/// reason in words when they cannot. tmux, Herdr and cmux publish an input
+/// operation over the exact bound pane; a cmux room only once its plan
+/// records the AIKit session id cmux names its surfaces by. No other
+/// provider does here.
+pub fn input_route(plan: &SessionPlan, provider: &ResourceRef) -> std::result::Result<(), String> {
     match technology_from_provider(provider) {
         Some(technology)
             if technology == PlaceTechnology::tmux() || technology == PlaceTechnology::herdr() =>
         {
             Ok(())
         }
-        Some(technology) if technology == PlaceTechnology::cmux() => Err(format!(
-            "{provider}: AIKit sends no keys to a cmux surface; type in cmux itself"
-        )),
+        Some(technology) if technology == PlaceTechnology::cmux() => {
+            match cmux_recorded_session(plan) {
+                Some(_) => Ok(()),
+                None => Err(format!("{provider}: {CMUX_UNOWNED}")),
+            }
+        }
         _ => Err(format!(
             "{provider} does not publish an input operation AIKit drives"
         )),
@@ -132,7 +181,7 @@ pub fn input(
     subject: &ResourceRef,
     text: &str,
 ) -> Result<WorkingEnvironmentInput> {
-    use aikit_adapters::{herdr::HerdrWorkingEnvironment, runner::SystemRunner};
+    use aikit_adapters::herdr::HerdrWorkingEnvironment;
     use aikit_core::AikitError;
     if text.is_empty() || text.len() > INPUT_LIMIT_BYTES {
         return Err(AikitError::new(
@@ -140,7 +189,7 @@ pub fn input(
             format!("Input must carry between 1 and {INPUT_LIMIT_BYTES} bytes"),
         ));
     }
-    if let Err(reason) = input_route(provider) {
+    if let Err(reason) = input_route(plan, provider) {
         return Ok(WorkingEnvironmentInput::NotExposed { reason });
     }
     let surfaces = plan_surfaces(plan);
@@ -149,9 +198,12 @@ pub fn input(
             reason: "The persisted plan has no binding for this Surface".into(),
         });
     };
-    let native_id = if technology_from_provider(provider) == Some(PlaceTechnology::tmux()) {
+    let technology = technology_from_provider(provider);
+    let native_id = if technology == Some(PlaceTechnology::tmux()) {
         Tmux::bounded_system(std::time::Duration::from_secs(2))
             .send_surface_input(plan, logical, text)?
+    } else if technology == Some(PlaceTechnology::cmux()) {
+        cmux_bounded(plan).send_surface_input(plan, logical, text)?
     } else {
         HerdrWorkingEnvironment::for_plan(
             SystemRunner::new().with_timeout(std::time::Duration::from_secs(2)),
@@ -176,7 +228,7 @@ pub fn capture(
     subject: &ResourceRef,
     lines: u16,
 ) -> Result<WorkingEnvironmentCapture> {
-    use aikit_adapters::{herdr::HerdrWorkingEnvironment, runner::SystemRunner};
+    use aikit_adapters::herdr::HerdrWorkingEnvironment;
     use aikit_core::AikitError;
     if !(1..=2000).contains(&lines) {
         return Err(AikitError::new(
@@ -193,46 +245,59 @@ pub fn capture(
     let technology = technology_from_provider(provider);
     let mut agent = None;
     let mut format = "ansi";
+    // The pane's name for the observer, from the server the provider says the
+    // pane lives on. A server that will not say leaves the pane unnamed; the
+    // screen is read all the same.
+    let mut pane = None;
     let result = if technology == Some(PlaceTechnology::tmux()) {
-        Tmux::bounded_system(std::time::Duration::from_secs(2))
-            .capture_surface(plan, logical, lines)
+        let tmux = Tmux::bounded_system(std::time::Duration::from_secs(2));
+        tmux.capture_surface(plan, logical, lines)
+            .inspect(|(native, _)| {
+                pane = tmux
+                    .pane_server(native)
+                    .ok()
+                    .map(|server| pane_key("tmux", native, Some(&server)));
+            })
     } else if technology == Some(PlaceTechnology::herdr()) {
-        HerdrWorkingEnvironment::for_plan(
+        let herdr = HerdrWorkingEnvironment::for_plan(
             SystemRunner::new().with_timeout(std::time::Duration::from_secs(2)),
             plan,
             provider.clone(),
             &surfaces,
             None,
-        )
-        .capture_surface_with_agent(subject, lines)
-        .map(|(native, text, observed)| {
-            agent = observed.map(|observed| WorkingEnvironmentAgent {
-                agent: observed.agent,
-                name: observed.name,
-                state: serde_json::to_value(observed.status)
+        );
+        herdr
+            .capture_surface_with_agent(subject, lines)
+            .inspect(|(native, _, _)| {
+                pane = herdr
+                    .server_socket()
                     .ok()
-                    .and_then(|value| value.as_str().map(str::to_owned))
-                    .unwrap_or_else(|| "unknown".into()),
-            });
-            (native, text)
-        })
+                    .flatten()
+                    .map(|server| pane_key("herdr", native, Some(&server)));
+            })
+            .map(|(native, text, observed)| {
+                agent = observed.map(|observed| WorkingEnvironmentAgent {
+                    agent: observed.agent,
+                    name: observed.name,
+                    state: serde_json::to_value(observed.status)
+                        .ok()
+                        .and_then(|value| value.as_str().map(str::to_owned))
+                        .unwrap_or_else(|| "unknown".into()),
+                });
+                (native, text)
+            })
     } else if technology == Some(PlaceTechnology::cmux()) {
         // cmux's own read of the surface this session's markers bind; it
         // returns the screen as plain text.
-        let Some(session) = cmux_recorded_session(plan) else {
+        if cmux_recorded_session(plan).is_none() {
             return Ok(WorkingEnvironmentCapture::Unavailable {
                 reason: CMUX_UNOWNED.into(),
             });
-        };
+        }
         format = "text";
-        aikit_adapters::mux::cmux::Cmux::new(
-            SystemRunner::new().with_timeout(std::time::Duration::from_secs(2)),
-        )
-        .with_identity(aikit_adapters::mux::SessionIdentity {
-            session_id: Some(session),
-            ..Default::default()
-        })
-        .capture_surface(plan, logical, lines)
+        cmux_bounded(plan)
+            .capture_surface(plan, logical, lines)
+            .inspect(|(native, _)| pane = Some(pane_key("cmux", native, None)))
     } else {
         return Ok(WorkingEnvironmentCapture::Unavailable {
             reason: format!("{provider} does not publish a terminal capture operation"),
@@ -266,6 +331,7 @@ pub fn capture(
         text,
         truncated,
         agent,
+        pane,
     })
 }
 
@@ -352,7 +418,16 @@ pub fn observe(plan: &SessionPlan) -> Result<Vec<WorkingEnvironmentObservation>>
             continue;
         };
         let mut observed_environment: Box<dyn WorkingEnvironmentProvider> =
-            if let Some(adapter) = entry.mux_adapter() {
+            if reading.technology == PlaceTechnology::cmux() {
+                // cmux finds this plan's surfaces only by the AIKit session id
+                // the plan records; the registry's bare adapter has none.
+                Box::new(environment(
+                    cmux_owning(aikit_adapters::mux::cmux::Cmux::system(), plan),
+                    plan,
+                    provider.clone(),
+                    &surfaces,
+                ))
+            } else if let Some(adapter) = entry.mux_adapter() {
                 Box::new(environment(adapter, plan, provider.clone(), &surfaces))
             } else {
                 // A technology driven without the mux contract hands back its own
@@ -448,6 +523,21 @@ pub fn act(
             reason: format!("{provider} has no working-environment projection in this build"),
         });
     };
+    if reading.technology == PlaceTechnology::cmux() {
+        // cmux owns this plan's surfaces by the AIKit session id the plan
+        // records (an explicit open through the SessionSpace records one).
+        return act_in(
+            environment(
+                cmux_owning(aikit_adapters::mux::cmux::Cmux::system(), plan),
+                plan,
+                provider.clone(),
+                &surfaces,
+            ),
+            provider,
+            subject,
+            operation,
+        );
+    }
     if let Some(adapter) = entry.mux_adapter() {
         return act_in(
             environment(adapter, plan, provider.clone(), &surfaces),
@@ -724,11 +814,11 @@ mod tests {
 
     #[test]
     fn keys_reach_tmux_and_herdr_rooms_and_no_other_provider_is_guessed_at() {
-        assert!(input_route(&r("provider/tmux/current")).is_ok());
-        assert!(input_route(&r("provider/herdr/w6")).is_ok());
-        assert!(input_route(&r("provider/cmux/current"))
+        assert!(input_route(&plan(""), &r("provider/tmux/current")).is_ok());
+        assert!(input_route(&plan(""), &r("provider/herdr/w6")).is_ok());
+        assert!(input_route(&plan(""), &r("provider/zellij/current"))
             .unwrap_err()
-            .contains("type in cmux itself"));
+            .contains("does not publish an input operation"));
         let refused = input(
             &plan(""),
             &r("provider/cmux/current"),
@@ -747,5 +837,36 @@ mod tests {
             ""
         )
         .is_err());
+    }
+
+    #[test]
+    fn a_cmux_room_takes_keys_only_once_its_plan_records_the_session_id_aikit_owns_it_by() {
+        let unowned = input_route(&plan(""), &r("provider/cmux/current")).unwrap_err();
+        assert!(unowned.contains("[backend.cmux] session-id"), "{unowned}");
+        let owned = plan("[backend.cmux]\nsession-id = \"ses_01JABCDEFGHJKMNPQRSTVWXYZ0\"");
+        assert!(input_route(&owned, &r("provider/cmux/current")).is_ok());
+        // A plan without the id is refused before cmux is asked anything.
+        match input(
+            &plan(""),
+            &r("provider/cmux/current"),
+            &r("surface/terminal/main/shell"),
+            "ls\r",
+        )
+        .unwrap()
+        {
+            WorkingEnvironmentInput::NotExposed { reason } => {
+                assert!(reason.contains("[backend.cmux] session-id"), "{reason}")
+            }
+            other => panic!("expected the owner's refusal, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_pane_is_named_the_way_the_observer_hook_names_it() {
+        assert_eq!(
+            pane_key("tmux", "%3", Some("/private/tmp/tmux-501/aikit,4242")),
+            "tmux:%3@/private/tmp/tmux-501/aikit,4242"
+        );
+        assert_eq!(pane_key("cmux", "surface:20", None), "cmux:surface:20");
     }
 }

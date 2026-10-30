@@ -7356,7 +7356,25 @@ fn cmd_observe(cwd: &std::path::Path, a: ObserveArgs) -> Result<Reply> {
                     format!("the hook payload on stdin is not JSON: {e}"),
                 )
             })?;
-            return Ok(observe::run_from_hook(&payload, &by).into_iter().collect());
+            // The hook runs in the harness's own process tree: the panes it
+            // runs in are the harness's. A cmux surface named by UUID is
+            // asked of cmux, briefly, as this caller's own surface.
+            let resolve_cmux = |workspace: &str, surface: &str| {
+                aikit_adapters::mux::cmux::Cmux::new(
+                    aikit_adapters::runner::SystemRunner::new()
+                        .with_timeout(std::time::Duration::from_secs(1)),
+                )
+                .caller_surface(workspace, surface)
+                .ok()
+                .flatten()
+            };
+            return Ok(observe::run_from_hook(&payload, &by)
+                .map(|mut run| {
+                    run.panes = observe::panes_from_env(env, resolve_cmux);
+                    run
+                })
+                .into_iter()
+                .collect());
         }
         let by = args
             .by
@@ -7368,6 +7386,7 @@ fn cmd_observe(cwd: &std::path::Path, a: ObserveArgs) -> Result<Reply> {
             "session": args.session,
             "exit_code": args.exit_code,
             "at": args.at,
+            "panes": args.pane,
         });
         Ok(vec![observe::run_from_object(&object, &by)?])
     })();
@@ -7418,6 +7437,7 @@ fn cmd_observe(cwd: &std::path::Path, a: ObserveArgs) -> Result<Reply> {
                         "proposal": offer.proposal.as_ref().map(|p| p.to_string()),
                         "new": offer.new,
                     })),
+                    "panes": seen.panes,
                 }));
             }
             // A hook never fails the harness; anywhere else the feed is told.

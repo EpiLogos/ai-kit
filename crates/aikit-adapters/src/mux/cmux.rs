@@ -769,6 +769,51 @@ impl<R: CommandRunner> Cmux<R> {
         Ok((surface, out.stdout))
     }
 
+    /// Send text to only a currently owned logical pane, through cmux's own
+    /// `send` to the surface this session's markers bind. cmux writes the text
+    /// to that surface's terminal as typed; its `send` contract reads the
+    /// two-character sequences `\n`, `\r` and `\t` in the text as Enter and Tab.
+    /// Nothing is opened, focused or created: a session without AIKit's id has
+    /// no surface AIKit can name, and a pane the markers no longer bind is
+    /// refused before anything is sent. Native handles stay provenance.
+    pub fn send_surface_input(
+        &self,
+        plan: &SessionPlan,
+        logical_key: &str,
+        text: &str,
+    ) -> Result<String> {
+        self.ownership_scope()?;
+        let (workspace, surface) = self.live_surface(plan, logical_key)?;
+        self.must(&[
+            "send",
+            "--workspace",
+            &workspace,
+            "--surface",
+            &surface,
+            "--",
+            text,
+        ])?;
+        Ok(surface)
+    }
+
+    /// The surface a process names as its own (`CMUX_WORKSPACE_ID`,
+    /// `CMUX_SURFACE_ID`, UUIDs or refs) by cmux's short ref, as `identify`
+    /// resolves that caller. When cmux names no caller this is `None`: the
+    /// focused surface is someone else's and is never taken for the caller's.
+    pub fn caller_surface(&self, workspace: &str, surface: &str) -> Result<Option<String>> {
+        let out = self.must_json(&["identify", "--workspace", workspace, "--surface", surface])?;
+        let value: serde_json::Value = serde_json::from_str(out.line()).map_err(|e| {
+            AikitError::new(
+                "mux.cmux_protocol",
+                format!("could not read the `identify` response: {e}"),
+            )
+        })?;
+        Ok(value
+            .get("caller")
+            .filter(|caller| caller.is_object())
+            .and_then(|caller| related_handle(caller, "surface")))
+    }
+
     /// The workspace and surface this session's markers bind for one logical
     /// pane, read without changing anything.
     fn live_surface(&self, plan: &SessionPlan, logical_key: &str) -> Result<(String, String)> {

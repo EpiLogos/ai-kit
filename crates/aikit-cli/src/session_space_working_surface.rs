@@ -84,6 +84,32 @@ pub struct WorkingSurfaceCapture {
     /// The newest inputs AIKit delivered to this room, oldest first: who sent
     /// each. Filled by the caller from the SessionSpace's input journal.
     pub inputs: Vec<aikit_store::WorkingSurfaceInputRecord>,
+    /// The newest commands a harness ran in this room's pane, oldest first,
+    /// and who ran them, as AIKit's observer hook recorded them by the pane's
+    /// name (the capture's `pane`). Filled by the caller from the observer.
+    pub observed: Vec<WorkingSurfaceObservedRun>,
+}
+
+/// One command the observer kept for the room's pane.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct WorkingSurfaceObservedRun {
+    pub command: String,
+    /// `human`, `unknown`, or the agent ref the harness ran as.
+    pub by: String,
+    pub at_unix_ms: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub exit_code: Option<i32>,
+}
+
+impl From<aikit_store::observer::PaneRun> for WorkingSurfaceObservedRun {
+    fn from(run: aikit_store::observer::PaneRun) -> Self {
+        Self {
+            command: run.command,
+            by: run.by,
+            at_unix_ms: u64::try_from(run.at.as_nanos() / 1_000_000).unwrap_or_default(),
+            exit_code: run.exit_code,
+        }
+    }
 }
 
 /// Whether a room takes keys through AIKit's working-surface owner.
@@ -95,8 +121,8 @@ pub enum WorkingSurfaceInputRoute {
 }
 
 impl WorkingSurfaceInputRoute {
-    fn of(provider: &ResourceRef) -> Self {
-        match working_environment_field::input_route(provider) {
+    fn of(plan: &aikit_core::SessionPlan, provider: &ResourceRef) -> Self {
+        match working_environment_field::input_route(plan, provider) {
             Ok(()) => Self::Accepts,
             Err(reason) => Self::NotExposed { reason },
         }
@@ -208,8 +234,9 @@ pub fn capture(
         plan_name: bound.plan.name.clone(),
         observed_at_unix_ms: now_unix_ms(),
         capture,
-        input: WorkingSurfaceInputRoute::of(&bound.provider),
+        input: WorkingSurfaceInputRoute::of(&bound.plan, &bound.provider),
         inputs: Vec::new(),
+        observed: Vec::new(),
     })
 }
 
@@ -295,7 +322,11 @@ pub fn open(
     state: &SessionSpaceAuthoredState,
     binding_ref: &ResourceRef,
 ) -> Result<WorkingSurfaceResult> {
-    let binding = binding(state, binding_ref)?;
+    let persisted = binding(state, binding_ref)?;
+    // A cmux room is owned by an AIKit session id its plan records; one the
+    // plan lacks is minted here and travels back for the caller to persist.
+    let owned = cmux_ownership(persisted);
+    let binding = owned.as_ref().unwrap_or(persisted);
     let outcome = working_environment_field::act(
         &binding.plan,
         &binding.provider,
@@ -307,7 +338,10 @@ pub fn open(
         binding,
         WorkingSurfaceNativeStanding::ReboundByExplicitOpen,
     )?;
-    let refreshed_binding = herdr_binding_refresh(binding, &reading, Some(&outcome))?;
+    let refreshed_binding = match owned {
+        Some(owned) => Some(owned),
+        None => herdr_binding_refresh(binding, &reading, Some(&outcome))?,
+    };
     Ok(WorkingSurfaceResult {
         reading,
         outcome: Some(outcome),
@@ -369,6 +403,41 @@ pub fn terminal_attachment(
         &binding.provider,
         &binding.surface,
     )
+}
+
+/// The binding with a freshly minted AIKit session id recorded as its plan's
+/// `[backend.cmux] session-id`, when it is a cmux room whose plan records
+/// none. cmux names the surfaces AIKit owns by that id (each surface title
+/// carries it), so a room is only AIKit's to observe, capture and type into
+/// once its plan records one, and keeps the same id across every later open.
+/// `None` for every other provider and for a plan that already records one;
+/// the plan's other cmux settings stay as they are.
+pub fn cmux_ownership(
+    binding: &SessionSpaceWorkingSurfaceBinding,
+) -> Option<SessionSpaceWorkingSurfaceBinding> {
+    if !binding.provider.as_str().starts_with("provider/cmux/") {
+        return None;
+    }
+    let mut cmux = binding
+        .plan
+        .backend_extensions
+        .get("cmux")
+        .cloned()
+        .unwrap_or_default();
+    let recorded = cmux
+        .get("session-id")
+        .and_then(|value| value.as_str())
+        .is_some_and(|raw| aikit_core::SessionId::parse(raw).is_ok());
+    if recorded {
+        return None;
+    }
+    cmux.insert(
+        "session-id".into(),
+        toml::Value::String(aikit_core::SessionId::generate().to_string()),
+    );
+    let mut updated = binding.clone();
+    updated.plan.backend_extensions.insert("cmux".into(), cmux);
+    Some(updated)
 }
 
 /// Derive the updated persisted binding after an explicit Herdr open.
@@ -442,4 +511,69 @@ fn herdr_binding_refresh(
     let mut updated = binding.clone();
     updated.plan = plan;
     Ok(Some(updated))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use aikit_core::session::SessionSpec;
+
+    fn r(raw: &str) -> ResourceRef {
+        ResourceRef::parse(raw).unwrap()
+    }
+
+    fn bound(provider: &str, extensions: &str) -> SessionSpaceWorkingSurfaceBinding {
+        let plan = SessionSpec::from_toml_str(&format!(
+            "schema = 1\nid = \"room\"\nname = \"room\"\n{extensions}\n[[views]]\nid = \"main\"\n[[views.panes]]\nid = \"shell\"\n"
+        ))
+        .unwrap()
+        .compile()
+        .unwrap();
+        SessionSpaceWorkingSurfaceBinding {
+            binding: r("working-surface/room"),
+            surface: r("surface/terminal/main/shell"),
+            agent_session: r("agent-session/room"),
+            provider: r(provider),
+            plan,
+            plan_key: "main/shell".into(),
+            provenance: vec!["test".into()],
+        }
+    }
+
+    fn recorded(binding: &SessionSpaceWorkingSurfaceBinding) -> Option<String> {
+        binding
+            .plan
+            .backend_extensions
+            .get("cmux")
+            .and_then(|table| table.get("session-id"))
+            .and_then(|value| value.as_str())
+            .map(str::to_owned)
+    }
+
+    #[test]
+    fn a_cmux_room_aikit_opens_gets_a_minted_session_id_recorded_once() {
+        let first = bound(
+            "provider/cmux/current",
+            "[backend.cmux]\ngrouping = \"never\"",
+        );
+        let minted = cmux_ownership(&first).expect("a cmux plan without an id gets one");
+        let id = recorded(&minted).expect("[backend.cmux] session-id");
+        aikit_core::SessionId::parse(&id).expect("an AIKit session id");
+        assert_eq!(
+            minted.plan.backend_extensions["cmux"]
+                .get("grouping")
+                .and_then(|value| value.as_str()),
+            Some("never"),
+            "the plan's other cmux settings stay"
+        );
+        assert_eq!(minted.binding, first.binding);
+        // Recorded once: a later open owns the room by the same id.
+        assert!(cmux_ownership(&minted).is_none());
+        // Two rooms never share an id.
+        let other = cmux_ownership(&bound("provider/cmux/current", "")).unwrap();
+        assert_ne!(recorded(&other), Some(id));
+        // Other providers own their rooms their own way.
+        assert!(cmux_ownership(&bound("provider/tmux/current", "")).is_none());
+        assert!(cmux_ownership(&bound("provider/herdr/current", "")).is_none());
+    }
 }

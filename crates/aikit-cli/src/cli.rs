@@ -5187,12 +5187,19 @@ pub struct ObserveRunArgs {
         allow_negative_numbers = true
     )]
     pub exit_code: Option<i32>,
+    /// The terminal pane it ran in, as a working Surface's capture names it
+    /// (`tmux:%3@<socket>,<pid>`, `herdr:w1:p1@<socket>`, `cmux:surface:20`).
+    /// Repeat for a run inside nested multiplexers.
+    #[arg(long = "pane", value_name = "PANE", requires = "command")]
+    pub pane: Vec<String>,
     /// Read runs from stdin, one JSON object per line: command, cwd, by, at,
-    /// session, exit_code.
+    /// session, exit_code, pane (or panes).
     #[arg(long = "stdin-jsonl")]
     pub stdin_jsonl: bool,
     /// Read one agent-harness `PostToolUse` event from stdin; a shell tool call
-    /// is a run, any other tool's is ignored. Never fails the hook.
+    /// is a run, any other tool's is ignored. The run is kept for the terminal
+    /// pane the hook runs in, named from the multiplexer's variables (TMUX_PANE,
+    /// HERDR_PANE_ID, CMUX_SURFACE_ID). Never fails the hook.
     #[arg(long = "from-hook")]
     pub from_hook: bool,
     /// How many repeats make a pattern.
