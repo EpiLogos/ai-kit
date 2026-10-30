@@ -223,6 +223,13 @@ impl PaletteBackend for V2SurfaceService<'_> {
         }
     }
 
+    /// Forwarded like the others: the world is read on `Service`, from where
+    /// the palette was opened; the trait default would know only an exported
+    /// `AIKIT_PROJECT_ID`, and so rank every world's uses as the person's own.
+    fn familiarity_context(&self) -> Result<aikit_core::FamiliarityContext> {
+        <Service as PaletteBackend>::familiarity_context(self.service)
+    }
+
     fn record_familiarity(&mut self, observation: FamiliarityObservation) -> Result<()> {
         let event = familiarity_observation_event(observation)?;
         EventRecorder::new(self.service.index(), self.service.home().event_log()).record(&event)

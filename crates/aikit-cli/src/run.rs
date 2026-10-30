@@ -242,6 +242,10 @@ pub fn plan_alias(
 /// Every path that runs a capsule calls this: the CLI and `z` and `act invoke`
 /// through the application service, and the multicall shim on its own.
 ///
+/// `world` is the world the run was made in (O-I #820), read by the caller that
+/// knows where it was asked; a run recorded without one counts in the world an
+/// exported `AIKIT_PROJECT_ID` names, or the person's own.
+///
 /// Best effort by design: the command has already happened (or been refused) by
 /// now, and a log that cannot be written must not turn a successful run into a
 /// failed one. The inability is said on stderr.
@@ -249,6 +253,7 @@ pub fn record_run(
     index: &aikit_store::Index,
     log_path: PathBuf,
     context: &aikit_core::context::ContextDescriptor,
+    world: Option<&aikit_core::resource::ResourceRef>,
     capsule: &Capsule,
     outcome: aikit_store::Outcome,
     started: std::time::Instant,
@@ -268,6 +273,9 @@ pub fn record_run(
     };
     if let Some(project) = context.project_id.clone() {
         event = event.for_project(project);
+    }
+    if let Some(world) = world {
+        event = aikit_store::run_event_in_world(event, world);
     }
     if let Err(error) = EventRecorder::new(index, log_path).record(&event) {
         eprintln!(

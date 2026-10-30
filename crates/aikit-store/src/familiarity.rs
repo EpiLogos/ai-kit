@@ -24,6 +24,10 @@ use crate::{Event, EventAction, Index, Timestamp};
 pub const FAMILIARITY_OBSERVATION_EVENT: &str = "resource-use";
 pub const FAMILIARITY_RESET_EVENT: &str = "familiarity-reset";
 const FAMILIARITY_PAYLOAD_KEY: &str = "familiarity";
+/// The world a Run was made in, carried in the Run event's envelope (a Run
+/// records no capsule arguments there). A Central project world
+/// (`project:<id>`) has no `ProjectId` to put in the event's project column.
+const RUN_WORLD_KEY: &str = "familiarity.world";
 const RUN_EVENT: &str = "run";
 const SUCCESS_OUTCOME: &str = "success";
 
@@ -82,6 +86,19 @@ pub fn familiarity_observation_event(observation: FamiliarityObservation) -> Res
         .arguments
         .insert(FAMILIARITY_PAYLOAD_KEY.to_string(), payload);
     Ok(event)
+}
+
+/// Mark a Run event with the world it was made in (O-I #820), so its learned
+/// use replays in that world and no other. A Run left unmarked replays in the
+/// world its `project` column names (an exported `AIKIT_PROJECT_ID`), or the
+/// person's own world when it names none, as every Run recorded before worlds
+/// reached AIKit does.
+#[must_use]
+pub fn run_event_in_world(mut event: Event, world: &ResourceRef) -> Event {
+    event
+        .arguments
+        .insert(RUN_WORLD_KEY.to_string(), world.as_str().to_string());
+    event
 }
 
 /// Build the event representing an explicit learned-ease reset.
@@ -172,11 +189,13 @@ pub fn replay_familiarity(index: &Index) -> Result<FamiliarityReplay> {
                 // therefore cannot contribute learned accessibility.
                 continue;
             };
+            let world = run_world(&event_id, &arguments_json)?;
             learned.record(run_observation(
                 &event_id,
                 timestamp_ns,
                 &capsule_id,
                 project_id.as_deref(),
+                world,
             )?)?;
             observation_events += 1;
             continue;
@@ -229,11 +248,34 @@ pub fn replay_familiarity(index: &Index) -> Result<FamiliarityReplay> {
     })
 }
 
+/// The world a Run event was marked with (`run_event_in_world`), if any. Run
+/// envelopes were never read before worlds reached them, so one that does not
+/// read as a map carries no world, as it always did; a world that is there
+/// must be one.
+fn run_world(event_id: &str, arguments_json: &str) -> Result<Option<ResourceRef>> {
+    let Ok(arguments) = serde_json::from_str::<BTreeMap<String, String>>(arguments_json) else {
+        return Ok(None);
+    };
+    arguments
+        .get(RUN_WORLD_KEY)
+        .map(|world| {
+            ResourceRef::parse(world).map_err(|error| {
+                decode_error(
+                    RUN_EVENT,
+                    event_id,
+                    format!("invalid Run world `{world}`: {error}"),
+                )
+            })
+        })
+        .transpose()
+}
+
 fn run_observation(
     event_id: &str,
     timestamp_ns: i64,
     capsule_id: &str,
     project_id: Option<&str>,
+    world: Option<ResourceRef>,
 ) -> Result<FamiliarityObservation> {
     let destination = ResourceRef::parse(capsule_id).map_err(|error| {
         AikitError::new(
@@ -243,9 +285,12 @@ fn run_observation(
         .with("event_id", event_id)
         .with("capsule_id", capsule_id)
     })?;
-    let project = project_id
-        .map(|project| ResourceRef::parse(&format!("project/{project}")))
-        .transpose()?;
+    let project = match world {
+        Some(world) => Some(world),
+        None => project_id
+            .map(|project| ResourceRef::parse(&format!("project/{project}")))
+            .transpose()?,
+    };
     let observed_at_ms = timestamp_ns.max(0) as u64 / 1_000_000;
     Ok(FamiliarityObservation::destination(
         event_id.to_string(),

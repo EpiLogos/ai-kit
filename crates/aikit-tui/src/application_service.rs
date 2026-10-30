@@ -19,7 +19,7 @@ use aikit_core::resource::{
     ResourceSearchIndex,
 };
 use aikit_core::{
-    explain_history_actions_for, install_explain_history_actions, AikitError, FamiliarityContext,
+    explain_history_actions_for, install_explain_history_actions, AikitError,
     FamiliarityObservation, FamiliarityUse, ForgetScope, KnowledgeAddress, KnowledgeContextPack,
     KnowledgeProviderStatus, KnowledgeReading, KnowledgeRelationView, KnowledgeRoute,
     KnowledgeSources, OperativePathEvidence, RelationDirection, RelationEdge, RelationNode,
@@ -95,7 +95,7 @@ impl<'a> ApplicationService<'a> {
         if let Some(familiarity) = backend.familiarity()? {
             index.apply_familiarity(
                 &familiarity,
-                &familiarity_context(backend.context()),
+                &backend.familiarity_context()?,
                 now_ms(),
                 DEFAULT_FAMILIARITY_HALF_LIFE_MS,
             );
@@ -153,7 +153,7 @@ impl<'a> ApplicationService<'a> {
             index.apply_resolve_path_familiarity(
                 &familiarity,
                 &resolve_path_identity(&expression),
-                &familiarity_context(backend.context()),
+                &backend.familiarity_context()?,
                 now_ms(),
                 DEFAULT_FAMILIARITY_HALF_LIFE_MS,
             );
@@ -331,25 +331,23 @@ impl<'a> ApplicationService<'a> {
         &self,
         resource: &ResourceRef,
     ) -> Result<Option<aikit_core::AccessibilityAssessment>> {
-        Ok(self
-            .backend
-            .familiarity()?
-            .map(|store| {
-                store.assess_destination(
-                    resource,
-                    &familiarity_context(self.backend.context()),
-                    now_ms(),
-                    DEFAULT_FAMILIARITY_HALF_LIFE_MS,
-                )
-            })
-            .filter(|assessment| !assessment.is_empty()))
+        let Some(store) = self.backend.familiarity()? else {
+            return Ok(None);
+        };
+        let assessment = store.assess_destination(
+            resource,
+            &self.backend.familiarity_context()?,
+            now_ms(),
+            DEFAULT_FAMILIARITY_HALF_LIFE_MS,
+        );
+        Ok((!assessment.is_empty()).then_some(assessment))
     }
 
     fn record_destination_use(&mut self, destination: ResourceRef) -> Result<()> {
         let observation = FamiliarityObservation::destination(
             EventId::generate().as_str().to_string(),
             destination,
-            familiarity_context(self.backend.context()),
+            self.backend.familiarity_context()?,
             now_ms(),
         )
         .from_surface(
@@ -363,7 +361,7 @@ impl<'a> ApplicationService<'a> {
         let observation = FamiliarityObservation::destination(
             EventId::generate().as_str().to_string(),
             action.subject.clone(),
-            familiarity_context(self.backend.context()),
+            self.backend.familiarity_context()?,
             now_ms(),
         )
         .via_action(action.action.clone())
@@ -432,7 +430,7 @@ impl<'a> ApplicationService<'a> {
                 activity: None,
                 return_ref: None,
             },
-            familiarity_context(self.backend.context()),
+            self.backend.familiarity_context()?,
             now_ms(),
         )?
         .via_action(resolved.action.action.clone())
@@ -1162,18 +1160,6 @@ impl TuiApplicationService for ApplicationService<'_> {
         };
         self.record_action_use(action)?;
         Ok(outcome)
-    }
-}
-
-fn familiarity_context(context: &aikit_core::ContextDescriptor) -> FamiliarityContext {
-    FamiliarityContext {
-        project: context
-            .project_id
-            .as_ref()
-            .and_then(|project| ResourceRef::parse(&format!("project/{project}")).ok()),
-        actor: None,
-        agency: None,
-        focus: context.task.clone(),
     }
 }
 

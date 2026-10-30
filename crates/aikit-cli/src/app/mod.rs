@@ -2956,17 +2956,29 @@ impl Service {
         .with("name", name.to_string()))
     }
 
-    /// Record one run of `capsule` on the event log; see [`run::record_run`].
+    /// Record one run of `capsule` on the event log, in the world this
+    /// invocation stands in (`knowledge_world`); see [`run::record_run`]. A
+    /// world that cannot be read is said on stderr and the run is still
+    /// recorded, without one.
     fn record_run(
         &self,
         capsule: &Capsule,
         outcome: aikit_store::Outcome,
         started: std::time::Instant,
     ) {
+        let world = self.knowledge_world().unwrap_or_else(|error| {
+            eprintln!(
+                "aikit: the run of {} is recorded without its world: {}",
+                capsule.id,
+                error.message()
+            );
+            None
+        });
         run::record_run(
             &self.index,
             self.home.event_log(),
             &self.descriptor,
+            world.as_ref(),
             capsule,
             outcome,
             started,
@@ -4168,6 +4180,14 @@ impl PaletteBackend for Service {
             aikit_store::FamiliarityReplay::Loaded { store, .. } => Ok(Some(store)),
             aikit_store::FamiliarityReplay::Invalidated { .. } => Ok(None),
         }
+    }
+
+    /// The world this invocation stands in, as knowledge reads it
+    /// (`knowledge_context`): `z`, the palette and Explain rank and record
+    /// learned use where they were asked, not only where an exported
+    /// `AIKIT_PROJECT_ID` says.
+    fn familiarity_context(&self) -> Result<aikit_core::FamiliarityContext> {
+        self.knowledge_context()
     }
 
     fn record_familiarity(
