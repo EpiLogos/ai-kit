@@ -386,3 +386,106 @@ fn snapshot_schema_change_explicitly_invalidates_only_learned_influence() {
     }
     assert_eq!(destination.as_str(), "knowledge-node/auth");
 }
+
+/// O-I #741 (the search line's ✕, DLW §18.4: "Each world you work in keeps its own [history] … Press ✕ beside it and the line
+/// forgets it"): one item is forgotten in one world. Every learned use of the destination recorded in that world's project
+/// context goes — a plain use, a traversed route ending there and an operative path alike, since the line records its opens as
+/// routes — and the same destination's uses in another world, and other destinations in the same world, stay.
+#[test]
+fn forgetting_one_destination_in_one_world_keeps_it_in_every_other_world() {
+    let destination = r("knowledge-node/bollingen");
+    let other = r("knowledge-node/kusnacht");
+    let route = r("knowledge-route:bollingen");
+    let here = context("project/earth", "agent/reader", "walk");
+    let elsewhere = context("project/book", "agent/reader", "walk");
+    let unscoped = FamiliarityContext::default();
+    let step = |resource: &ResourceRef| RouteStepEvidence {
+        resource: resource.clone(),
+        provider: None,
+        lens: None,
+        revision: None,
+    };
+    let mut store = FamiliarityStore::new();
+    let mut n = 0u64;
+    let mut route_use =
+        |store: &mut FamiliarityStore, to: &ResourceRef, ctx: &FamiliarityContext| {
+            n += 1;
+            store
+                .record(
+                    FamiliarityObservation::route(
+                        format!("evt/route/{n}"),
+                        route.clone(),
+                        to.clone(),
+                        vec![step(to)],
+                        ctx.clone(),
+                        n,
+                    )
+                    .unwrap(),
+                )
+                .unwrap();
+        };
+    route_use(&mut store, &destination, &here);
+    route_use(&mut store, &destination, &here);
+    route_use(&mut store, &destination, &elsewhere);
+    route_use(&mut store, &destination, &unscoped);
+    store
+        .record(FamiliarityObservation::destination(
+            "evt/destination/here",
+            destination.clone(),
+            here.clone(),
+            10,
+        ))
+        .unwrap();
+    store
+        .record(FamiliarityObservation::destination(
+            "evt/other/here",
+            other.clone(),
+            here.clone(),
+            11,
+        ))
+        .unwrap();
+
+    let forgotten = store.forget(&ForgetScope::DestinationIn {
+        destination: destination.clone(),
+        project: here.project.clone(),
+    });
+    assert_eq!(forgotten, 3, "both routes and the plain use in this world");
+    assert!(
+        store
+            .assess_route(&route, &destination, &here, 20, 100)
+            .contextual_observations
+            == 0
+    );
+    assert!(store
+        .assess_destination(&destination, &here, 20, 100)
+        .is_empty());
+    assert_eq!(
+        store
+            .assess_route(&route, &destination, &elsewhere, 20, 100)
+            .contextual_observations,
+        1,
+        "the other world keeps its own"
+    );
+    assert_eq!(
+        store
+            .assess_destination(&other, &here, 20, 100)
+            .contextual_observations,
+        1,
+        "another item in this world stays"
+    );
+
+    // The unscoped world (no project) is a world of its own: forgetting there leaves the scoped worlds.
+    assert_eq!(
+        store.forget(&ForgetScope::DestinationIn {
+            destination: destination.clone(),
+            project: None,
+        }),
+        1
+    );
+    assert_eq!(
+        store
+            .assess_route(&route, &destination, &elsewhere, 21, 100)
+            .contextual_observations,
+        1
+    );
+}

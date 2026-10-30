@@ -794,6 +794,7 @@ fn knowledge_route(command: &KnowledgeSub) -> &'static str {
             KnowledgeForgetSub::Destination(_) => "cmd_knowledge_forget_destination",
             KnowledgeForgetSub::Route(_) => "cmd_knowledge_forget_route",
             KnowledgeForgetSub::Project(_) => "cmd_knowledge_forget_project",
+            KnowledgeForgetSub::Here(_) => "cmd_knowledge_forget_here",
             KnowledgeForgetSub::All(_) => "cmd_knowledge_forget_all",
         },
         KnowledgeSub::Code(c) => knowledge_code_route(&c.command),
@@ -3979,6 +3980,10 @@ pub enum KnowledgeForgetSub {
     Destination(KnowledgeForgetResourceArgs),
     Route(KnowledgeForgetResourceArgs),
     Project(KnowledgeForgetResourceArgs),
+    /// Forget one destination in this world only: its learned use in this
+    /// invocation's own context (routes and plain uses alike). The same
+    /// destination in another world, and the operation history, stay.
+    Here(KnowledgeForgetResourceArgs),
     All(KnowledgeForgetAllArgs),
 }
 
