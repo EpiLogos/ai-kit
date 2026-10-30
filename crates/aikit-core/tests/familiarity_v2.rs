@@ -489,3 +489,63 @@ fn forgetting_one_destination_in_one_world_keeps_it_in_every_other_world() {
         1
     );
 }
+
+/// O-I #820 (DLW §18.4: "Each world you work in keeps its own [history]"): the project is the world a use was made in, and
+/// no project is a world too — the person's own, where every use was recorded before worlds reached AIKit. A use made in a
+/// project is not contextual for the person's world, and the person's own use is not contextual for a project: an unscoped
+/// request never stands for every world. The other axes still narrow only when they are asked.
+#[test]
+fn an_unscoped_context_is_the_persons_own_world_not_every_world() {
+    let destination = r("wiki:node:compass");
+    let yours = FamiliarityContext::default();
+    let alpha = FamiliarityContext {
+        project: Some(r("project:Alpha")),
+        ..FamiliarityContext::default()
+    };
+    let mut store = FamiliarityStore::new();
+    for (id, ctx) in [
+        ("evt/yours/1", &yours),
+        ("evt/alpha/1", &alpha),
+        ("evt/alpha/2", &alpha),
+    ] {
+        store
+            .record(FamiliarityObservation::destination(
+                id,
+                destination.clone(),
+                ctx.clone(),
+                1,
+            ))
+            .unwrap();
+    }
+    let in_yours = store.assess_destination(&destination, &yours, 2, 100);
+    let in_alpha = store.assess_destination(&destination, &alpha, 2, 100);
+    assert_eq!(in_yours.observations, 3, "every use is still evidence");
+    assert_eq!(
+        in_yours.contextual_observations, 1,
+        "the person's world counts its own use, not Alpha's"
+    );
+    assert_eq!(
+        in_alpha.contextual_observations, 2,
+        "Alpha counts its own two, not the person's"
+    );
+
+    // An actor-qualified use in the person's world still counts there when no actor is asked.
+    let by_reader = FamiliarityContext {
+        actor: Some(r("agent/reader")),
+        ..FamiliarityContext::default()
+    };
+    store
+        .record(FamiliarityObservation::destination(
+            "evt/yours/reader",
+            destination.clone(),
+            by_reader,
+            1,
+        ))
+        .unwrap();
+    assert_eq!(
+        store
+            .assess_destination(&destination, &yours, 2, 100)
+            .contextual_observations,
+        2
+    );
+}
