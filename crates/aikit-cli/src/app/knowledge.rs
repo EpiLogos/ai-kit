@@ -846,17 +846,87 @@ impl KnowledgeRuntime {
 }
 
 impl Service {
-    pub(super) fn knowledge_context(&self) -> FamiliarityContext {
-        FamiliarityContext {
-            project: self
-                .descriptor
-                .project_id
-                .as_ref()
-                .and_then(|project| ResourceRef::parse(format!("project/{project}")).ok()),
+    /// The context learned use is recorded, ranked, listed and forgotten in:
+    /// the world this invocation stands in (`knowledge_world`).
+    pub(super) fn knowledge_context(&self) -> Result<FamiliarityContext> {
+        Ok(FamiliarityContext {
+            project: self.knowledge_world()?,
             actor: None,
             agency: None,
             focus: self.descriptor.task.clone(),
+        })
+    }
+
+    /// The world this invocation's learned use belongs to (O-I #820: each
+    /// world keeps its own). Callers carry the world by where they ask —
+    /// the O:I kernel runs AIKit in each world's own ground — and AIKit reads
+    /// it the way it already scopes knowledge search there:
+    ///
+    /// * an exported `AIKIT_PROJECT_ID` names it (`project/<prj_…>`): a session
+    ///   that declares its project is taken at its word;
+    /// * a Central Work project — or a checkout of one — is its ProjectCentral
+    ///   identity, spelled as Central spells a project World
+    ///   (`project:<project_id>`);
+    /// * anything else is the person's own world, unscoped (`None`): Central's
+    ///   root and Control, a Work member with no ProjectCentral identity (root
+    ///   lineage applies; no identity is minted from a directory name) and an
+    ///   invocation outside any Central world. Every use recorded before worlds
+    ///   reached AIKit carries no world, so it stays the person's own.
+    ///
+    /// A manifest that is present but unreadable refuses: the use is never
+    /// guessed into another world.
+    fn knowledge_world(&self) -> Result<Option<ResourceRef>> {
+        if let Some(world) = self.knowledge_world.get() {
+            return Ok(world.clone());
         }
+        let world = if let Some(project) = self.descriptor.project_id.as_ref() {
+            Some(ResourceRef::parse(format!("project/{project}"))?)
+        } else {
+            self.central_project_world()?
+        };
+        Ok(self.knowledge_world.get_or_init(|| world).clone())
+    }
+
+    fn central_project_world(&self) -> Result<Option<ResourceRef>> {
+        let root = self
+            .descriptor
+            .project_root
+            .as_deref()
+            .unwrap_or(&self.invocation_cwd);
+        let Some(central_root) = self.knowledge_central_root(root) else {
+            return Ok(None);
+        };
+        let Some(member) = self.invocation_project_member(central_root, root) else {
+            return Ok(None);
+        };
+        let project_root = central_root.join("Work").join(&member);
+        match fs::symlink_metadata(project_root.join("ProjectCentral/project.json")) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => {
+                return Err(aikit_core::AikitError::new(
+                    "knowledge.world_unresolved",
+                    format!("Work/{member}'s ProjectCentral identity is unreadable: {error}"),
+                )
+                .with_io_source(error))
+            }
+            Ok(_) => {}
+        }
+        let native =
+            NativeWorkRepoProject::inspect(&project_root, &member, None).map_err(|error| {
+                aikit_core::AikitError::new(
+                    "knowledge.world_unresolved",
+                    format!("Work/{member}'s ProjectCentral identity is unreadable: {error}"),
+                )
+                .with("native_code", error.code())
+                .with_io_source_from(&error)
+            })?;
+        let id = &native.project().project_id;
+        let world = if id.starts_with("project:") {
+            id.clone()
+        } else {
+            format!("project:{id}")
+        };
+        Ok(Some(ResourceRef::parse(world)?))
     }
 
     fn knowledge_store(&self) -> KnowledgeApplicationStore {
@@ -963,7 +1033,7 @@ impl Service {
         // including a nested Flow read, must not inherit a held material
         // snapshot or borrow another operation's runtime.
         let runtime = self.materialize_knowledge_runtime(need, share, deadline)?;
-        let application = runtime.application(self.knowledge_context());
+        let application = runtime.application(self.knowledge_context()?);
         operation(&runtime, application)
     }
 
@@ -1155,7 +1225,7 @@ impl Service {
         };
         let mut result = runtime
             .application_with_project_scope(
-                self.knowledge_context(),
+                self.knowledge_context()?,
                 scoped_display.as_deref(),
                 now_field,
                 work_repos,
@@ -1249,7 +1319,7 @@ impl Service {
         let observation = aikit_core::FamiliarityObservation::destination(
             observation_id.clone(),
             resource.clone(),
-            self.knowledge_context(),
+            self.knowledge_context()?,
             now_ms(),
         )
         .from_surface(ResourceRef::parse("surface/aikit/knowledge")?);
@@ -1274,7 +1344,7 @@ impl Service {
         if store.is_empty() {
             return Ok(());
         }
-        let context = self.knowledge_context();
+        let context = self.knowledge_context()?;
         let now = now_ms();
         let history = self.knowledge_store().history(Some(&context), None)?;
         let mut influenced = false;
@@ -1877,7 +1947,7 @@ impl Service {
         resource: Option<&ResourceRef>,
     ) -> Result<Vec<KnowledgeApplicationReceipt>> {
         self.knowledge_store()
-            .history(Some(&self.knowledge_context()), resource)
+            .history(Some(&self.knowledge_context()?), resource)
     }
 
     pub fn knowledge_status(&self) -> Result<KnowledgeProviderStatus> {
@@ -1924,7 +1994,7 @@ impl Service {
     pub fn knowledge_forget_here(&mut self, destination: ResourceRef) -> Result<ForgetScope> {
         let scope = ForgetScope::DestinationIn {
             destination,
-            project: self.knowledge_context().project,
+            project: self.knowledge_world()?,
         };
         self.knowledge_forget(scope.clone())?;
         Ok(scope)

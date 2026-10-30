@@ -18,6 +18,7 @@ pub const DEFAULT_FAMILIARITY_HALF_LIFE_MS: u64 = 14 * 24 * 60 * 60 * 1000;
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, Default)]
 pub struct FamiliarityContext {
+    /// The world the use belongs to; `None` is the person's own world.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub project: Option<ResourceRef>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -612,8 +613,13 @@ impl FamiliarityStore {
     }
 }
 
+/// The project is the world a use was made in, and no project is a world too:
+/// the person's own, where every use was recorded before worlds reached AIKit
+/// (O-I #820). So the project axis matches exactly — an unscoped request is the
+/// person's world, never every world, as `ForgetScope::DestinationIn` and
+/// receipt history already read it. The other axes narrow only when asked.
 fn contexts_match(requested: &FamiliarityContext, observed: &FamiliarityContext) -> bool {
-    optional_axis_matches(&requested.project, &observed.project)
+    requested.project == observed.project
         && optional_axis_matches(&requested.actor, &observed.actor)
         && optional_axis_matches(&requested.agency, &observed.agency)
         && optional_axis_matches(&requested.focus, &observed.focus)

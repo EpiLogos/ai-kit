@@ -345,6 +345,9 @@ pub struct Service {
     /// composition but never gated by it: when composition fails, the reading
     /// proceeds without the actor slice and the reason is disclosed here.
     context_composition_notes: std::cell::RefCell<Vec<String>>,
+    /// The world this invocation's learned use belongs to, read once from
+    /// where it stands (`knowledge_world`).
+    knowledge_world: std::cell::OnceCell<Option<aikit_core::resource::ResourceRef>>,
 }
 
 impl Service {
@@ -604,6 +607,7 @@ impl Service {
             workcell_run_reading: std::cell::RefCell::new(None),
             model_roster_reading: std::cell::RefCell::new(None),
             context_composition_notes: std::cell::RefCell::new(Vec::new()),
+            knowledge_world: std::cell::OnceCell::new(),
         })
     }
 

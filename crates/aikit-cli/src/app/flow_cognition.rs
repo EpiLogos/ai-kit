@@ -611,7 +611,7 @@ impl Service {
             let observation = FamiliarityObservation::destination(
                 observation_id.clone(),
                 flow_ref.clone(),
-                self.knowledge_context(),
+                self.knowledge_context()?,
                 now_ms(),
             )
             .from_surface(ResourceRef::parse(KNOWLEDGE_SURFACE_REF)?)
@@ -857,7 +857,7 @@ impl Service {
             let observation = FamiliarityObservation::destination(
                 observation_id.clone(),
                 ResourceRef::parse(now_ref)?,
-                self.knowledge_context(),
+                self.knowledge_context()?,
                 now_ms(),
             )
             .from_surface(ResourceRef::parse(KNOWLEDGE_SURFACE_REF)?)
