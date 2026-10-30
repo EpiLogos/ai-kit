@@ -135,6 +135,7 @@ where
                 &index,
                 home.event_log(),
                 &view.context,
+                None,
                 &capsule,
                 Outcome::Denied {
                     code: "trust.required".to_string(),
@@ -162,6 +163,7 @@ where
                 &index,
                 home.event_log(),
                 &view.context,
+                None,
                 &capsule,
                 run::run_outcome(&report),
                 started,
@@ -174,6 +176,7 @@ where
                 &index,
                 home.event_log(),
                 &view.context,
+                None,
                 &capsule,
                 Outcome::Failure {
                     code: error.code().to_string(),

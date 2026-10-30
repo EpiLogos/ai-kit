@@ -875,7 +875,7 @@ impl Service {
     ///
     /// A manifest that is present but unreadable refuses: the use is never
     /// guessed into another world.
-    fn knowledge_world(&self) -> Result<Option<ResourceRef>> {
+    pub(super) fn knowledge_world(&self) -> Result<Option<ResourceRef>> {
         if let Some(world) = self.knowledge_world.get() {
             return Ok(world.clone());
         }

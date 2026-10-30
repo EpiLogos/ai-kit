@@ -10,9 +10,9 @@ use std::collections::BTreeMap;
 use aikit_core::resource::{ResolveExpression, ResourceIndex, ResourceRef, SourceAuthority};
 use aikit_core::session_space::SessionSpaceRef;
 use aikit_core::{
-    explain_resource_evidence, EvidenceProvenance, ExplainEvidence, ExplainFact,
-    FamiliarityContext, GenerationId, HistoryEvidence, HistoryKind, HistoryReadModel,
-    HistoryRecoverability, Result, DEFAULT_FAMILIARITY_HALF_LIFE_MS, EXPLAIN_HISTORY_VERSION,
+    explain_resource_evidence, EvidenceProvenance, ExplainEvidence, ExplainFact, GenerationId,
+    HistoryEvidence, HistoryKind, HistoryReadModel, HistoryRecoverability, Result,
+    DEFAULT_FAMILIARITY_HALF_LIFE_MS, EXPLAIN_HISTORY_VERSION,
 };
 use aikit_store::{
     all_contexts_generation_history_evidence, compare_generation_worlds,
@@ -144,7 +144,7 @@ impl ExplainHistoryApplicationService for ApplicationService<'_> {
         if let Some(store) = backend.familiarity()? {
             let assessment = store.assess_destination(
                 resource,
-                &familiarity_context(backend.context()),
+                &backend.familiarity_context()?,
                 now_ms(),
                 DEFAULT_FAMILIARITY_HALF_LIFE_MS,
             );
@@ -306,18 +306,6 @@ impl ExplainHistoryApplicationService for ApplicationService<'_> {
             )
         })?;
         compare_generation_worlds(home, &backend.context().context_id, before, after)
-    }
-}
-
-fn familiarity_context(context: &aikit_core::ContextDescriptor) -> FamiliarityContext {
-    FamiliarityContext {
-        project: context
-            .project_id
-            .as_ref()
-            .and_then(|project| ResourceRef::parse(&format!("project/{project}")).ok()),
-        actor: None,
-        agency: None,
-        focus: context.task.clone(),
     }
 }
 

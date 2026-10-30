@@ -102,8 +102,8 @@ pub use edit::{OverlayDocument, ProfileDocument};
 pub use events::{Event, EventAction, EventRecorder, Outcome, Timestamp};
 pub use familiarity::{
     append_familiarity_observation, append_familiarity_reset, familiarity_observation_event,
-    familiarity_reset_event, replay_familiarity, FamiliarityReplay, FAMILIARITY_OBSERVATION_EVENT,
-    FAMILIARITY_RESET_EVENT,
+    familiarity_reset_event, replay_familiarity, run_event_in_world, FamiliarityReplay,
+    FAMILIARITY_OBSERVATION_EVENT, FAMILIARITY_RESET_EVENT,
 };
 pub use generation::{
     CommittedGeneration, GenerationBuilder, GenerationMetadata, StagedGeneration,

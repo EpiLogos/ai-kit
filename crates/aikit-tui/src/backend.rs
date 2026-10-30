@@ -33,9 +33,9 @@ use aikit_core::session_space_application::{
     SessionSpaceNativeObservation, SessionSpacePreview, SessionSpaceReconstructionReport,
 };
 use aikit_core::{
-    FamiliarityObservation, FamiliarityStore, ForgetScope, KnowledgeAddress, KnowledgeContextPack,
-    KnowledgeExplanation, KnowledgeProviderStatus, KnowledgeReading, KnowledgeRelationView,
-    KnowledgeRoute, KnowledgeSearchResult, KnowledgeSources, Result,
+    FamiliarityContext, FamiliarityObservation, FamiliarityStore, ForgetScope, KnowledgeAddress,
+    KnowledgeContextPack, KnowledgeExplanation, KnowledgeProviderStatus, KnowledgeReading,
+    KnowledgeRelationView, KnowledgeRoute, KnowledgeSearchResult, KnowledgeSources, Result,
 };
 use aikit_store::inbox::{Candidate, CandidateState, PromotionEdits, Similarity};
 use aikit_store::{
@@ -846,6 +846,25 @@ pub trait PaletteBackend {
 
     fn familiarity(&self) -> Result<Option<FamiliarityStore>> {
         Ok(None)
+    }
+
+    /// The context learned use is recorded, ranked and explained in: the world
+    /// this backend stands in (O-I #820), its task the focus. The production
+    /// backend reads the world from where it was asked, through the one
+    /// resolver every AIKit surface shares; this default, for a backend that
+    /// cannot see the ground, has only an exported `AIKIT_PROJECT_ID` to go on,
+    /// and without one it is the person's own world.
+    fn familiarity_context(&self) -> Result<FamiliarityContext> {
+        let context = self.context();
+        Ok(FamiliarityContext {
+            project: context
+                .project_id
+                .as_ref()
+                .and_then(|project| ResourceRef::parse(&format!("project/{project}")).ok()),
+            actor: None,
+            agency: None,
+            focus: context.task.clone(),
+        })
     }
 
     fn record_familiarity(&mut self, _observation: FamiliarityObservation) -> Result<()> {

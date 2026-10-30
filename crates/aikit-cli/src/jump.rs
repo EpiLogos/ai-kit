@@ -18,10 +18,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use aikit_core::capsule::Kind;
 use aikit_core::frecency::{self, Candidate, Jump};
 use aikit_core::id::CapsuleId;
-use aikit_core::resource::{
-    resolve_expression, resolve_path_identity, ResolveExpression, ResourceRef,
-};
-use aikit_core::{FamiliarityContext, Result, DEFAULT_FAMILIARITY_HALF_LIFE_MS};
+use aikit_core::resource::{resolve_expression, resolve_path_identity, ResolveExpression};
+use aikit_core::{Result, DEFAULT_FAMILIARITY_HALF_LIFE_MS};
 use aikit_tui::backend::PaletteBackend;
 
 use crate::app::Service;
@@ -111,7 +109,9 @@ fn action_for(service: &Service, capsule: &CapsuleId) -> JumpAction {
 pub fn plan(service: &Service, query: &str) -> Result<JumpPlan> {
     let trimmed = query.trim();
     let mut index = PaletteBackend::navigation_index(service);
-    let context = familiarity_context(service);
+    // The world `z` is asked in, read by the same resolver as Search, the
+    // palette and knowledge (O-I #820), so its learned order is that world's.
+    let context = PaletteBackend::familiarity_context(service)?;
     let now = now_ms();
     if let Some(familiarity) = PaletteBackend::familiarity(service)? {
         index.apply_familiarity(
@@ -173,19 +173,6 @@ pub fn plan(service: &Service, query: &str) -> Result<JumpPlan> {
         jump,
         ranked,
     })
-}
-
-fn familiarity_context(service: &Service) -> FamiliarityContext {
-    FamiliarityContext {
-        project: service
-            .descriptor()
-            .project_id
-            .as_ref()
-            .and_then(|project| ResourceRef::parse(format!("project/{project}")).ok()),
-        actor: None,
-        agency: None,
-        focus: service.descriptor().task.clone(),
-    }
 }
 
 fn now_ms() -> u64 {
