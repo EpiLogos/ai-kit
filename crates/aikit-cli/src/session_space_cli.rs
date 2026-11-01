@@ -10,7 +10,7 @@
 //! main binary can forward to it. The `encounter-*-exec` variants still replace
 //! the process via `exec()` and never return.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
 use aikit_store::home::AikitHome;
@@ -947,7 +947,7 @@ fn run(cli: Cli) -> Result<()> {
                         format!("{label} must be a file"),
                     ));
                 }
-                Ok(path)
+                Ok(stable_product_link(path))
             }
             fn directory(path: PathBuf, label: &str) -> Result<PathBuf> {
                 let path = path.canonicalize().map_err(|error| {
@@ -1595,9 +1595,69 @@ fn emit<T: Serialize>(value: &T) -> Result<()> {
     Ok(())
 }
 
+/// A suite product binary canonicalizes to its content-hashed install dir
+/// (`OI/products/<name>/<hash>/bin/<file>`), which the next `oi update`
+/// removes. When the suite's stable link (`OI/bin/<file>`) resolves to that
+/// same file, record the link so a registered provider follows the current
+/// install; any other path is returned unchanged.
+fn stable_product_link(installed: PathBuf) -> PathBuf {
+    // <suite>/products/<name>/<hash>/bin/<file>
+    let named = |depth: usize| installed.ancestors().nth(depth).and_then(Path::file_name);
+    let versioned = installed.file_name().is_some()
+        && named(1).is_some_and(|n| n == "bin")
+        && named(2)
+            .and_then(|n| n.to_str())
+            .is_some_and(|n| n.len() >= 16 && n.bytes().all(|b| b.is_ascii_hexdigit()))
+        && named(4).is_some_and(|n| n == "products");
+    let suite = installed.ancestors().nth(5).filter(|_| versioned);
+    let (Some(suite), Some(file)) = (suite, installed.file_name()) else {
+        return installed;
+    };
+    let stable = suite.join("bin").join(file);
+    match stable.canonicalize() {
+        Ok(resolved) if resolved == installed => stable,
+        _ => installed,
+    }
+}
+
 #[cfg(test)]
 mod epi_prime_cli_tests {
     use super::*;
+
+    #[test]
+    fn versioned_product_install_records_the_stable_suite_link() {
+        let suite = tempfile::tempdir().unwrap();
+        let suite = suite.path().canonicalize().unwrap();
+        let hash = "6c08ced2c8167127e4cdc955e4c5f76ad22e20db511890aacff07f8d288751db";
+        let install_bin = suite.join("products/ai-kit").join(hash).join("bin");
+        std::fs::create_dir_all(&install_bin).unwrap();
+        std::fs::create_dir_all(suite.join("bin")).unwrap();
+        let installed = install_bin.join("aikit");
+        std::fs::write(&installed, b"x").unwrap();
+        std::os::unix::fs::symlink(&installed, suite.join("bin/aikit")).unwrap();
+
+        assert_eq!(
+            stable_product_link(installed.clone()),
+            suite.join("bin/aikit")
+        );
+
+        // a link that points at another install is not this file's link
+        let other = suite
+            .join("products/ai-kit")
+            .join(hash.replace('6', "7"))
+            .join("bin");
+        std::fs::create_dir_all(&other).unwrap();
+        std::fs::write(other.join("aikit"), b"y").unwrap();
+        assert_eq!(
+            stable_product_link(other.join("aikit")),
+            other.join("aikit")
+        );
+
+        // paths outside a versioned install are untouched
+        let plain = suite.join("bin-elsewhere");
+        std::fs::write(&plain, b"z").unwrap();
+        assert_eq!(stable_product_link(plain.clone()), plain);
+    }
 
     #[test]
     fn epi_prime_configuration_parses_as_boxed_owner_arguments() {
