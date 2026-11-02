@@ -3643,6 +3643,16 @@ pub struct FlowContemplateArgs {
     /// model, Agent, Agency and AgentSession for attribution.
     #[arg(long, value_name = "FILE")]
     pub runtime: Option<std::path::PathBuf>,
+    /// Contemplate a NOW only: the execution record of the preflight the host
+    /// read (`aikit.now-contemplation/v1`). A record of another stream is
+    /// refused. Goes with `--distilled`.
+    #[arg(long, value_name = "FILE", requires = "distilled")]
+    pub record: Option<std::path::PathBuf>,
+    /// Contemplate a NOW only: the learning the host distilled from the
+    /// stream itself, as plain text. It is proposed against a fresh preflight;
+    /// the T-prime write stays Central's. Goes with `--record`.
+    #[arg(long, value_name = "FILE", requires = "record")]
+    pub distilled: Option<std::path::PathBuf>,
 }
 
 #[derive(Debug, Args)]

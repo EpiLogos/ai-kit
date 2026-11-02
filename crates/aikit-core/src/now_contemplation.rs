@@ -41,6 +41,12 @@ pub struct NowFixture {
     pub actor: Option<String>,
     #[serde(default)]
     pub actor_kind: Option<String>,
+    /// The session that kept the thought, as the agent's own session ref.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_session_ref: Option<String>,
+    /// The thought's reading as Central recorded it, e.g. its T level.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reading: Option<String>,
     #[serde(default)]
     pub content: Option<String>,
 }
@@ -387,6 +393,26 @@ mod tests {
     }
 
     #[test]
+    fn a_fixture_keeps_its_reading_and_the_session_that_kept_it() {
+        let stream = NowFixturesSeam::parse(
+            r#"{
+                "schema": "central.thoughts-reading/v1",
+                "now_ref": "central:now:project:p:abc",
+                "fixtures": [
+                    {"file": "epii-t3-2026-11-02.md", "revision": "central.content-fnv1a64/v1:1:aa", "conforming": true, "day": "2026-11-02", "actor": "agent/epii", "actor_kind": "agent", "agent_session_ref": "pi-session:one", "reading": "T3", "content": "rest and work pull against each other"}
+                ]
+            }"#,
+        )
+        .unwrap();
+        let fixture = &stream.fixtures[0];
+        assert_eq!(fixture.reading.as_deref(), Some("T3"));
+        assert_eq!(fixture.agent_session_ref.as_deref(), Some("pi-session:one"));
+        let carried = serde_json::to_value(fixture).unwrap();
+        assert_eq!(carried["reading"], "T3");
+        assert_eq!(carried["agent_session_ref"], "pi-session:one");
+    }
+
+    #[test]
     fn preflight_names_the_stream_and_digests_deterministically() {
         let stream = seam();
         let first = now_contemplate_preflight(&stream).unwrap();
@@ -469,6 +495,8 @@ mod tests {
             day: Some("2026-09-13".into()),
             actor: None,
             actor_kind: None,
+            agent_session_ref: None,
+            reading: None,
             content: Some("late body".into()),
         });
         assert_eq!(

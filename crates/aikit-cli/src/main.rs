@@ -4462,6 +4462,20 @@ fn now_subject(a: &FlowContemplateArgs) -> Result<Option<(String, aikit_core::No
     )))
 }
 
+/// A learning the host distilled from the NOW's stream on its own side of
+/// the seam (the agent body that kept the thoughts), handed over as text.
+struct SuppliedDistillation(String);
+
+impl aikit_core::NowContemplateExecutor for SuppliedDistillation {
+    fn distill(
+        &mut self,
+        _preflight: &aikit_core::NowContemplationPreflight,
+        _fixtures: &[aikit_core::NowFixture],
+    ) -> Result<String> {
+        Ok(std::mem::take(&mut self.0))
+    }
+}
+
 fn cmd_flow(cwd: &std::path::Path, c: FlowCmd) -> Result<Reply> {
     use aikit_core::knowledge_living::KnowledgeChangeHorizon;
     use aikit_core::model_runtime::ModelRuntimeReadModel;
@@ -4482,6 +4496,12 @@ fn cmd_flow(cwd: &std::path::Path, c: FlowCmd) -> Result<Reply> {
     let warnings = diagnostic_warnings(&service);
     let data = match c.command {
         FlowSub::Preflight(a) => {
+            if a.record.is_some() || a.distilled.is_some() {
+                return Err(AikitError::new(
+                    "flow.preflight_executes_nothing",
+                    "preflight takes no record or distillation; contemplate takes them",
+                ));
+            }
             if let Some(subject) = now_subject(&a)? {
                 let (now_ref, seam) = subject;
                 jval!(service.now_contemplate_preflight_receipt(
@@ -4515,11 +4535,38 @@ fn cmd_flow(cwd: &std::path::Path, c: FlowCmd) -> Result<Reply> {
         FlowSub::Contemplate(a) => {
             if let Some(subject) = now_subject(&a)? {
                 let (now_ref, seam) = subject;
-                jval!(service.now_contemplate_preflight_receipt(
-                    &now_ref,
-                    &seam,
-                    "no host executor supplied; contemplate is never auto-invoked and the CLI surface carries no Agent/model executor",
-                )?)
+                if let (Some(record), Some(distilled)) = (&a.record, &a.distilled) {
+                    // The host distilled the stream itself; the record gates
+                    // it against a fresh preflight before it is proposed.
+                    let record = read_json::<aikit_core::NowContemplateRecord>(
+                        record,
+                        "now.contemplate_record_unreadable",
+                    )?;
+                    let learning = std::fs::read_to_string(distilled).map_err(|error| {
+                        AikitError::new(
+                            "now.contemplate_distillation_unreadable",
+                            format!("cannot read {}: {error}", distilled.display()),
+                        )
+                    })?;
+                    let mut host = SuppliedDistillation(learning);
+                    jval!(service.now_contemplate_with_record(
+                        &now_ref,
+                        &seam,
+                        &record,
+                        Some(&mut host),
+                    )?)
+                } else {
+                    jval!(service.now_contemplate_preflight_receipt(
+                        &now_ref,
+                        &seam,
+                        "no host executor supplied; contemplate is never auto-invoked and the CLI surface carries no Agent/model executor",
+                    )?)
+                }
+            } else if a.record.is_some() || a.distilled.is_some() {
+                return Err(AikitError::new(
+                    "flow.distillation_needs_a_now",
+                    "a supplied distillation contemplates a NOW's stream: name it with `--now-ref`",
+                ));
             } else {
                 let basis = FlowContemplateBasis {
                     horizon: a
