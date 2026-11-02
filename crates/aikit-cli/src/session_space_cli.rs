@@ -83,7 +83,7 @@ struct EpiPrimeConfigureArgs {
     /// Central root paired with --central-ctrl-bin.
     #[arg(long)]
     central_root: Option<PathBuf>,
-    /// Optional Project key used as the Prime Skill's default NOW scope.
+    /// Optional Project key used as the body's default NOW scope.
     #[arg(long)]
     central_project: Option<String>,
 }
@@ -1058,7 +1058,7 @@ fn run(cli: Cli) -> Result<()> {
                 "body_ref":"agent-body/epi-prime-ql",
                 "body_revision":body_revision,
                 "ql_revision":ql_revision,
-                "model_selection":"Prime native configured model unless an explicit AIKit model policy overrides it",
+                "model_selection":"the body's own pi default model unless an explicit AIKit model policy overrides it",
                 "standing":"configured-not-started"
             }))
         }
