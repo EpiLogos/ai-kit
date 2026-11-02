@@ -1,7 +1,7 @@
 //! Actual folded CLI configuration and native on-disk provider admission.
 //! This boundary validates file/directory existence, not acting-body ABI. The
 //! real compiled AIKit image supplies file witnesses; no provider is launched,
-//! emulated, or reported as a working Actuation/QL/Prime body.
+//! emulated, or reported as a working Actuation/QL/pi body.
 #![cfg(unix)]
 
 use aikit_adapters::runner::{Output, SystemRunner};
@@ -92,7 +92,7 @@ impl Fixture {
             .arg("encounter-epi-prime-configure");
         for flag in [
             "--launcher",
-            "--prime-bin",
+            "--pi-bin",
             "--ql-bin",
             "--research-bin",
             "--faculty-config",
@@ -104,9 +104,7 @@ impl Fixture {
         }
         command
             .args(["--ql-revision", QL_REVISION])
-            .args(["--body-revision", BODY_REVISION])
-            .arg("--skill-path")
-            .arg(self.central());
+            .args(["--body-revision", BODY_REVISION]);
         for (flag, path) in owner {
             command.arg(flag).arg(path);
         }
@@ -185,6 +183,15 @@ impl Fixture {
             Some("agent-body/epi-prime-ql")
         );
         assert_eq!(provider.body_revision.as_deref(), Some(BODY_REVISION));
+        // The body is its own pinned pi, spoken to as any pi body is.
+        assert_eq!(
+            provider.protocol,
+            aikit_cli::encounter_service::EncounterProtocol::PiRpc
+        );
+        assert!(value(&provider.argv, "--pi-bin").is_some());
+        for gone in ["--prime-bin", "--skill-path"] {
+            assert_eq!(value(&provider.argv, gone), None);
+        }
         assert!(provider.now_context.is_none());
         assert!(provider.model_policy.is_none());
         // Configure never constructs the resident store or starts an owner.

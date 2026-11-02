@@ -52,23 +52,23 @@ struct EpiPrimeConfigureArgs {
     provider_id: String,
     #[arg(long)]
     launcher: PathBuf,
+    /// The body's own pi (`pi.cli` in the installation), which the launcher
+    /// refuses at any other path.
     #[arg(long)]
-    prime_bin: PathBuf,
+    pi_bin: PathBuf,
     #[arg(long)]
     ql_bin: PathBuf,
     #[arg(long)]
     ql_revision: String,
     #[arg(long)]
     body_revision: String,
-    #[arg(long)]
-    skill_path: PathBuf,
     /// The packaged binding extension (`ql-faculty-bindings.ts`) the launcher
     /// loads explicitly with `-e` (discovery stays off).
     #[arg(long)]
     extension: PathBuf,
     /// The QL binding file (`actuation.prime-faculty-installation/v1`) the
-    /// launcher verifies before Prime starts; installed by
-    /// `distribution/prime-epi/tools/epi-distribution.mjs install`.
+    /// launcher verifies, with the body's pi and core prompt, before pi starts;
+    /// installed by EpiLogos/Epi-Prime `tools/epi-distribution.mjs install`.
     #[arg(long)]
     installation: PathBuf,
     #[arg(long)]
@@ -259,9 +259,9 @@ enum Command {
         #[arg(long)]
         agent_session: String,
     },
-    /// Configure the installable Epi-Logos Prime-QL body over Prime RPC.
-    /// Paths are resolved now; mode selection later starts nothing until the
-    /// ordinary Encounter open/first-Send boundary.
+    /// Configure the installable Epi-Logos QL body: its own pinned pi, spoken
+    /// to over pi RPC. Paths are resolved now; mode selection later starts
+    /// nothing until the ordinary Encounter open/first-Send boundary.
     EncounterEpiPrimeConfigure {
         #[command(flatten)]
         args: Box<EpiPrimeConfigureArgs>,
@@ -906,11 +906,10 @@ fn run(cli: Cli) -> Result<()> {
             let EpiPrimeConfigureArgs {
                 provider_id,
                 launcher,
-                prime_bin,
+                pi_bin,
                 ql_bin,
                 ql_revision,
                 body_revision,
-                skill_path,
                 extension,
                 installation,
                 research_bin,
@@ -967,9 +966,8 @@ fn run(cli: Cli) -> Result<()> {
             exact_revision(&ql_revision, "QL revision")?;
             exact_revision(&body_revision, "Actuation body revision")?;
             let launcher = file(launcher, "Prime-QL launcher")?;
-            let prime_bin = file(prime_bin, "Prime Agent binary")?;
+            let pi_bin = file(pi_bin, "the body's pi")?;
             let ql_bin = file(ql_bin, "QL binary")?;
-            let skill_path = directory(skill_path, "Prime QL relational skill")?;
             let extension = file(extension, "Prime Epi/QL binding extension")?;
             let installation = file(installation, "Prime QL binding (installation) file")?;
             let research_bin = file(research_bin, "Actuation research binary")?;
@@ -1002,14 +1000,12 @@ fn run(cli: Cli) -> Result<()> {
             )?;
             let mut argv = vec![
                 launcher.display().to_string(),
-                "--prime-bin".into(),
-                prime_bin.display().to_string(),
+                "--pi-bin".into(),
+                pi_bin.display().to_string(),
                 "--ql-bin".into(),
                 ql_bin.display().to_string(),
                 "--ql-revision".into(),
                 ql_revision.clone(),
-                "--skill-path".into(),
-                skill_path.display().to_string(),
                 "--extension".into(),
                 extension.display().to_string(),
                 "--installation".into(),
@@ -1038,7 +1034,10 @@ fn run(cli: Cli) -> Result<()> {
             crate::encounter_service::EncounterService::configure(
                 home,
                 crate::encounter_service::EncounterProvider {
-                    protocol: crate::encounter_service::EncounterProtocol::PrimeRpc,
+                    // The body is pi, so AIKit speaks to it as to any pi body;
+                    // Prime RPC's resume and child-message channel were bound to
+                    // Prime 0.9.4's own internals.
+                    protocol: crate::encounter_service::EncounterProtocol::PiRpc,
                     id: provider_id.clone(),
                     label: "Epi-Logos Prime-QL".into(),
                     argv,
@@ -1668,16 +1667,14 @@ mod epi_prime_cli_tests {
             "epi-prime-ql",
             "--launcher",
             "/opt/actuation-epi-prime",
-            "--prime-bin",
-            "/opt/prime-agent",
+            "--pi-bin",
+            "/opt/pi/dist/bundle/cli.js",
             "--ql-bin",
             "/opt/ql",
             "--ql-revision",
             "89ca4088ea47fe626c23c2b11efe2d38bdfcd1f7",
             "--body-revision",
             "161b869740c54dc325ad1d6aef765dbf32920073",
-            "--skill-path",
-            "/opt/ql-relational",
             "--extension",
             "/opt/ql-faculty-bindings.ts",
             "--installation",
@@ -1699,6 +1696,7 @@ mod epi_prime_cli_tests {
             panic!("expected Prime-QL configure command");
         };
         assert_eq!(args.provider_id, "epi-prime-ql");
+        assert_eq!(args.pi_bin, PathBuf::from("/opt/pi/dist/bundle/cli.js"));
         assert_eq!(args.ql_revision, "89ca4088ea47fe626c23c2b11efe2d38bdfcd1f7");
         assert_eq!(
             args.body_revision,
@@ -1714,13 +1712,13 @@ mod epi_prime_cli_tests {
 
     #[test]
     fn omitting_the_extension_or_binding_is_a_parse_refusal() {
-        for omitted in ["--extension", "--installation"] {
+        for omitted in ["--pi-bin", "--extension", "--installation"] {
             let mut argv = vec![
                 "aikit-session-space",
                 "encounter-epi-prime-configure",
                 "--launcher",
                 "/o/l",
-                "--prime-bin",
+                "--pi-bin",
                 "/o/p",
                 "--ql-bin",
                 "/o/q",
@@ -1728,8 +1726,6 @@ mod epi_prime_cli_tests {
                 "89ca4088ea47fe626c23c2b11efe2d38bdfcd1f7",
                 "--body-revision",
                 "161b869740c54dc325ad1d6aef765dbf32920073",
-                "--skill-path",
-                "/o/s",
                 "--extension",
                 "/o/e.ts",
                 "--installation",
