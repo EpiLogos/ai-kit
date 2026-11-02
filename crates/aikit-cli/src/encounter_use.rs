@@ -10,8 +10,9 @@
 //! 2. the decision provider and invocation behind that prepared view (carried
 //!    by the receipt from the view's own basis), and which sources the decision
 //!    selected into it (the view, read back from Redis when asked);
-//! 3. the QL operations the body made: the `ql_*` tool calls and results the
-//!    journal recorded, the Python `ql_relational.*` calls inside `ipython`
+//! 3. the QL operations the body made: the `ql_*`, `vak_compose`,
+//!    `logos_return` and Night `reflect_*` tool calls and results the journal
+//!    recorded, the Python `ql_relational.*` calls inside `ipython`
 //!    tool calls, and the owner's own content-addressed faculty receipts
 //!    (`actuation.prime-ql-operation/v1`, keyed by the agent session) that say
 //!    the QL owner executed them.
@@ -36,6 +37,15 @@ const QL_TOOLS: [&str; 6] = [
     "ql_validate_determination",
     "ql_invoke",
 ];
+// The pi body's own QL instruments: its compositions and returns (Actuation's
+// QL agent extension) and its Night readings.
+const BODY_QL_TOOLS: [&str; 2] = ["vak_compose", "logos_return"];
+const NIGHT_READING: &str = "reflect_";
+
+fn ql_tool(name: &str) -> bool {
+    QL_TOOLS.contains(&name) || BODY_QL_TOOLS.contains(&name) || name.starts_with(NIGHT_READING)
+}
+
 const NOW_KINDS: [&str; 4] = [
     "now-context-delivered",
     "now-context-degraded",
@@ -214,7 +224,7 @@ fn ql_operations(
         let payload = &kind["payload"];
         let name = payload["toolName"].as_str().unwrap_or_default();
         match kind["kind"].as_str() {
-            Some("tool-result") if QL_TOOLS.contains(&name) => {
+            Some("tool-result") if ql_tool(name) => {
                 let text = payload_text(payload);
                 let schema = serde_json::from_str::<Value>(&text)
                     .ok()
@@ -232,7 +242,7 @@ fn ql_operations(
                     }),
                 );
             }
-            Some("tool-call") if QL_TOOLS.contains(&name) => {
+            Some("tool-call") if ql_tool(name) => {
                 let id = payload["toolCallId"]
                     .as_str()
                     .unwrap_or_default()
@@ -611,6 +621,39 @@ mod tests {
                 json!({"kind": "completed", "stop_reason": "stop"}),
             ),
         ]
+    }
+
+    #[test]
+    fn the_pi_body_s_compositions_returns_and_readings_are_its_ql_operations() {
+        let events = vec![
+            user(1, 1000),
+            signal(
+                2,
+                1001,
+                call("r1", "reflect_being", json!({"subject": "rest"})),
+            ),
+            signal(3, 1002, call("c1", "vak_compose", json!({"steps": []}))),
+            signal(4, 1003, call("l1", "logos_return", json!({"met_at": 0}))),
+            signal(
+                5,
+                1004,
+                result(
+                    "l1",
+                    "logos_return",
+                    r#"{"schema":"ql.epii-logos-return/v1"}"#,
+                ),
+            ),
+            signal(6, 1005, call("b1", "bash", json!({"command": "ls"}))),
+            signal(7, 1006, json!({"kind": "completed", "stop_reason": "stop"})),
+        ];
+        let reading = assemble(&events, &request(TurnSelector::Last)).unwrap();
+        let calls = reading["ql_operations"]["tool_calls"].as_array().unwrap();
+        let tools: Vec<&str> = calls.iter().map(|c| c["tool"].as_str().unwrap()).collect();
+        assert_eq!(tools, ["reflect_being", "vak_compose", "logos_return"]);
+        assert_eq!(
+            calls[2]["result"]["result_schema"],
+            "ql.epii-logos-return/v1"
+        );
     }
 
     #[test]

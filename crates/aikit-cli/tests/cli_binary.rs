@@ -226,6 +226,70 @@ fn flow_contemplates_a_now_stream_through_the_real_binary() {
         "central:now:control:root:cli",
     ]);
     assert!(!ok, "{stderr}");
+
+    // A host that distilled the stream itself supplies the learning with the
+    // record of the preflight it read; AIKit proposes it against a fresh one.
+    let preflight = data["preflight"].clone();
+    let record = project.path().join("record.json");
+    let distilled = project.path().join("distilled.txt");
+    let record_of = |preflight: &Value| {
+        serde_json::json!({
+            "version": "aikit.now-contemplation/v1",
+            "invocation_ref": preflight["invocation_ref"],
+            "now_ref": "central:now:control:root:cli",
+            "preflight": preflight,
+        })
+        .to_string()
+    };
+    write(&record, &record_of(&preflight));
+    write(&distilled, "What the raw body means, as one learning.");
+    let contemplate = |record: &Path| {
+        run(&[
+            "flow",
+            "contemplate",
+            "--now-ref",
+            "central:now:control:root:cli",
+            "--fixtures",
+            seam.to_str().unwrap(),
+            "--record",
+            record.to_str().unwrap(),
+            "--distilled",
+            distilled.to_str().unwrap(),
+        ])
+    };
+    let (ok, json, stderr) = contemplate(&record);
+    assert!(ok, "{stderr}");
+    let reading = &json.unwrap()["contemplation"];
+    assert_eq!(reading["state"], "proposed", "{reading}");
+    assert_eq!(
+        reading["proposal"]["content"],
+        "What the raw body means, as one learning."
+    );
+    assert_eq!(
+        reading["proposal"]["source_fixtures"],
+        serde_json::json!(["raw-2026-09-13.md"])
+    );
+
+    // A record of another preflight is refused, not proposed.
+    let mut drifted = preflight.clone();
+    drifted["fixture_count"] = serde_json::json!(2);
+    write(&record, &record_of(&drifted));
+    let (ok, json, stderr) = contemplate(&record);
+    assert!(ok, "{stderr}");
+    assert_eq!(json.unwrap()["contemplation"]["state"], "refused");
+
+    // A distillation without the record of what it read is not taken.
+    let (ok, _, stderr) = run(&[
+        "flow",
+        "contemplate",
+        "--now-ref",
+        "central:now:control:root:cli",
+        "--fixtures",
+        seam.to_str().unwrap(),
+        "--distilled",
+        distilled.to_str().unwrap(),
+    ]);
+    assert!(!ok, "{stderr}");
 }
 
 #[test]
