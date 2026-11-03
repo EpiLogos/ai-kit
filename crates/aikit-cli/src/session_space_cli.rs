@@ -86,6 +86,10 @@ struct EpiPrimeConfigureArgs {
     /// Optional Project key used as the body's default NOW scope.
     #[arg(long)]
     central_project: Option<String>,
+    /// The body's own native-action-authority grant: an owner-only token file,
+    /// recorded by location only; the launcher hands the location to the body.
+    #[arg(long)]
+    central_token_file: Option<PathBuf>,
 }
 
 #[derive(Debug, Subcommand)]
@@ -918,6 +922,7 @@ fn run(cli: Cli) -> Result<()> {
                 central_ctrl_bin,
                 central_root,
                 central_project,
+                central_token_file,
             } = *args;
             fn exact_revision(value: &str, label: &str) -> Result<()> {
                 if value.len() == 40
@@ -976,13 +981,36 @@ fn run(cli: Cli) -> Result<()> {
                 .map(|path| directory(path, "QL source root"))
                 .transpose()?;
             if central_ctrl_bin.is_some() != central_root.is_some()
-                || (central_project.is_some() && central_ctrl_bin.is_none())
+                || ((central_project.is_some() || central_token_file.is_some())
+                    && central_ctrl_bin.is_none())
             {
                 return Err(AikitError::new(
                     "encounter.prime_configuration",
-                    "Central ctrl binary and root must be supplied together; project requires that pair",
+                    "Central ctrl binary and root must be supplied together; project and token file require that pair",
                 ));
             }
+            let central_token_file = central_token_file
+                .map(|path| -> Result<PathBuf> {
+                    use std::os::unix::fs::PermissionsExt;
+                    let path = file(path, "Central token file")?;
+                    let mode = std::fs::metadata(&path)
+                        .map_err(|error| {
+                            AikitError::new(
+                                "encounter.prime_configuration",
+                                format!("Central token file is unavailable: {error}"),
+                            )
+                        })?
+                        .permissions()
+                        .mode();
+                    if mode & 0o077 != 0 {
+                        return Err(AikitError::new(
+                            "encounter.prime_configuration",
+                            "Central token file is refused: others can read it (mode 0600 or tighter)",
+                        ));
+                    }
+                    Ok(path)
+                })
+                .transpose()?;
             let central_ctrl_bin = central_ctrl_bin
                 .map(|path| file(path, "Central ctrl binary"))
                 .transpose()?;
@@ -1030,6 +1058,12 @@ fn run(cli: Cli) -> Result<()> {
             }
             if let Some(project) = central_project {
                 argv.extend(["--central-project".into(), project]);
+            }
+            if let Some(token_file) = central_token_file {
+                argv.extend([
+                    "--central-token-file".into(),
+                    token_file.display().to_string(),
+                ]);
             }
             crate::encounter_service::EncounterService::configure(
                 home,
