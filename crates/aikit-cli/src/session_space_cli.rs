@@ -322,6 +322,14 @@ enum Command {
         #[arg(long)]
         redis_config: Option<PathBuf>,
     },
+    /// Read the pages one session's replies cite: each `source-passage-used`
+    /// record the owner kept at a turn's end (the fetch call, its url, the
+    /// citation, and the quote with its spans where the harness gave one), and
+    /// the turns whose citations could not be read. Writes nothing.
+    EncounterUsed {
+        #[arg(long)]
+        agent_session: String,
+    },
     /// Derive (dry-run) the encounter provider a harness profile's connection
     /// facts produce. Prints the provider JSON and exits; no state changes.
     EncounterDerive {
@@ -893,6 +901,10 @@ fn run(cli: Cli) -> Result<()> {
                 },
             )?)
         }
+        Command::EncounterUsed { agent_session } => emit(&crate::encounter_used::read(
+            home,
+            &ResourceRef::parse(agent_session)?,
+        )?),
         Command::EncounterDeconfigure { provider_id } => {
             crate::encounter_service::EncounterService::deconfigure(home, &provider_id)?;
             emit(&serde_json::json!({"withdrawn":provider_id}))
