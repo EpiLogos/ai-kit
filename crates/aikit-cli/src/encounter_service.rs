@@ -476,10 +476,29 @@ pub enum EncounterRequest {
 }
 type PendingPermissions =
     Arc<Mutex<BTreeMap<ResourceRef, BTreeMap<String, NativePermissionRequest>>>>;
-struct Journal(Arc<EncounterStore>, PendingPermissions, String);
+struct Journal(
+    Arc<EncounterStore>,
+    PendingPermissions,
+    String,
+    Mutex<BTreeMap<ResourceRef, crate::encounter_used::Watch>>,
+);
 impl SessionEventJournal for Journal {
     fn append(&self, session: &ResourceRef, event: &HostEvent) -> Result<()> {
         if let HostEvent::Signal(signal) = event {
+            // Whether this turn's reply may cite a page (encounter_used.rs): read again only at a turn that may.
+            let mut watches = self.3.lock().map_err(error)?;
+            let watch = watches.entry(session.clone()).or_default();
+            match &signal.kind {
+                ConnectionSignalKind::AgentMessageChunk { text }
+                | ConnectionSignalKind::AgentMessageSegment { text } => watch.text(text),
+                ConnectionSignalKind::ProviderUpdate {
+                    session_update,
+                    payload,
+                    ..
+                } => watch.update(session_update, payload),
+                _ => {}
+            }
+            drop(watches);
             if let ConnectionSignalKind::HistoryReplay { update } = &signal.kind {
                 // ACP v1 load replay has no provider-history-item identifier.
                 // Retain raw update evidence in exact observed order, but keep it
@@ -519,6 +538,19 @@ impl SessionEventJournal for Journal {
             }
             HostEvent::TurnEnded(_) => {
                 pending.remove(session);
+            }
+        }
+        drop(pending);
+        if let HostEvent::TurnEnded(_) = event {
+            let cited = self
+                .3
+                .lock()
+                .map_err(error)?
+                .get_mut(session)
+                .is_some_and(crate::encounter_used::Watch::take);
+            if cited {
+                // The turn's own events are already kept; a record that cannot be written leaves the turn as it stands.
+                let _ = crate::encounter_used::record_turn(&self.0, session);
             }
         }
         Ok(())
@@ -2082,6 +2114,7 @@ impl EncounterService {
             self.store.clone(),
             self.permissions.clone(),
             generation.clone(),
+            Mutex::default(),
         )));
         let model =
             agency::model::prepare_before(&self.home, &agent_session, &body_provider, deadline)?;
@@ -4051,6 +4084,108 @@ mod tests {
         let refused = prompt(&service, &session, Some("drive it")).unwrap_err();
         assert_eq!(refused.code(), "encounter.prompt_override_unrecorded");
         assert_eq!(refused.message().lines().nth(1), Some("Nothing was sent."));
+    }
+
+    #[test]
+    fn a_turn_whose_reply_cites_a_fetched_page_is_followed_by_its_used_record() {
+        use aikit_adapters::{ConnectionSignal, NativeSessionBinding, TurnRecord, TurnStop};
+        let home = test_home();
+        let store = Arc::new(EncounterStore::open(&home).unwrap());
+        let journal = Journal(
+            store.clone(),
+            Arc::default(),
+            "generation-1".into(),
+            Mutex::default(),
+        );
+        let session = ResourceRef::parse("agent-session/cites").unwrap();
+        let signal = |sequence: u64, kind: ConnectionSignalKind| {
+            HostEvent::Signal(ConnectionSignal {
+                sequence,
+                native_session_id: Some("n-1".into()),
+                kind,
+                provenance: Vec::new(),
+            })
+        };
+        let events = [
+            signal(
+                1,
+                ConnectionSignalKind::ToolCall {
+                    payload: json!({"sessionUpdate": "tool_call", "toolCallId": "call-1",
+                "kind": "fetch", "rawInput": {"url": "https://example.org/page"}}),
+                },
+            ),
+            signal(
+                2,
+                ConnectionSignalKind::ToolCall {
+                    payload: json!({"sessionUpdate": "tool_call_update", "toolCallId": "call-1",
+                "status": "completed", "content": [{"type": "content", "content": {"type": "text", "text": "line one\nline two"}}]}),
+                },
+            ),
+            signal(
+                3,
+                ConnectionSignalKind::AgentMessageChunk {
+                    text: "It says so. ".into(),
+                },
+            ),
+            signal(
+                4,
+                ConnectionSignalKind::ProviderUpdate {
+                    session_update: "agent_message_chunk".into(),
+                    payload: json!({
+                "sessionUpdate": "agent_message_chunk", "content": {"type": "resource",
+                "resource": {"uri": "https://example.org/page", "text": "line two"}}}),
+                    truncated_from_bytes: None,
+                },
+            ),
+            HostEvent::TurnEnded(TurnRecord {
+                agent_session: session.clone(),
+                binding: NativeSessionBinding {
+                    native_session_id: "n-1".into(),
+                    agent_session: None,
+                    agent: None,
+                    opened_as: SessionOpenMode::Create,
+                    model_observation: None,
+                    mode_observation: None,
+                    provenance: Vec::new(),
+                },
+                stop: TurnStop::Completed {
+                    stop_reason: "end_turn".into(),
+                },
+                interruption: None,
+                first_sequence: Some(1),
+                last_sequence: 4,
+                signals: 4,
+            }),
+        ];
+        for event in &events {
+            journal.append(&session, event).unwrap();
+        }
+        let page = store.events(&session, 0, 64).unwrap();
+        let last = &page.events.last().unwrap().event;
+        assert_eq!(last["kind"], crate::encounter_used::USED_KIND, "{last}");
+        assert_eq!(last["tool_call_id"], "call-1");
+        assert_eq!(last["quote"], "line two");
+        assert_eq!(last["spans"], json!([{"line": 1, "from": 0, "to": 8}]));
+
+        // A turn whose reply cites nothing reads nothing again and records nothing.
+        let quiet = ResourceRef::parse("agent-session/quiet").unwrap();
+        journal
+            .append(
+                &quiet,
+                &signal(
+                    5,
+                    ConnectionSignalKind::AgentMessageChunk {
+                        text: "No pages.".into(),
+                    },
+                ),
+            )
+            .unwrap();
+        journal.append(&quiet, &events[4]).unwrap();
+        let page = store.events(&quiet, 0, 64).unwrap();
+        assert!(page
+            .events
+            .iter()
+            .all(|event| event.event["kind"] == "provider"));
     }
 }
 

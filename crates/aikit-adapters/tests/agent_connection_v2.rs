@@ -582,3 +582,59 @@ fn acp_lifecycle_updates_are_kept_verbatim_and_usage_rides_the_completed_turn() 
         }
     );
 }
+
+#[test]
+fn acp_reply_chunk_naming_a_resource_is_kept_whole_as_the_reply_citing_it() {
+    let mut adapter = AcpV1ConnectionAdapter::new(
+        r("connection/acp/citation"),
+        vec!["target/cites-acp".into()],
+    );
+    adapter.initialize().unwrap();
+    adapter
+        .ingest(json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": { "protocolVersion": 1, "agentCapabilities": {} }
+        }))
+        .unwrap();
+    let ingest = |adapter: &mut AcpV1ConnectionAdapter, update: serde_json::Value| {
+        adapter
+            .ingest(json!({
+                "jsonrpc": "2.0",
+                "method": "session/update",
+                "params": { "sessionId": "s-1", "update": update }
+            }))
+            .unwrap()
+    };
+    // An embedded resource carries the text the reply took from the page; a link names the page alone. Each is kept as sent: a
+    // text chunk keeps only text, and these have none.
+    for update in [
+        json!({"sessionUpdate": "agent_message_chunk", "content": {"type": "resource",
+               "resource": {"uri": "https://example.org/a", "text": "the passage", "mimeType": "text/plain"}}}),
+        json!({"sessionUpdate": "agent_message_chunk", "content": {"type": "resource_link",
+               "uri": "https://example.org/a", "name": "a"}}),
+    ] {
+        let signals = ingest(&mut adapter, update.clone());
+        let ConnectionSignalKind::ProviderUpdate {
+            session_update,
+            payload,
+            ..
+        } = &signals[0].kind
+        else {
+            panic!("{update} must be kept whole: {:?}", signals[0].kind);
+        };
+        assert_eq!(session_update, "agent_message_chunk");
+        assert_eq!(payload, &update);
+    }
+    // A text chunk is still the reply's text.
+    let text = ingest(
+        &mut adapter,
+        json!({"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "hello"}}),
+    );
+    assert_eq!(
+        text[0].kind,
+        ConnectionSignalKind::AgentMessageChunk {
+            text: "hello".into()
+        }
+    );
+}

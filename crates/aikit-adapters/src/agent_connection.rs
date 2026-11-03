@@ -972,6 +972,16 @@ impl AcpV1ConnectionAdapter {
                     .and_then(Value::as_str)
                     .unwrap_or("");
                 let kind = match kind_name {
+                    // A reply chunk that is a resource (a uri with the text taken from it) or a link to one is the reply citing
+                    // that resource: kept whole as the provider sent it, where a text chunk would keep only its (absent) text.
+                    "agent_message_chunk" if cites_resource(&update) => {
+                        let (payload, truncated_from_bytes) = bounded_provider_payload(&update);
+                        ConnectionSignalKind::ProviderUpdate {
+                            session_update: kind_name.to_owned(),
+                            payload,
+                            truncated_from_bytes,
+                        }
+                    }
                     "agent_message_chunk" => ConnectionSignalKind::AgentMessageChunk {
                         text: extract_text(&update),
                     },
@@ -1374,6 +1384,15 @@ fn string_field(value: &Value, field: &str) -> Result<String> {
                 format!("ACP message has no string `{field}`"),
             )
         })
+}
+
+/// An ACP content block of the reply that names a resource: `resource_link` (its `uri`) or `resource` (an embedded resource,
+/// `resource.uri` with the `text` the reply took from it).
+fn cites_resource(update: &Value) -> bool {
+    matches!(
+        update.pointer("/content/type").and_then(Value::as_str),
+        Some("resource_link" | "resource")
+    )
 }
 
 fn extract_text(update: &Value) -> String {

@@ -129,6 +129,7 @@ pub mod encounter_profile_provider;
 pub mod encounter_service;
 pub mod encounter_task_executor;
 pub mod encounter_use;
+pub mod encounter_used;
 pub mod skill_audit;
 pub mod skill_reach;
 
