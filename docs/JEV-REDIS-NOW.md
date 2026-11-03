@@ -328,7 +328,31 @@ aikit --json decide status \
 aikit --json decide invoke \
   --provider-file decision-provider.json \
   --request-file jev-request.json
+aikit --json decide invoke --instrument vak-block \
+  --request-file fill.json [--agent-session S] [--ql PATH]   # fill an instrument's open heads
 ```
+
+`--instrument ID` fills the open heads of one instrument of QL's team space
+(O-I #843: Factory's Clip view, Generate → Fill heads). AIKit reads the team
+space whole from the installed `ql` (`ql context-frame team-space --json`,
+`ql.vak-team-space/v1`; `--ql` names another executable) and mirrors none of
+it. The request is `aikit.instrument-fill-request/v1`
+`{schema, subject: {…the cell's own words…}, chosen: {head_id: [label_id…]}}`
+(`--request-file -` reads it from stdin); an empty choice is an abstention,
+kept as given. Every head the cell does not name is open, and each becomes one
+typed Choice question among the labels that head holds, asked of the elected
+provider over the cell's words and chosen heads. The answer is
+`aikit.instrument-fill/v1` `{instrument, team_space, open, chosen, picks:
+{head_id: {field, label, description, owner_ref, owner_revision, confidence,
+probabilities}}, outcome: completed | failed | nothing-open, calls, rules,
+standing: "evidence"}`: a pick is evidence for the engine to validate, never a
+receipt. A cell with no open head makes no call (`zero-heads-zero-calls`). AIKit
+refuses an instrument the team space does not hold
+(`decision.instrument_unknown`), one only the person answers
+(`decision.instrument_person_only`), a chosen label its head does not hold
+(`decision.instrument_chosen_invalid`) and an unreadable team space
+(`decision.team_space_unavailable`). The ask is kept against the asking session
+as any other.
 
 `aikit jev invoke` and `aikit jev validate` are unchanged. In a NOW
 preparation request, `selection` may use `mode: "provider"` with an explicit

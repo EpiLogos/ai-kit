@@ -1761,6 +1761,16 @@ pub struct DecideInvokeArgs {
     /// this process runs as (`AIKIT_SESSION_ID`), and nowhere when neither.
     #[arg(long = "agent-session", value_name = "RESOURCE_REF")]
     pub agent_session: Option<String>,
+    /// Fill the open heads of one instrument of QL's team space (`vak-block`):
+    /// the request file is then `aikit.instrument-fill-request/v1` (`-` reads
+    /// it from stdin), one typed question is asked for each head the cell
+    /// leaves open, and the picks come back as evidence
+    /// (`aikit.instrument-fill/v1`). A cell with no open head makes no call.
+    #[arg(long = "instrument", value_name = "ID")]
+    pub instrument: Option<String>,
+    /// The `ql` executable that answers the team space (default: `ql`).
+    #[arg(long = "ql", value_name = "PATH", requires = "instrument")]
+    pub ql: Option<std::path::PathBuf>,
 }
 
 /// `aikit decide asks`.
