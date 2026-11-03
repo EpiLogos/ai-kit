@@ -17,9 +17,23 @@ Reply (the Capture skill device already reads `candidate`, `kind`, `state`, `qua
 `kind_reason`, `exports` [string], `scope` (`home|project|session`), `source_ref`, `by`,
 `session`, `proposed_id` (what accepting would save it as), `inbox_item` (the message it
 put on the inbox), `proposal` (the planned Procedure; null when held back).
-Flags: `--kind`, `--export` (repeatable), `--scope`, `--source-ref`, `--by`.
+Flags: `--kind`, `--export` (repeatable), `--scope`, `--source-ref`, `--by`, `--from-song`.
 Prose is not filed as a script: it is `guidance` at `confidence: low`, which a UI should
 show as a question.
+
+`--from-song` (O-I #844, the Skillset rack's Capture page with a song's clip as its
+source): the body is Software Factory's clip of a song (`factory.song-clip/v1`, from
+`factory workflow export`). AIKit writes a Method from it — one step per unit, in the
+order the song runs them (a unit after the units it waits on and the joins that release
+it), each with who takes it, what it returns and when it is done — and files that text
+on the same road as any capture: scanned (a clip holding a secret is held), compared,
+announced on the inbox with its proposal, never promoted until the person accepts it.
+The title becomes `METHOD: <TITLE>` (the Skill's description once promoted, which makes
+it a Method), the kind a Skill, and `source_ref` the clip's ref unless `--source-ref`
+names another. Added to the reply: `song: {clip, steps [string]}` (null otherwise).
+It refuses anything but a song's clip with at least one unit, and units that wait on
+each other in a circle, as `capture.song_invalid`; nothing is filed. `--from-song`
+takes neither `--kind` nor `--export`.
 
 ## `aikit promote` and `aikit inbox`
 

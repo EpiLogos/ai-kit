@@ -7245,16 +7245,41 @@ fn cmd_capture(cwd: &std::path::Path, a: CaptureArgs) -> Result<Reply> {
             "nothing to capture; pass --body or pipe the text in",
         ));
     }
-
-    let inbox = Inbox::new(service.home(), service.index());
-    let capture = Capture {
-        title: a.title,
-        body,
-        suggested_kind: a
+    // A song's clip is written into a Method first, and the Method travels the
+    // same road as any capture: scanned, compared, proposed, never promoted here.
+    let (title, body, kind, source_ref, song) = if a.from_song {
+        let clip: Value = serde_json::from_str(&body).map_err(|e| {
+            AikitError::new(
+                "capture.song_invalid",
+                format!(
+                    "--from-song reads a Software Factory song's clip ({}) as JSON; this body is not JSON: {e}",
+                    aikit_cli::song_method::SONG_CLIP
+                ),
+            )
+        })?;
+        let method = aikit_cli::song_method::method_from_song(&clip, Some(&a.title))?;
+        let song = jval!({"clip": method.source_ref, "steps": method.steps});
+        (
+            method.title,
+            method.body,
+            Some(aikit_core::Kind::Skill),
+            a.source_ref.or(method.source_ref),
+            Some(song),
+        )
+    } else {
+        let kind = a
             .kind
             .as_deref()
             .map(std::str::FromStr::from_str)
-            .transpose()?,
+            .transpose()?;
+        (a.title, body, kind, a.source_ref, None)
+    };
+
+    let inbox = Inbox::new(service.home(), service.index());
+    let capture = Capture {
+        title,
+        body,
+        suggested_kind: kind,
         exports: a.exports,
         project_root: service.descriptor().project_root.clone(),
         session: service.descriptor().session_id.clone(),
@@ -7264,7 +7289,7 @@ fn cmd_capture(cwd: &std::path::Path, a: CaptureArgs) -> Result<Reply> {
             .map(std::str::FromStr::from_str)
             .transpose()?
             .unwrap_or_default(),
-        source_ref: a.source_ref,
+        source_ref,
         by: a.by,
     };
     // Scanned before storage, never before display: a secret must not reach a file.
@@ -7296,6 +7321,8 @@ fn cmd_capture(cwd: &std::path::Path, a: CaptureArgs) -> Result<Reply> {
         // Procedure that accepting it runs (absent when it is held back).
         "inbox_item": outcome.announcement.as_ref().map(|a| a.item.to_string()),
         "proposal": outcome.announcement.as_ref().and_then(|a| a.proposal.as_ref()).map(|p| p.to_string()),
+        // A song capture: the clip it was written from and the Method's steps.
+        "song": song,
     });
     Ok(reply(&service, data, vec![]))
 }
