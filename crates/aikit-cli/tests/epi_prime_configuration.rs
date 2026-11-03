@@ -290,6 +290,42 @@ fn actual_no_central_configuration_stays_optional() {
     fixture.finish();
 }
 
+#[test]
+fn actual_body_grant_is_recorded_by_owner_only_location_never_material() {
+    use std::os::unix::fs::PermissionsExt;
+    let mut fixture = Fixture::new();
+    let binary = Path::new(env!("CARGO_BIN_EXE_aikit"));
+    let root = fixture.central();
+    let token = fixture.root.join("native-token-epii");
+    fs::write(&token, "the-bodys-own-token").unwrap();
+    fs::set_permissions(&token, fs::Permissions::from_mode(0o600)).unwrap();
+    let output = fixture.configure(&[
+        ("--central-ctrl-bin", binary),
+        ("--central-root", &root),
+        ("--central-token-file", &token),
+    ]);
+    let provider = fixture.require_configured(&output);
+    assert_eq!(
+        value(&provider.argv, "--central-token-file"),
+        token.canonicalize().unwrap().to_str()
+    );
+    assert!(!fs::read_to_string(fixture.provider_path())
+        .unwrap()
+        .contains("the-bodys-own-token"));
+    // Without the Central it acts in, or readable by others, it is refused.
+    require_refusal_preserves_provider(&mut fixture, &[("--central-token-file", &token)]);
+    fs::set_permissions(&token, fs::Permissions::from_mode(0o644)).unwrap();
+    require_refusal_preserves_provider(
+        &mut fixture,
+        &[
+            ("--central-ctrl-bin", binary),
+            ("--central-root", &root),
+            ("--central-token-file", &token),
+        ],
+    );
+    fixture.finish();
+}
+
 fn require_refusal_preserves_provider(fixture: &mut Fixture, owner: &[(&str, &Path)]) {
     let path = fixture.provider_path();
     let before = fs::read(&path).unwrap();
