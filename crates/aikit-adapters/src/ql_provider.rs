@@ -53,6 +53,14 @@ impl QlCliClient {
         &self.executable
     }
 
+    /// QL's team space as it answers it (`ql context-frame team-space --json`,
+    /// `ql.vak-team-space/v1`): the organs, their instruments with the heads
+    /// and labels each holds, and the rules a decision answer stands under.
+    /// AIKit reads it whole and mirrors none of it.
+    pub fn team_space(&self) -> std::result::Result<Value, QlProviderFailure> {
+        self.json(&["context-frame", "team-space"])
+    }
+
     fn json(&self, args: &[&str]) -> std::result::Result<Value, QlProviderFailure> {
         let output = Command::new(&self.executable)
             .args(args)

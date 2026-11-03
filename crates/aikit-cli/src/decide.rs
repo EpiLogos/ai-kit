@@ -525,6 +525,9 @@ fn diagnostic_probe(
 /// none came, are kept against the asking agent session (`--agent-session`,
 /// else this process's own `AIKIT_SESSION_ID`); with neither, nowhere.
 pub fn decide_invoke(args: DecideInvokeArgs) -> Result<Value> {
+    if args.instrument.is_some() {
+        return crate::decide_instrument::fill(args);
+    }
     let home = aikit_store::AikitHome::discover()?;
     let asking = asking_session(args.agent_session.as_deref())?;
     let provider_file = crate::local_services_election::resolve_file(
@@ -584,7 +587,7 @@ const ASKS_BYTES_LIMIT: u64 = 16 * 1024 * 1024;
 /// The session an ask is kept against: the one named, else the one this
 /// process runs as (AIKit gives an agent session's process `AIKIT_SESSION_ID`,
 /// `SessionId::of_agent_session`), else none.
-fn asking_session(
+pub(crate) fn asking_session(
     named: Option<&str>,
 ) -> Result<Option<(aikit_core::SessionId, Option<ResourceRef>)>> {
     if let Some(named) = named {
@@ -607,7 +610,7 @@ fn asks_path(home: &aikit_store::AikitHome, session: &aikit_core::SessionId) -> 
 }
 
 /// Append one ask to its session's record, under the session's ask lock.
-fn keep_ask(
+pub(crate) fn keep_ask(
     home: &aikit_store::AikitHome,
     session_id: &aikit_core::SessionId,
     agent_session: Option<&ResourceRef>,
