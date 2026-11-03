@@ -5140,6 +5140,14 @@ pub struct CaptureArgs {
     /// Who observed it: `human`, or an agent ref such as `claude-code:name`.
     #[arg(long, value_name = "WHO")]
     pub by: Option<String>,
+    /// The body is a Software Factory song's clip (`factory.song-clip/v1`,
+    /// `factory workflow export`): write a Method from it, one step per unit
+    /// in the order the song runs them, and file that as the capture. The
+    /// title becomes `METHOD: <TITLE>`, the kind a Skill, and the source the
+    /// clip's ref unless `--source-ref` names another. Nothing is promoted
+    /// until the person accepts it.
+    #[arg(long = "from-song", conflicts_with_all = ["kind", "exports"])]
+    pub from_song: bool,
 }
 
 #[derive(Debug, Args)]

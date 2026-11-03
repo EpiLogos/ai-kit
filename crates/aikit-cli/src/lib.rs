@@ -107,6 +107,7 @@ pub mod session_space_service;
 pub mod session_space_working_surface;
 pub mod skill_sources;
 pub mod skillset_package_cli;
+pub mod song_method;
 pub mod star_commands;
 pub mod system;
 pub mod task;
