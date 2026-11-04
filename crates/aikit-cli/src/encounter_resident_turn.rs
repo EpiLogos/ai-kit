@@ -8,8 +8,12 @@
 //! What the agent said is its `agent-message-chunk` text; what the turn cost
 //! is the provider's own usage on its `completed` signal, never estimated. A
 //! turn that asks for a tool's permission is cancelled — no caller here
-//! answers the provider's consent on the person's behalf — and a turn that
-//! does not end within its time is cancelled at the timeout.
+//! answers the provider's consent on the person's behalf — unless the caller
+//! carries the person's own answer, Tool calls at Session or Always (a take
+//! that varies it): then the harness's own option for that answer is given
+//! (`encounter_task_executor::tool_calls_answer`), never a deny, and a
+//! harness that offers none cancels the turn in words. A turn that does not
+//! end within its time is cancelled at the timeout.
 use crate::encounter_service::EncounterRequest;
 use aikit_core::ResourceRef;
 use serde_json::Value;
@@ -154,6 +158,20 @@ impl ResidentOwner {
         timeout: Duration,
         words: TurnWords<'_>,
     ) -> Result<TurnAnswer, String> {
+        self.await_turn_answering(session, after, timeout, words, None)
+    }
+
+    /// [`Self::await_turn`], with the person's own Tool calls answering the
+    /// harness's requests to use a tool: `session` or `always` give the
+    /// harness's own option for it; `None` (or `ask`) cancels as ever.
+    pub fn await_turn_answering(
+        &self,
+        session: &ResourceRef,
+        after: u64,
+        timeout: Duration,
+        words: TurnWords<'_>,
+        tool_calls: Option<&str>,
+    ) -> Result<TurnAnswer, String> {
         let deadline = Instant::now() + timeout;
         let cancel = |reason: String| {
             let _ = self.call(&EncounterRequest::Cancel {
@@ -187,11 +205,44 @@ impl ResidentOwner {
                         }
                     }
                     Some("permission-requested") => {
-                        cancel(format!("{} takes no tool", words.act));
-                        return Err(format!(
-                            "the agent asked for permission to use a tool, and {} takes none; the turn was cancelled",
-                            words.act
-                        ));
+                        let request = &kind["request"];
+                        let Some(word) = tool_calls.filter(|word| *word != "ask") else {
+                            cancel(format!("{} takes no tool", words.act));
+                            return Err(match tool_calls {
+                                Some(word) => format!(
+                                    "the agent asked for permission to use a tool, and {}'s Tool calls stands at {word}, so it waits for a person nobody is asking; the turn was cancelled",
+                                    words.act
+                                ),
+                                None => format!(
+                                    "the agent asked for permission to use a tool, and {} takes none; the turn was cancelled",
+                                    words.act
+                                ),
+                            });
+                        };
+                        let choices = request["choices"]
+                            .as_array()
+                            .map(Vec::as_slice)
+                            .unwrap_or(&[]);
+                        let answered = crate::encounter_task_executor::tool_calls_answer(choices, word)
+                            .and_then(|option_id| {
+                                let request_id = request["native_request_id"]
+                                    .as_str()
+                                    .ok_or("the request names no id to answer")?;
+                                self.call(&EncounterRequest::Permission {
+                                    agent_session: session.clone(),
+                                    request_id: request_id.to_owned(),
+                                    decision: aikit_adapters::interactive_connection::PermissionDecision::Selected { option_id },
+                                })
+                                .map(|_| ())
+                                .map_err(|error| format!("the encounter refused the answer: {}", error.message))
+                            });
+                        if let Err(reason) = answered {
+                            cancel(format!("{} could not answer a tool's request", words.act));
+                            return Err(format!(
+                                "the agent asked for permission to use a tool, and {}'s Tool calls ({word}) could not answer it: {reason}; the turn was cancelled",
+                                words.act
+                            ));
+                        }
                     }
                     _ => {}
                 }

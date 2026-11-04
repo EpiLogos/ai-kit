@@ -65,7 +65,10 @@ for line in sys.stdin:
             waiting[native] = ident
             emit({"jsonrpc": "2.0", "id": "permission-1", "method": "session/request_permission", "params": {
                 "sessionId": native, "toolCall": {"toolCallId": "t1", "title": "Write a file", "kind": "edit", "status": "pending"},
-                "options": [{"optionId": "deny", "name": "Deny", "kind": "reject_once"}, {"optionId": "allow", "name": "Allow", "kind": "allow_once"}]}})
+                "options": [{"optionId": "allow_once", "name": "Allow once", "kind": "allow_once"},
+                            {"optionId": "allow_session", "name": "Allow for session", "kind": "allow_always"},
+                            {"optionId": "allow_always", "name": "Allow always", "kind": "allow_always"},
+                            {"optionId": "deny", "name": "Deny", "kind": "reject_once"}]}})
             continue
         said = "model=%s effort=%s mode=%s" % (s["model"], s["effort"], s["mode"])
         with open(os.path.join(s["cwd"], "answer.txt"), "w") as out:
@@ -78,8 +81,16 @@ for line in sys.stdin:
         if native in waiting:
             result(waiting.pop(native), {"stopReason": "cancelled"})
     elif ident == "permission-1":
+        outcome = (message.get("result") or {}).get("outcome") or {}
+        chosen = outcome.get("optionId") if outcome.get("outcome") == "selected" else None
+        note({"permission": chosen})
         for native in list(waiting):
-            result(waiting.pop(native), {"stopReason": "cancelled"})
+            if chosen and chosen.startswith("allow"):
+                with open(os.path.join(sessions[native]["cwd"], "answer.txt"), "w") as out:
+                    out.write("permission=%s\n" % chosen)
+                result(waiting.pop(native), {"stopReason": "end_turn"})
+            else:
+                result(waiting.pop(native), {"stopReason": "cancelled"})
 "#;
 
 struct Rig {
@@ -351,6 +362,14 @@ fn a_take_opens_a_fresh_resident_of_the_sessions_agent_applies_its_level_and_act
     assert_eq!(data["agent"], own.as_str());
     assert_eq!(data["level"], level, "the level is read back as given");
     assert_eq!(data["applied"]["reasoning_effort"], "high");
+    // O-I manual §19.1: each take keeps its own NOW, a child of its task's. This session
+    // holds no prepared task, so the take keeps none, and says so.
+    assert!(
+        data["now"]["none"]
+            .as_str()
+            .is_some_and(|words| words.contains("holds no prepared task")),
+        "{data}"
+    );
     let take = data["agent_session"].as_str().unwrap().to_owned();
     assert_ne!(
         take,
@@ -424,12 +443,13 @@ fn a_take_opens_a_fresh_resident_of_the_sessions_agent_applies_its_level_and_act
 }
 
 #[test]
-fn a_take_places_its_autonomy_on_the_agents_modes_and_a_permission_ask_is_cancelled() {
+fn a_takes_tool_calls_answer_the_harnesss_request_in_its_own_words_and_ask_waits() {
     let rig = Rig::new();
     let own = rig.own_session("own", true);
-    let world = rig.world("trial-000-auto");
+    // Session: the harness's own answer for its session, read back from what the peer was given.
+    let world = rig.world("trial-000-session");
     let mut body = rig.body(&own, &rig.socket);
-    let level = json!({"variable": "autonomy", "value": "auto"});
+    let level = json!({"variable": "tool_calls", "value": "session"});
     let ready = body.ask(preflight(
         &own,
         &world,
@@ -439,30 +459,70 @@ fn a_take_places_its_autonomy_on_the_agents_modes_and_a_permission_ask_is_cancel
     ));
     assert_eq!(ready["success"], true, "{ready}");
     assert_eq!(ready["data"]["level"], level);
-    assert_eq!(
-        ready["data"]["applied"]["mode"], "auto",
-        "the last word on the last mode"
-    );
-    let turned = body.ask(json!({"type": "turn", "turn": {"iteration": 1, "prompt": "Go."}}));
+    assert_eq!(ready["data"]["applied"]["tool_calls"], "session");
+    let asked =
+        body.ask(json!({"type": "turn", "turn": {"iteration": 1, "prompt": "ASK_PERMISSION"}}));
+    assert_eq!(asked["data"]["status"], "completed", "{asked}");
     assert_eq!(
         std::fs::read_to_string(world.join("answer.txt")).unwrap(),
-        "model=test/a effort=medium mode=auto\n",
-        "{turned}"
+        "permission=allow_session\n",
+        "{asked}"
     );
-    // A tool's permission is the person's to give: a take asks none of it.
+    assert!(
+        rig.peer_log()
+            .iter()
+            .any(|entry| entry["permission"] == "allow_session"),
+        "the harness was answered with its own session option"
+    );
+    let finished = body.ask(json!({"type": "finalize", "inspection": {}}));
+    assert_eq!(finished["data"]["released"], true, "{finished}");
+    body.exits();
+
+    // Ask: the request waits for a person, and nobody is asked in a take.
+    let world = rig.world("trial-001-ask");
+    let mut body = rig.body(&own, &rig.socket);
+    let level = json!({"variable": "tool_calls", "value": "ask"});
+    let ready = body.ask(preflight(
+        &own,
+        &world,
+        "takes:own:2:trial:1",
+        "test/a",
+        level.clone(),
+    ));
+    assert_eq!(ready["data"]["level"], level, "{ready}");
     let asked =
-        body.ask(json!({"type": "turn", "turn": {"iteration": 2, "prompt": "ASK_PERMISSION"}}));
+        body.ask(json!({"type": "turn", "turn": {"iteration": 1, "prompt": "ASK_PERMISSION"}}));
     assert_eq!(asked["success"], true, "{asked}");
     assert_eq!(asked["data"]["status"], "failed", "{asked}");
     assert!(
         asked["data"]["reason"]
             .as_str()
             .unwrap()
-            .contains("a take takes none"),
+            .contains("Tool calls stands at ask"),
         "{asked}"
     );
+    assert!(!world.join("answer.txt").exists());
     let finished = body.ask(json!({"type": "finalize", "inspection": {}}));
     assert_eq!(finished["data"]["released"], true, "{finished}");
+    body.exits();
+
+    // Autonomy is retired: a take that varies it is refused, naming what took its place.
+    let mut body = rig.body(&own, &rig.socket);
+    let refused = body.ask(preflight(
+        &own,
+        &world,
+        "takes:own:3:trial:0",
+        "test/a",
+        json!({"variable": "autonomy", "value": "auto"}),
+    ));
+    assert_eq!(refused["success"], false, "{refused}");
+    assert!(
+        refused["data"]["error"]
+            .as_str()
+            .unwrap()
+            .contains("Scope's Tool calls"),
+        "{refused}"
+    );
     body.exits();
 }
 

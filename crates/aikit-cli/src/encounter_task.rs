@@ -250,6 +250,30 @@ fn path(home: &AikitHome, session: &ResourceRef) -> PathBuf {
         blake3::hash(session.as_str().as_bytes()).to_hex()
     ))
 }
+/// The session's prepared task as Central allocated it: what a take's NOW
+/// hangs from (`encounter_take_body.rs`, O-I manual §19.1). None while the
+/// session holds no prepared task.
+pub(crate) fn bound_task_now(
+    home: &AikitHome,
+    session: &ResourceRef,
+) -> Result<Option<AllocatedCentralTask>> {
+    Ok(read(home, session)?
+        .filter(|record| record.ready)
+        .and_then(|record| record.allocation))
+}
+
+/// Allocate a NOW through the same native Central owner, and the same finite
+/// requests, a task's own preparation uses.
+pub(crate) fn allocate_central_now(request: &CentralTaskRequest) -> Result<AllocatedCentralTask> {
+    NativeCentralPlacement::new(OwnerRunner).allocate(request)
+}
+
+/// Close a NOW this owner allocated new; Central keeps its history and checks
+/// its exact revision. None when the allocation was not new.
+pub(crate) fn close_central_now(task: &AllocatedCentralTask) -> Result<Option<Value>> {
+    NativeCentralPlacement::new(OwnerRunner).close_new_allocation(task)
+}
+
 fn read(home: &AikitHome, session: &ResourceRef) -> Result<Option<TaskRecord>> {
     let path = path(home, session);
     match fs::symlink_metadata(&path) {
