@@ -5,7 +5,7 @@
 //! candidate snapshot; promotion is the separate act that makes one snapshot
 //! visible to the catalogue.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -1133,7 +1133,9 @@ pub struct RefinementReason {
 }
 
 /// A take that ran under a proposed revision (its trace), the takes of its
-/// Repeat that ran beside it, and the take's own NOW where Central kept one.
+/// Repeat that ran beside it, the take's own NOW where Central kept one, and
+/// what each of those takes answered to the task's Success conditions, by
+/// its trace (O-I manual §19.7, Result).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RefinementTest {
     pub trace: String,
@@ -1141,6 +1143,21 @@ pub struct RefinementTest {
     pub beside: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub now_ref: Option<String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub answers: BTreeMap<String, Vec<RefinementAnswer>>,
+}
+
+/// One take's answer to one of the task's Success conditions, as Actuation
+/// read it (research execution.rs): met, not met or open, with its evidence
+/// in words, and why it reads as it does.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RefinementAnswer {
+    pub condition: String,
+    pub answer: String,
+    #[serde(default)]
+    pub evidence: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub why: Option<String>,
 }
 
 /// One proposed revision of one member, as its source keeps it.
@@ -1156,6 +1173,23 @@ pub struct ProposedRevision {
     pub proposed_at_unix_seconds: u64,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tests: Vec<RefinementTest>,
+    /// Where the revision waits once Accept handed it to Central, for a
+    /// member whose source Central keeps; absent before.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub handed: Option<HandedToCentral>,
+}
+
+/// A proposed revision of a skill whose source Central keeps, as Central
+/// keeps it beside the skill in use (Central's `control.skills.revision.propose`):
+/// its ref there, the digest the person reviews, the skill by its scope and
+/// name, and the act that writes it — the person's Accept in Central.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HandedToCentral {
+    pub revision_ref: String,
+    pub proposed_digest: String,
+    pub scope: String,
+    pub name: String,
+    pub accept_action: String,
 }
 
 /// A member's revision in one snapshot: the snapshot and the capsule revision
@@ -1182,6 +1216,9 @@ pub struct Refinement {
     pub stale: bool,
     pub proposed_at_unix_seconds: u64,
     pub tests: Vec<RefinementTest>,
+    /// Where the revision waits in Central, once Accept handed it there.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub handed: Option<HandedToCentral>,
 }
 
 /// What Accept did: the member's next revision, and the snapshot Roll back
@@ -1194,6 +1231,38 @@ pub struct AcceptedRevision {
     pub active_snapshot: String,
     pub rollback_to: String,
 }
+
+/// What Accept did with a proposal whose source Central keeps: handed it to
+/// Central, which keeps it beside the skill in use and writes it only on the
+/// person's Accept there. AIKit's revision in use does not move.
+#[derive(Debug, Clone, Serialize)]
+pub struct HandedRevision {
+    pub member: String,
+    pub source: String,
+    pub handed: HandedToCentral,
+}
+
+/// What Accept did: kept the proposal as the member's next revision here, or
+/// handed it to Central, which keeps the member's source.
+#[derive(Debug, Clone, Serialize)]
+#[serde(untagged)]
+pub enum Accepted {
+    Kept(AcceptedRevision),
+    Handed(HandedRevision),
+}
+
+/// Central's act that keeps a proposed revision of one of its skills, the
+/// reading it answers, and the person's act there that writes it.
+const CENTRAL_REVISION_PROPOSE: &str = "control.skills.revision.propose";
+const CENTRAL_REVISION_ACCEPT: &str = "control.skills.revision.accept";
+const CENTRAL_REVISION_READING: &str = "central.skill-revision-reading/v1";
+/// The Control scope AIKit hands a revision in: the person's own skills,
+/// which Central addresses by name alone. A machine's or a project's skill
+/// needs the machine or project, which a snapshot does not carry.
+const CENTRAL_HANDED_SCOPE: &str = "control-user";
+/// The body goes to `ctrl` as an argument: bounded well inside the
+/// platform's argument limit.
+const MAX_HANDED_BODY: usize = 256 * 1024;
 
 /// What Discard dropped.
 #[derive(Debug, Clone, Serialize)]
@@ -1365,6 +1434,7 @@ fn refinement_of(
         in_use,
         proposed_at_unix_seconds: proposal.proposed_at_unix_seconds,
         tests: proposal.tests.clone(),
+        handed: proposal.handed.clone(),
     })
 }
 
@@ -1525,6 +1595,7 @@ pub fn propose_revision(
             .map(|elapsed| elapsed.as_secs())
             .unwrap_or_default(),
         tests: Vec::new(),
+        handed: None,
     };
     state.proposals.push(proposal.clone());
     write_toml_atomic(&dir.join(STATE_FILE), &state)?;
@@ -1586,21 +1657,70 @@ pub fn record_test(home: &AikitHome, member: &str, test: RefinementTest) -> Resu
     write_toml_atomic(&source_dir(home, &source).join(STATE_FILE), &state)
 }
 
+/// Keep what a take answered to the task's Success conditions with every
+/// proposal's Test that names it — the take that ran under the proposed
+/// revision, or one of its Repeat that ran beside it (O-I manual §19.7,
+/// Result: "What each take answered to the task's Success conditions").
+/// Answers how many Tests keep it; none is no error, since a take of a
+/// Repeat no proposal tested is kept by none.
+pub fn record_answers(
+    home: &AikitHome,
+    trace: &str,
+    answers: &[RefinementAnswer],
+) -> Result<usize> {
+    let mut kept = 0;
+    for source in registered_ids(home)? {
+        let mut state = load_state(home, &source)?;
+        let mut named = false;
+        for test in state
+            .proposals
+            .iter_mut()
+            .flat_map(|proposal| proposal.tests.iter_mut())
+        {
+            if test.trace == trace || test.beside.iter().any(|beside| beside == trace) {
+                test.answers.insert(trace.to_owned(), answers.to_vec());
+                named = true;
+                kept += 1;
+            }
+        }
+        if named {
+            write_toml_atomic(&source_dir(home, &source).join(STATE_FILE), &state)?;
+        }
+    }
+    Ok(kept)
+}
+
 /// Accept: keep the proposal as the member's next revision. The snapshot it
 /// is in becomes active, the one before stays to Roll back to, and the
 /// person's answer is the review its revision needed.
-pub fn accept_revision(home: &AikitHome, member: &str) -> Result<AcceptedRevision> {
+///
+/// A member whose source Central keeps is Central's to revise: Accept hands
+/// the proposed SKILL.md to Central, which keeps it beside the skill in use
+/// and writes it only on the person's Accept there.
+pub fn accept_revision(home: &AikitHome, member: &str) -> Result<Accepted> {
+    accept_revision_with(
+        home,
+        member,
+        &aikit_adapters::central_file_map::executable(),
+    )
+}
+
+/// Accept, asking Central through the `ctrl` at `ctrl` for a member whose
+/// source Central keeps.
+pub(crate) fn accept_revision_with(
+    home: &AikitHome,
+    member: &str,
+    ctrl: &Path,
+) -> Result<Accepted> {
     let (source, spec, mut state) = member_source(home, member)?;
     let index = state
         .proposals
         .iter()
         .position(|proposal| proposal.member == member)
         .ok_or_else(|| no_proposal(member))?;
-    if matches!(spec.kind, SourceKind::Central { .. }) {
-        return Err(refinement_error(
-            "refinement.owner_is_central",
-            format!("Central keeps the source of `{member}` (source `{source}` is bound to Central's ground): its next revision is Central's to keep, and Central has no operation that takes a proposed revision yet. Discard it here, or revise the skill in Central's ground, then sync and promote."),
-        ));
+    if let SourceKind::Central { central_root, .. } = &spec.kind {
+        return hand_to_central(home, member, &source, central_root, &mut state, index, ctrl)
+            .map(Accepted::Handed);
     }
     let proposal = state.proposals[index].clone();
     let active = state.active_snapshot.clone().unwrap_or_default();
@@ -1648,12 +1768,182 @@ pub fn accept_revision(home: &AikitHome, member: &str) -> Result<AcceptedRevisio
     state.active_snapshot = Some(proposal.snapshot.clone());
     state.proposals.remove(index);
     write_toml_atomic(&source_dir(home, &source).join(STATE_FILE), &state)?;
-    Ok(AcceptedRevision {
+    Ok(Accepted::Kept(AcceptedRevision {
         member: member.to_owned(),
         source,
         revision,
         active_snapshot: proposal.snapshot,
         rollback_to: active,
+    }))
+}
+
+/// Hand a proposed revision of a member whose source Central keeps to
+/// Central (`control.skills.revision.propose`): its SKILL.md as the body,
+/// the closes that show its reason, AIKit as who proposed it. Central keeps
+/// it beside the skill in use; the person's Accept there writes it. What
+/// Central cannot keep is refused in words before it is asked, and Central's
+/// own refusal comes back in its words; a refused hand keeps the proposal.
+fn hand_to_central(
+    home: &AikitHome,
+    member: &str,
+    source: &str,
+    central_root: &Path,
+    state: &mut SourceState,
+    index: usize,
+    ctrl: &Path,
+) -> Result<HandedRevision> {
+    use aikit_adapters::runner::CommandRunner;
+    let proposal = state.proposals[index].clone();
+    if let Some(handed) = &proposal.handed {
+        return Err(refinement_error(
+            "refinement.handed",
+            format!("the revision of `{member}` waits in Central already ({}): it is the person's to accept there ({}), and Central writes it then; sync `{source}` after", handed.revision_ref, handed.accept_action),
+        ));
+    }
+    let active = state.active_snapshot.clone().unwrap_or_default();
+    if active != proposal.based_on {
+        return Err(refinement_error(
+            "refinement.stale",
+            format!("the revision of `{member}` was drafted on snapshot `{}`, and source `{source}` now stands at `{active}`: discard it, and propose again on the revision in use", proposal.based_on),
+        ));
+    }
+    let capsule = |snapshot: &str| {
+        snapshot_dir(home, source, snapshot)
+            .join("registry/capsules")
+            .join(member)
+    };
+    let (proposed, in_use) = (capsule(&proposal.snapshot), capsule(&active));
+    // Central keeps a revision of the skill's SKILL.md; a proposal that
+    // changes any other file is not one it can keep.
+    let others = |dir: &Path| -> Result<Vec<(String, u32, Vec<u8>)>> {
+        Ok(tree_files(&dir.join("payload"))?
+            .into_iter()
+            .filter(|(relative, _, _)| relative != "SKILL.md")
+            .collect())
+    };
+    if others(&proposed)? != others(&in_use)? {
+        return Err(refinement_error(
+            "refinement.central_body_only",
+            format!("Central keeps a proposed revision of `{member}`'s SKILL.md only, and this one changes its other files too: discard it, and propose again with only SKILL.md revised"),
+        ));
+    }
+    let body_path = proposed.join("payload/SKILL.md");
+    let body = fs::read_to_string(&body_path)
+        .map_err(|error| io("refinement.read_failed", &body_path, error))?;
+    if body.len() > MAX_HANDED_BODY {
+        return Err(refinement_error(
+            "refinement.central_body_too_large",
+            format!("the proposed SKILL.md of `{member}` is {} bytes, more than the {MAX_HANDED_BODY} AIKit hands to Central in one call", body.len()),
+        ));
+    }
+    let manifest_path = proposed.join("manifest.toml");
+    let manifest: toml::Table = toml::from_str(
+        &fs::read_to_string(&manifest_path)
+            .map_err(|error| io("refinement.read_failed", &manifest_path, error))?,
+    )
+    .map_err(|error| {
+        refinement_error(
+            "refinement.manifest",
+            format!("{}: {error}", manifest_path.display()),
+        )
+    })?;
+    let name = manifest
+        .get("name")
+        .and_then(toml::Value::as_str)
+        .unwrap_or_default()
+        .to_owned();
+    let scope = manifest
+        .get("metadata")
+        .and_then(|metadata| metadata.get("control"))
+        .and_then(|control| control.get("scope"))
+        .and_then(toml::Value::as_str);
+    if scope != Some(CENTRAL_HANDED_SCOPE) || name.is_empty() {
+        let kept = scope.map_or_else(
+            || "no Control scope AIKit read".to_owned(),
+            |scope| format!("scope `{scope}`"),
+        );
+        return Err(refinement_error(
+            "refinement.central_scope",
+            format!("Central keeps `{member}` in {kept}, and AIKit hands Central a revision only of the person's own Control skills (`{CENTRAL_HANDED_SCOPE}`): a machine's or a project's skill is named by a machine or project its snapshot does not carry. Discard it here, or revise the skill in Central's ground"),
+        ));
+    }
+    let reason = proposal
+        .why
+        .iter()
+        .map(|why| format!("{}: {}", why.task_ref, why.reason))
+        .collect::<Vec<_>>()
+        .join("; ");
+    let root = std::env::var_os("CENTRAL_ROOT")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| central_root.to_path_buf());
+    let input = serde_json::json!({"scope":CENTRAL_HANDED_SCOPE,"name":name,"body":body,"reason":reason,
+        "proposed_by":format!("aikit:{member}")});
+    let argv = vec![
+        ctrl.to_string_lossy().into_owned(),
+        "--json".into(),
+        "--root".into(),
+        root.to_string_lossy().into_owned(),
+        "action".into(),
+        "run".into(),
+        CENTRAL_REVISION_PROPOSE.into(),
+        input.to_string(),
+    ];
+    let output = aikit_adapters::runner::SystemRunner::probe()
+        .run(&argv)
+        .map_err(|error| {
+            refinement_error(
+                "refinement.central_unavailable",
+                format!("Central could not be asked to keep the revision of `{member}` ({CENTRAL_REVISION_PROPOSE}): {}", error.message()),
+            )
+        })?;
+    let envelope: serde_json::Value =
+        serde_json::from_str(&output.stdout).unwrap_or(serde_json::Value::Null);
+    if envelope["ok"] != true {
+        let words = envelope["error"]["message"]
+            .as_str()
+            .map(str::to_owned)
+            .unwrap_or_else(|| output.stderr.trim().to_owned());
+        return Err(refinement_error(
+            "refinement.central_refused",
+            format!("Central did not keep the revision of `{member}` ({CENTRAL_REVISION_PROPOSE}): {words}"),
+        )
+        .with(
+            "native_error_code",
+            envelope["error"]["code"].as_str().unwrap_or_default(),
+        ));
+    }
+    let data = &envelope["data"];
+    let (Some(revision_ref), Some(proposed_digest)) = (
+        data["proposal"]["revision_ref"].as_str(),
+        data["proposal"]["proposed_digest"].as_str(),
+    ) else {
+        return Err(refinement_error(
+            "refinement.central_invalid",
+            format!("Central answered {CENTRAL_REVISION_PROPOSE} for `{member}` with no revision it keeps"),
+        ));
+    };
+    if data["schema"] != CENTRAL_REVISION_READING {
+        return Err(refinement_error(
+            "refinement.central_invalid",
+            format!("Central answered {CENTRAL_REVISION_PROPOSE} for `{member}` with something other than its revision reading"),
+        ));
+    }
+    let handed = HandedToCentral {
+        revision_ref: revision_ref.to_owned(),
+        proposed_digest: proposed_digest.to_owned(),
+        scope: CENTRAL_HANDED_SCOPE.to_owned(),
+        name,
+        accept_action: data["accept"]["action"]
+            .as_str()
+            .unwrap_or(CENTRAL_REVISION_ACCEPT)
+            .to_owned(),
+    };
+    state.proposals[index].handed = Some(handed.clone());
+    write_toml_atomic(&source_dir(home, source).join(STATE_FILE), state)?;
+    Ok(HandedRevision {
+        member: member.to_owned(),
+        source: source.to_owned(),
+        handed,
     })
 }
 
@@ -2325,11 +2615,90 @@ mod tests {
         fs::write(dir.join("references/rules.md"), format!("{marker}\n")).unwrap();
     }
 
-    /// A skill whose source Central keeps is Central's to revise: AIKit holds
-    /// the proposal beside the revision in use, but its Accept says in words
-    /// that Central has no operation to keep it, and Discard still drops it.
+    /// A Directory source standing in for Central's skill tree (FAKE): its
+    /// registration names Central's ground, and the proposal's snapshot
+    /// carries the skill's Control scope, as a Central sync's does.
+    fn as_central(home: &AikitHome, temp: &Path, scope: &str) {
+        let mut spec = load_spec(home, "practice").unwrap();
+        spec.kind = SourceKind::Central {
+            central_root: temp.join("central"),
+            source_ref: "skills".into(),
+        };
+        write_toml_atomic(&source_dir(home, "practice").join(SPEC_FILE), &spec).unwrap();
+        let state = load_state(home, "practice").unwrap();
+        let manifest_path = snapshot_dir(home, "practice", &state.proposals[0].snapshot)
+            .join("registry/capsules/skill/practice/alpha/manifest.toml");
+        let mut manifest: toml::Table =
+            toml::from_str(&fs::read_to_string(&manifest_path).unwrap()).unwrap();
+        let mut control = toml::Table::new();
+        control.insert("standing".into(), "active".into());
+        control.insert("scope".into(), scope.into());
+        let mut metadata = toml::Table::new();
+        metadata.insert("control".into(), control.into());
+        manifest.insert("metadata".into(), metadata.into());
+        fs::write(&manifest_path, toml::to_string_pretty(&manifest).unwrap()).unwrap();
+    }
+
+    /// A `ctrl` that keeps each call's arguments and answers `reply` (FAKE:
+    /// Central's envelope for `control.skills.revision.propose`).
+    #[cfg(unix)]
+    fn fake_ctrl(dir: &Path, reply: &serde_json::Value) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        fs::create_dir_all(dir).unwrap();
+        fs::write(dir.join("reply.json"), reply.to_string()).unwrap();
+        let ctrl = dir.join("ctrl");
+        fs::write(
+            &ctrl,
+            "#!/bin/sh\ndir=$(dirname \"$0\")\nfor a in \"$@\"; do printf '%s\\n' \"$a\" >> \"$dir/calls.txt\"; done\nprintf '%s\\n' '---' >> \"$dir/calls.txt\"\ncat \"$dir/reply.json\"\n",
+        )
+        .unwrap();
+        fs::set_permissions(&ctrl, fs::Permissions::from_mode(0o755)).unwrap();
+        ctrl
+    }
+
+    fn calls(dir: &Path) -> Vec<Vec<String>> {
+        fs::read_to_string(dir.join("calls.txt"))
+            .unwrap_or_default()
+            .split("---\n")
+            .filter(|call| !call.is_empty())
+            .map(|call| call.lines().map(str::to_owned).collect())
+            .collect()
+    }
+
+    fn proposed_alpha(home: &AikitHome, temp: &Path, only_skill_md: bool) {
+        let draft = temp.join("drafts/alpha");
+        let _ = fs::remove_dir_all(&draft);
+        skill(
+            &draft,
+            "alpha",
+            if only_skill_md {
+                "alpha-one"
+            } else {
+                "alpha-two"
+            },
+        );
+        fs::write(
+            draft.join("SKILL.md"),
+            "---\nname: alpha\ndescription: A member under refinement.\n---\n\nalpha-two\n",
+        )
+        .unwrap();
+        let why = vec![RefinementReason {
+            task_ref: "task:plan".into(),
+            reason: "Not met".into(),
+        }];
+        propose_revision(home, "skill/practice/alpha", &draft, why).unwrap();
+    }
+
+    // REPLACED (O-I 795 round 13): a_central_sources_proposal_is_refused_accept_in_words_and_can_be_discarded, "its Accept says in
+    // words that Central has no operation to keep it": Central keeps one now (ctrl control_skills.rs control.skills.revision.*).
+    /// A skill whose source Central keeps is Central's to revise: Accept
+    /// hands the proposed SKILL.md to Central, which keeps it beside the skill
+    /// in use (`control.skills.revision.propose`) and writes it only on the
+    /// person's Accept there. AIKit's revision in use does not move, the
+    /// proposal stays with what it was handed as, and Discard still drops it.
+    #[cfg(unix)]
     #[test]
-    fn a_central_sources_proposal_is_refused_accept_in_words_and_can_be_discarded() {
+    fn a_central_sources_proposal_is_handed_to_central_which_keeps_it_for_the_persons_accept() {
         let temp = tempfile::tempdir().unwrap();
         let home = AikitHome::at(temp.path().join("aikit"));
         home.ensure_layout().unwrap();
@@ -2338,37 +2707,141 @@ mod tests {
         add_directory(&home, "practice", &source, false).unwrap();
         sync(&home, "practice").unwrap();
         promote(&home, "practice", false, &[]).unwrap();
-        let draft = temp.path().join("drafts/alpha");
-        skill(&draft, "alpha", "alpha-two");
-        let why = vec![RefinementReason {
-            task_ref: "task:plan".into(),
-            reason: "Not met".into(),
-        }];
-        propose_revision(&home, "skill/practice/alpha", &draft, why).unwrap();
-        // The source is Central's: its registration names Central's ground.
-        let mut spec = load_spec(&home, "practice").unwrap();
-        spec.kind = SourceKind::Central {
-            central_root: temp.path().join("central"),
-            source_ref: "skills".into(),
+        proposed_alpha(&home, temp.path(), true);
+        as_central(&home, temp.path(), "control-user");
+        let in_use = load_state(&home, "practice").unwrap().active_snapshot;
+        assert_eq!(refinements(&home).unwrap()[0].owner, "central");
+        let bin = temp.path().join("bin");
+        let ctrl = fake_ctrl(
+            &bin,
+            &serde_json::json!({"ok":true,"data":{"schema":"central.skill-revision-reading/v1","name":"alpha","scope":"control-user",
+                "path":"Control/user/skills/alpha","proposal":{"revision_ref":"central:skill-revision:k1","proposed_digest":"sha256:d1"},
+                "accept":{"available":true,"action":"control.skills.revision.accept"},"skill_bytes_mutated":false}}),
+        );
+        let Accepted::Handed(handed) =
+            accept_revision_with(&home, "skill/practice/alpha", &ctrl).unwrap()
+        else {
+            panic!("a Central source's proposal is handed to Central, not kept here");
         };
-        write_toml_atomic(&source_dir(&home, "practice").join(SPEC_FILE), &spec).unwrap();
-        let listed = refinements(&home).unwrap();
-        assert_eq!(listed[0].owner, "central");
-        let refused = accept_revision(&home, "skill/practice/alpha").unwrap_err();
-        assert_eq!(refused.code(), "refinement.owner_is_central");
-        assert!(
-            refused.message().contains("Central keeps the source"),
-            "{}",
-            refused.message()
-        );
-        let state = load_state(&home, "practice").unwrap();
+        assert_eq!(handed.handed.revision_ref, "central:skill-revision:k1");
+        assert_eq!(handed.handed.proposed_digest, "sha256:d1");
+        assert_eq!(handed.handed.scope, "control-user");
+        assert_eq!(handed.handed.name, "alpha");
         assert_eq!(
-            state.proposals.len(),
-            1,
-            "a refused Accept keeps the proposal"
+            handed.handed.accept_action,
+            "control.skills.revision.accept"
         );
+        // One call (its arguments after the executable): Central's propose,
+        // at Central's root, with the proposed SKILL.md as its body and the
+        // closes that show its reason.
+        let made = calls(&bin);
+        assert_eq!(made.len(), 1, "{made:?}");
+        let call = &made[0];
+        let root = temp.path().join("central");
+        assert_eq!(
+            &call[..6],
+            [
+                "--json",
+                "--root",
+                root.to_str().unwrap(),
+                "action",
+                "run",
+                "control.skills.revision.propose"
+            ]
+        );
+        let input: serde_json::Value = serde_json::from_str(&call[6]).unwrap();
+        assert_eq!(input["scope"], "control-user");
+        assert_eq!(input["name"], "alpha");
+        assert_eq!(
+            input["body"],
+            "---\nname: alpha\ndescription: A member under refinement.\n---\n\nalpha-two\n"
+        );
+        assert_eq!(input["reason"], "task:plan: Not met");
+        assert_eq!(input["proposed_by"], "aikit:skill/practice/alpha");
+        // AIKit's revision in use stays; the proposal names where it waits.
+        let state = load_state(&home, "practice").unwrap();
+        assert_eq!(state.active_snapshot, in_use);
+        assert_eq!(state.proposals.len(), 1);
+        let listed = refinements(&home).unwrap();
+        assert_eq!(
+            listed[0].handed.as_ref().map(|h| h.revision_ref.as_str()),
+            Some("central:skill-revision:k1")
+        );
+        // Accept again: it waits in Central for the person's Accept there,
+        // and Central is not asked twice.
+        let again = accept_revision_with(&home, "skill/practice/alpha", &ctrl).unwrap_err();
+        assert_eq!(again.code(), "refinement.handed");
+        assert!(
+            again.message().contains("control.skills.revision.accept")
+                && again.message().contains("central:skill-revision:k1"),
+            "{}",
+            again.message()
+        );
+        assert_eq!(calls(&bin).len(), 1);
         let discarded = discard_revision(&home, "skill/practice/alpha").unwrap();
         assert_eq!(discarded.discarded, "skill/practice/alpha");
         assert!(refinements(&home).unwrap().is_empty());
+    }
+
+    /// What Central cannot keep is refused in words before or after it is
+    /// asked: a proposal that changes more than SKILL.md, a skill outside the
+    /// person's own Control skills, and Central's own refusal. Each refused
+    /// Accept keeps the proposal, handed to no one.
+    #[cfg(unix)]
+    #[test]
+    fn a_central_proposal_central_cannot_keep_is_refused_in_words_and_kept() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = AikitHome::at(temp.path().join("aikit"));
+        home.ensure_layout().unwrap();
+        let source = temp.path().join("practice");
+        skill(&source.join("alpha"), "alpha", "alpha-one");
+        add_directory(&home, "practice", &source, false).unwrap();
+        sync(&home, "practice").unwrap();
+        promote(&home, "practice", false, &[]).unwrap();
+        let bin = temp.path().join("bin");
+        let ctrl = fake_ctrl(
+            &bin,
+            &serde_json::json!({"ok":false,"error":{"code":"skill_revision_stale",
+                "message":"a proposed revision of alpha waits already (central:skill-revision:k0): accept or discard it first"}}),
+        );
+        // More than SKILL.md: Central keeps a revision of SKILL.md only.
+        proposed_alpha(&home, temp.path(), false);
+        as_central(&home, temp.path(), "control-user");
+        let refused = accept_revision_with(&home, "skill/practice/alpha", &ctrl).unwrap_err();
+        assert_eq!(refused.code(), "refinement.central_body_only");
+        assert!(
+            refused.message().contains("SKILL.md"),
+            "{}",
+            refused.message()
+        );
+        assert!(calls(&bin).is_empty(), "Central is not asked");
+        discard_revision(&home, "skill/practice/alpha").unwrap();
+        // A machine's skill: AIKit's snapshot does not name the machine.
+        proposed_alpha(&home, temp.path(), true);
+        as_central(&home, temp.path(), "control-machine");
+        let refused = accept_revision_with(&home, "skill/practice/alpha", &ctrl).unwrap_err();
+        assert_eq!(refused.code(), "refinement.central_scope");
+        assert!(
+            refused.message().contains("control-machine"),
+            "{}",
+            refused.message()
+        );
+        assert!(calls(&bin).is_empty(), "Central is not asked");
+        // Central's own refusal, in its words.
+        as_central(&home, temp.path(), "control-user");
+        let refused = accept_revision_with(&home, "skill/practice/alpha", &ctrl).unwrap_err();
+        assert_eq!(refused.code(), "refinement.central_refused");
+        assert!(
+            refused.message().contains("waits already")
+                && refused
+                    .message()
+                    .contains("control.skills.revision.propose"),
+            "{}",
+            refused.message()
+        );
+        assert_eq!(calls(&bin).len(), 1);
+        let state = load_state(&home, "practice").unwrap();
+        assert_eq!(state.proposals.len(), 1);
+        assert!(state.proposals[0].handed.is_none());
     }
 }

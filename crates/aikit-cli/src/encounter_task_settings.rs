@@ -3,8 +3,11 @@
 //! the agent works in it (name, colour, activator, output style, Loop with its
 //! stop condition, its cap and the song its passes take again, Launch mode,
 //! Then, Quantize, what a Repeat varies,
-//! the Effort and Tool calls envelopes, and its source: the constellation it was
-//! made of). The task record stays the
+//! the Effort and Tool calls envelopes, its source: the constellation it was
+//! made of, and its Success conditions as the person typed them: the Intent
+//! panel's Add, "A new success condition. Press Enter to add it" — their words
+//! stay here, in the source they come from, and a set of takes runs under
+//! them as they stood at its first run). The task record stays the
 //! admission's; these settings are the person's, kept under their own revision
 //! with every replaced reading in history. Task settings bind to the task they
 //! were written for (`task_ref`): a rebound session starts from the defaults
@@ -66,6 +69,10 @@ const REPEAT_STOPS: &[&str] = &["turns", "time", "done", "pass"];
 const MAX_LEVELS: usize = 3;
 const MAX_LEVEL_CHARS: usize = 64;
 const MAX_REPEATS: u64 = 32;
+/// The Success conditions a task keeps (Actuation's provided task takes at
+/// most 32), each its own words.
+const MAX_CONDITIONS: usize = 32;
+const MAX_CONDITION_CHARS: usize = 1024;
 const HANDOFF_RETIRED: &str = "Then's handoff and Hand off to are retired: to hand the work to another session, drag the task onto that session's track";
 const QUANTIZES: &[&str] = &["global", "now", "next-tool", "next-turn"];
 const MODES: &[&str] = &["automation", "modulation"];
@@ -123,6 +130,11 @@ struct TakesSet {
     levels: Value,
     repeats: Value,
     stop: Value,
+    /// The task's Success conditions as they stood when its first run
+    /// started: what each take is read against (§19.7: "The revision cannot
+    /// change them"). Null in a set an earlier AIKit started.
+    #[serde(default, skip_serializing_if = "Value::is_null")]
+    success: Value,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     ended: Option<TakesEnd>,
 }
@@ -475,6 +487,38 @@ fn flag(field: &str, value: &Value) -> Result<Value> {
         .ok_or_else(|| error(format!("{field} is on or off (true or false)")))
 }
 
+/// The task's Success conditions: a list of the person's own words, each
+/// distinct, at most 32.
+fn success_conditions(value: &Value) -> Result<Value> {
+    let rows = value
+        .as_array()
+        .ok_or_else(|| error("Success is a list of conditions, each in its own words"))?;
+    if rows.len() > MAX_CONDITIONS {
+        return Err(error(format!(
+            "A task keeps at most {MAX_CONDITIONS} Success conditions"
+        )));
+    }
+    let mut kept: Vec<Value> = Vec::with_capacity(rows.len());
+    for row in rows {
+        let condition = words("A Success condition", row, MAX_CONDITION_CHARS).map_err(|_| {
+            error(format!(
+                "A Success condition is text of 1..{MAX_CONDITION_CHARS} characters, without control characters"
+            ))
+        })?;
+        let text = condition.as_str().unwrap_or_default();
+        if kept.iter().any(|kept| {
+            kept.as_str()
+                .is_some_and(|kept| kept.to_lowercase() == text.to_lowercase())
+        }) {
+            return Err(error(format!(
+                "{text} is already a Success condition of this task"
+            )));
+        }
+        kept.push(condition);
+    }
+    Ok(Value::Array(kept))
+}
+
 fn words(field: &str, value: &Value, max: usize) -> Result<Value> {
     match value.as_str().map(str::trim) {
         Some(text)
@@ -610,11 +654,12 @@ fn validate_task(changes: &Map<String, Value>) -> Result<Map<String, Value>> {
             ("envelope_mode", value) => one_of("The envelope mode", value, MODES)?,
             ("envelope_linked", value) => flag("The envelope link", value)?,
             ("source", value) => constellation(value)?,
+            ("success", value) => success_conditions(value)?,
             // Checked against the merged mode once every change is in.
             ("effort", value) | ("tool_calls", value) => value.clone(),
             (other, _) => {
                 return Err(error(format!(
-                    "A task has no setting {other}; it takes name, colour, active, register, form, loop, loop_until, loop_cap, loop_song, launch, then, quantize, repeat_variable, repeat_levels, repeat_repeats, repeat_stop, envelope_mode, envelope_linked, source, effort and tool_calls"
+                    "A task has no setting {other}; it takes name, colour, active, register, form, loop, loop_until, loop_cap, loop_song, launch, then, quantize, repeat_variable, repeat_levels, repeat_repeats, repeat_stop, envelope_mode, envelope_linked, source, success, effort and tool_calls"
                 )))
             }
         };
@@ -701,6 +746,7 @@ fn takes_reading(takes: Option<&TakesSet>) -> Value {
             "levels": takes.levels,
             "repeats": takes.repeats,
             "stop": takes.stop,
+            "success": if takes.success.is_null() { json!([]) } else { takes.success.clone() },
             "ended": takes.ended,
         })
     })
@@ -797,6 +843,8 @@ fn reading(
             "envelope_linked": value("envelope_linked", json!(true)),
             // The constellation the task was made of, until the person sets another.
             "source": value("source", bound.source.as_ref().map_or(Value::Null, |source| json!(source))),
+            // The Success conditions the person typed for the task, in their words; none until one is added.
+            "success": value("success", json!([])),
             "effort": value("effort", json!([])),
             "tool_calls": value("tool_calls", json!([])),
             // What the stored set held in retired words, each named with what took its place.
@@ -814,7 +862,7 @@ fn reading(
         "track": track,
         "task": task,
         "previous_task": previous,
-        "standing": "The person's settings for this session and its bound task: intent the owners of launch, model and delivery read. Colour null takes the session's colour; an empty envelope inherits the session's value (Tool calls the session's Scope); retired names what stored settings held in retired words and what took its place; a null loop cap sets no cap; Repeat's levels stay empty until chosen, and its variable, levels, repeats and stop when do not change while its takes run (a change starts a new set once they end); the source is the constellation the task was made of until another is set, and null when it was made of none. A bound task's take_run is the run a Repeat's takes share in Actuation's words — the task and the session's own agent as an agent-jsonl body — or why there is none.",
+        "standing": "The person's settings for this session and its bound task: intent the owners of launch, model and delivery read. Colour null takes the session's colour; an empty envelope inherits the session's value (Tool calls the session's Scope); retired names what stored settings held in retired words and what took its place; a null loop cap sets no cap; Repeat's levels stay empty until chosen, and its variable, levels, repeats and stop when do not change while its takes run (a change starts a new set once they end); the source is the constellation the task was made of until another is set, and null when it was made of none; success holds the Success conditions the person typed for the task, in their words, and does not change while its takes run. A bound task's take_run is the run a Repeat's takes share in Actuation's words — the task and the session's own agent as an agent-jsonl body — or why there is none.",
     })
 }
 
@@ -910,6 +958,12 @@ fn check_frozen(
             running.trace_ref
         )));
     }
+    if before.get("success") != after.get("success") {
+        return Err(error(format!(
+            "The takes {} are read against the task's Success conditions as they stood at their first run: a change to them waits until the takes end.",
+            running.trace_ref
+        )));
+    }
     Ok(())
 }
 
@@ -980,6 +1034,7 @@ fn takes_act(
                 levels: repeat_value(&task.set, "repeat_levels"),
                 repeats: repeat_value(&task.set, "repeat_repeats"),
                 stop: repeat_value(&task.set, "repeat_stop"),
+                success: task.set.get("success").cloned().unwrap_or(json!([])),
                 ended: None,
             });
         }
@@ -2136,6 +2191,85 @@ mod tests {
         assert_eq!(
             reading(&session(), Some(&changed), Some(&task))["task"]["repeat_repeats"],
             5
+        );
+    }
+
+    /// The task's typed Success conditions (O-I manual §19.1, The Intent panel:
+    /// "Add — A new success condition. Press Enter to add it"): the person's
+    /// own words for this task, kept with its settings; a set of takes runs
+    /// under them as they stood at its first run, and they do not change while
+    /// it runs (§19.7: "The revision cannot change them").
+    #[test]
+    fn a_tasks_typed_success_conditions_are_its_settings_and_hold_while_its_takes_run() {
+        let task = bound("task:fixtures");
+        let read = reading(&session(), None, Some(&task));
+        assert_eq!(
+            read["task"]["success"],
+            json!([]),
+            "none until one is added"
+        );
+        let kept = apply(
+            &session(),
+            None,
+            Some(&task),
+            json!({"task": {"task_ref": "task:fixtures", "set": {"success": [
+                "The fixtures pass", "  No file outside fixtures/ changes  "]}}}),
+            None,
+        )
+        .unwrap();
+        let read = reading(&session(), Some(&kept), Some(&task));
+        assert_eq!(
+            read["task"]["success"],
+            json!(["The fixtures pass", "No file outside fixtures/ changes"])
+        );
+        for (wrong, words) in [
+            (json!("The fixtures pass"), "a list of conditions"),
+            (json!([""]), "1..1024 characters"),
+            (json!(["Same", "same"]), "already a Success condition"),
+            (json!(vec!["c"; 33]), "at most 32"),
+        ] {
+            let refused = apply(
+                &session(),
+                Some(kept.clone()),
+                Some(&task),
+                json!({"task": {"task_ref": "task:fixtures", "set": {"success": wrong}}}),
+                Some(&kept.revision),
+            )
+            .unwrap_err()
+            .to_string();
+            assert!(refused.contains(words), "{wrong}: {refused}");
+        }
+        // A set of takes freezes them as they stood at its first run.
+        let repeat = apply(
+            &session(),
+            Some(kept.clone()),
+            Some(&task),
+            json!({"task": {"task_ref": "task:fixtures", "set": {"launch": "repeat"}}}),
+            Some(&kept.revision),
+        )
+        .unwrap();
+        let running = apply(
+            &session(),
+            Some(repeat.clone()),
+            Some(&task),
+            json!({"takes": {"start": {"task_ref": "task:fixtures", "trace_ref": "takes:t9"}}}),
+            Some(&repeat.revision),
+        )
+        .unwrap();
+        let read = reading(&session(), Some(&running), Some(&task));
+        assert_eq!(read["task"]["takes"]["success"], read["task"]["success"]);
+        let refused = apply(
+            &session(),
+            Some(running.clone()),
+            Some(&task),
+            json!({"task": {"task_ref": "task:fixtures", "set": {"success": ["Another"]}}}),
+            Some(&running.revision),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            refused.contains("Success conditions") && refused.contains("takes:t9"),
+            "{refused}"
         );
     }
 

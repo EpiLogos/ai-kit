@@ -60,9 +60,13 @@
 //! `comparison.rs` `run_with`), is composed here too ([`take_run`]) and read
 //! with the session's settings (`encounter_task_settings.rs`): the session's
 //! bound task as a provided task — its id the task's ref, its prompt the
-//! task's name as it stands (the text a Loop's run resubmits), no success
-//! conditions and no test, because AIKit keeps neither — and this body as an
-//! `agent-jsonl` process.
+//! task's name as it stands (the text a Loop's run resubmits), its Success
+//! conditions the words the person typed for it (the settings' `success`),
+//! and no test, because AIKit keeps none — and this body as an `agent-jsonl`
+//! process. Once a take's run has ended Actuation asks the body to answer
+//! each condition, holds each answer to its evidence, and hands the answers
+//! back at `finalize` (`inspection.answers`); the body keeps them with every
+//! proposal's Test that names the take (`skill_sources::record_answers`).
 use crate::encounter_resident_turn::{total_tokens, ResidentOwner, TurnAnswer, TurnWords};
 use crate::encounter_service::{EncounterRequest, EncounterService};
 use aikit_adapters::central_placement::{AllocatedCentralTask, CentralTaskRequest};
@@ -197,9 +201,16 @@ pub fn take_run(
         "--socket".to_owned(),
         host.socket.display().to_string(),
     ]);
+    // The Success conditions the person typed for the task (its settings' `success`).
+    let conditions: Vec<&str> = task["success"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .collect();
     json!({
         "run": {
-            "task": {"id": task_ref, "prompt": name, "successConditions": []},
+            "task": {"id": task_ref, "prompt": name, "successConditions": conditions},
             "body": {
                 "protocol": PROTOCOL,
                 "fixture_provider": false,
@@ -230,6 +241,56 @@ pub fn take_run(
             "network_policy_digest": "none",
         },
     })
+}
+
+/// What Actuation read a take to have answered to each of the task's
+/// Success conditions (research execution.rs `answers`), in AIKit's words:
+/// each answer met, not met or open, its evidence named in words.
+fn answers_of(inspection: &Value) -> Vec<crate::skill_sources::RefinementAnswer> {
+    let evidence = |item: &Value| {
+        if let Some(file) = item["file"].as_str() {
+            return Some(format!(
+                "file {file} ({})",
+                item["digest"].as_str().unwrap_or("no digest")
+            ));
+        }
+        let test = item.get("test").filter(|test| test.is_object())?;
+        let exit = test["code"]
+            .as_i64()
+            .map(|code| format!(" (exit {code})"))
+            .unwrap_or_default();
+        Some(format!(
+            "the task's own test: {}{exit}",
+            test["answer"].as_str().unwrap_or("unread")
+        ))
+    };
+    inspection["answers"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .take(32)
+        .filter_map(|row| {
+            let condition = row["condition"].as_str()?.chars().take(1024).collect();
+            let answer = row["answer"]
+                .as_str()
+                .filter(|answer| ["met", "not met", "open"].contains(answer))?
+                .to_owned();
+            Some(crate::skill_sources::RefinementAnswer {
+                condition,
+                answer,
+                evidence: row["evidence"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .take(16)
+                    .filter_map(evidence)
+                    .collect(),
+                why: row["why"]
+                    .as_str()
+                    .map(|why| why.chars().take(1024).collect()),
+            })
+        })
+        .collect()
 }
 
 /// A take's own session: one SessionSpace per set of takes (the trial's
@@ -572,6 +633,9 @@ pub struct TakeBody {
     tool_calls: Option<String>,
     /// The take's own NOW, once Central has allocated it; closed at finalize.
     now: Option<AllocatedCentralTask>,
+    /// The take's trace, once its preflight named it: what its answers to the
+    /// task's Success conditions are kept by.
+    trace: Option<String>,
 }
 
 #[cfg(unix)]
@@ -587,6 +651,7 @@ impl TakeBody {
             turns: 0,
             tool_calls: None,
             now: None,
+            trace: None,
         }
     }
 
@@ -620,7 +685,7 @@ impl TakeBody {
                 "preflight" => self.preflight(&message["configuration"]),
                 "turn" => self.turn(&message["turn"]),
                 "complete" => self.complete(&message["request"]),
-                "finalize" => Ok(self.finalize()),
+                "finalize" => Ok(self.finalize_with(&message["inspection"])),
                 other => Err(format!(
                     "A take's body answers preflight, turn, complete and finalize; not {other:?}"
                 )),
@@ -665,6 +730,7 @@ impl TakeBody {
             .filter(|world| world.is_absolute() && world.is_dir())
             .ok_or("The take's configuration names no World directory")?;
         let trace = text("trace_ref").ok_or("The take's configuration names no trace")?;
+        self.trace = Some(trace.to_owned());
         let level = configuration.get("level").cloned().unwrap_or(Value::Null);
         let plan = level_of(&level, model)?;
         let recorded = EncounterService::session_agent(&self.home, &self.own)
@@ -798,6 +864,7 @@ impl TakeBody {
                             .cloned()
                             .collect(),
                         now_ref: now["now_ref"].as_str().map(str::to_owned),
+                        answers: Default::default(),
                     };
                     if let Err(error) = crate::skill_sources::record_test(&self.home, member, test)
                     {
@@ -941,6 +1008,28 @@ impl TakeBody {
         };
         let answer = self.take(&text)?;
         Ok(json!({"output": answer.said, "usage": usage_of(&answer)}))
+    }
+
+    /// Finalize as Actuation asks it: keep what the take answered to the
+    /// task's Success conditions (`inspection.answers`, Actuation's reading)
+    /// with every proposal's Test that names the take, then release it.
+    fn finalize_with(&mut self, inspection: &Value) -> Value {
+        let answers = answers_of(inspection);
+        let kept = match (&self.trace, answers.is_empty()) {
+            (Some(trace), false) => Some(
+                crate::skill_sources::record_answers(&self.home, trace, &answers).map_err(
+                    |error| format!("AIKit did not keep the take's answers: {}", error.message()),
+                ),
+            ),
+            _ => None,
+        };
+        let mut answer = self.finalize();
+        match kept {
+            Some(Ok(tests)) => answer["answers"] = json!({"kept": answers.len(), "tests": tests}),
+            Some(Err(words)) => answer["answers"] = json!({"kept": 0, "reason": words}),
+            None => {}
+        }
+        answer
     }
 
     /// Release the take's resident, once; its canonical history stays. Then
@@ -1116,6 +1205,24 @@ mod tests {
             assert!(run["basis"][held].is_string(), "{held}: {run}");
         }
         assert!(run.get("refused").is_none());
+    }
+
+    /// The take run hands Actuation the task's Success conditions, the words
+    /// the person typed for it (its settings' `success`), so each take is
+    /// read against them.
+    #[test]
+    fn the_run_hands_the_tasks_success_conditions() {
+        let agent = SessionAgent {
+            provider: "take-peer".into(),
+            model: Some("test/a".into()),
+        };
+        let mut task = task();
+        task["success"] = json!(["The fixtures pass", "No file outside fixtures/ changes"]);
+        let run = take_run(&host(), &session(), &task, Some(&agent));
+        assert_eq!(
+            run["run"]["task"]["successConditions"],
+            json!(["The fixtures pass", "No file outside fixtures/ changes"])
+        );
     }
 
     #[test]
