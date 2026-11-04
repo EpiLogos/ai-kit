@@ -157,6 +157,12 @@ pub struct Capture {
     pub source_ref: Option<String>,
     /// Who observed it: `human`, or an agent ref. Unknown stays unknown.
     pub by: Option<String>,
+    /// The `[metadata]` the capsule carries once it is accepted, when the
+    /// capturer states it — a Method a Routine runs declares its native body
+    /// there (`[metadata.native-method]`). One JSON object, kept beside the
+    /// body and written into the manifest as TOML by the promotion; the inbox
+    /// never executes it.
+    pub metadata: Option<serde_json::Value>,
 }
 
 impl Capture {
@@ -171,6 +177,7 @@ impl Capture {
             scope: CaptureScope::default(),
             source_ref: None,
             by: None,
+            metadata: None,
         }
     }
 
@@ -201,6 +208,12 @@ impl Capture {
     #[must_use]
     pub fn by(mut self, by: impl Into<String>) -> Self {
         self.by = Some(by.into());
+        self
+    }
+
+    #[must_use]
+    pub fn with_metadata(mut self, metadata: serde_json::Value) -> Self {
+        self.metadata = Some(metadata);
         self
     }
 }
@@ -275,6 +288,8 @@ pub struct Candidate {
     pub project_root: Option<PathBuf>,
     pub path: PathBuf,
     pub created_at: Timestamp,
+    /// The `[metadata]` the capturer stated for the accepted capsule.
+    pub metadata: Option<serde_json::Value>,
 }
 
 /// Everything about a candidate that the database row does not carry.
@@ -299,6 +314,8 @@ struct CandidateMeta {
     confidence: Option<Confidence>,
     #[serde(default)]
     kind_reason: Option<String>,
+    #[serde(default)]
+    metadata: Option<serde_json::Value>,
 }
 
 const META_FILE: &str = "meta.json";
@@ -651,6 +668,7 @@ impl<'a> Inbox<'a> {
             session: capture.session.as_ref().map(|s| s.as_str().to_string()),
             confidence: Some(classification.confidence),
             kind_reason: Some(classification.reason.clone()),
+            metadata: capture.metadata.clone(),
         };
         meta.store(&path)?;
 
@@ -672,6 +690,7 @@ impl<'a> Inbox<'a> {
             project_root: capture.project_root.clone(),
             path,
             created_at: Timestamp::now(),
+            metadata: capture.metadata.clone(),
         };
         self.record(&candidate)?;
         let announcement = self.announce(&candidate)?;
@@ -953,7 +972,13 @@ impl<'a> Inbox<'a> {
             .filter(|name| !existing.exports.contains(name))
             .cloned()
             .collect();
-        if !undecided || (says_kind.is_none() && new_exports.is_empty()) {
+        // Metadata the capturer states now, where the waiting candidate holds other.
+        let says_metadata = capture
+            .metadata
+            .as_ref()
+            .filter(|metadata| existing.metadata.as_ref() != Some(*metadata));
+        if !undecided || (says_kind.is_none() && new_exports.is_empty() && says_metadata.is_none())
+        {
             return Ok(existing);
         }
 
@@ -964,6 +989,9 @@ impl<'a> Inbox<'a> {
             updated.kind_reason = "declared by the capturer".to_string();
         }
         updated.exports.extend(new_exports);
+        if let Some(metadata) = says_metadata {
+            updated.metadata = Some(metadata.clone());
+        }
         require_command_kind(updated.kind, &updated.exports)?;
 
         let meta = CandidateMeta {
@@ -974,6 +1002,7 @@ impl<'a> Inbox<'a> {
             session: updated.session.clone(),
             confidence: Some(updated.confidence),
             kind_reason: Some(updated.kind_reason.clone()),
+            metadata: updated.metadata.clone(),
         };
         meta.store(&updated.path)?;
         self.index
@@ -1820,6 +1849,21 @@ fn render_manifest(
             quote(edits.id.leaf())
         )),
     }
+    // What the capturer stated for the capsule's `[metadata]`, as it stated it.
+    if let Some(toml::Value::Table(metadata)) = candidate
+        .metadata
+        .as_ref()
+        .and_then(|metadata| toml::Value::try_from(metadata).ok())
+    {
+        if !metadata.is_empty() {
+            let mut tables = toml::Table::new();
+            tables.insert("metadata".into(), toml::Value::Table(metadata));
+            if let Ok(rendered) = toml::to_string(&tables) {
+                out.push('\n');
+                out.push_str(&rendered);
+            }
+        }
+    }
     out
 }
 
@@ -1890,6 +1934,7 @@ fn candidate_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Result<Candidate>>
             project_root: project_root.map(PathBuf::from),
             path,
             created_at: Timestamp::from_nanos(created),
+            metadata: meta.metadata,
         })
     })())
 }

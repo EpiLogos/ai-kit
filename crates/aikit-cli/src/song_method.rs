@@ -110,6 +110,67 @@ fn quoted(value: &str) -> String {
     format!("\"{}\"", value.replace('\\', "\\\\").replace('"', "\\\""))
 }
 
+/// The canon unit a song's clip became in a Run (O-I #844; DLW manual §19.1 Songs: "It comes round again by … a routine's
+/// schedule. The schedule is the routine's, and the song keeps none"): the Software Factory's developmental state (an absolute
+/// path), the Run the unit stands in, and the unit's key.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SongTake {
+    pub state: String,
+    pub run_ref: String,
+    pub unit: String,
+}
+
+/// The `[metadata]` that makes the captured Method one a Routine runs, each run a take of the song: the native body
+/// `factory-song-take`, the one Factory Action it calls and the canon unit it performs (routine_native.rs). It is read back
+/// through the Routine's own parser, so the Method the person accepts is one its Routine can run; else refused, in its words.
+pub fn take_metadata(take: &SongTake) -> Result<Value> {
+    let metadata = serde_json::json!({"native-method": {
+        "schema": crate::routine_native::NATIVE_METHOD_SCHEMA,
+        "body": "factory-song-take",
+        "actions": [crate::routine_native::FACTORY_PERFORM],
+        "song": {"state": take.state, "run_ref": take.run_ref, "unit": take.unit},
+    }});
+    let unbound = |why: String| {
+        refused(format!(
+            "The song's take cannot be bound to the Method: {why}."
+        ))
+    };
+    let mut tables = toml::Table::new();
+    tables.insert(
+        "metadata".into(),
+        toml::Value::try_from(&metadata).map_err(|e| unbound(e.to_string()))?,
+    );
+    let rendered = toml::to_string(&tables).map_err(|e| unbound(e.to_string()))?;
+    let capsule = aikit_core::Capsule::from_toml_str(&format!(
+        "schema = 1\nid = \"skill/song/take\"\nkind = \"skill\"\nname = \"take\"\ndescription = \"METHOD: take\"\n\
+         [skill]\nroot = \"payload\"\n{rendered}"
+    ))
+    .map_err(|e| unbound(e.message().to_owned()))?;
+    crate::routine_native::NativeMethod::from_capsule(&capsule).map_err(|e| {
+        unbound(
+            e.message()
+                .trim_start_matches("skill/song/take: ")
+                .to_owned(),
+        )
+    })?;
+    Ok(metadata)
+}
+
+/// The Method's text with what each run of its Routine does.
+pub fn with_take(body: &str, take: &SongTake) -> String {
+    format!(
+        "{}\n\n## On a Routine\n\nRun by a Routine, each run is a take of this song: Software Factory performs the canon unit `{}` \
+         of the Run {} again (`factory workflow perform {} {} {}`), and its attempt Actions start the take's units. The schedule is \
+         the Routine's; the song keeps none.\n",
+        body.trim_end(),
+        take.unit,
+        take.run_ref,
+        take.state,
+        take.run_ref,
+        take.unit
+    )
+}
+
 /// The Method the clip gives, titled `title` (the song's own key when none is named). Refused, in words, for anything that is not
 /// a song's clip with at least one unit.
 pub fn method_from_song(clip: &Value, title: Option<&str>) -> Result<SongMethod> {
@@ -321,6 +382,45 @@ mod tests {
         assert!(method
             .body
             .contains("- agree: once check have returned, report go on."));
+    }
+
+    #[test]
+    fn a_take_binds_the_canon_unit_as_the_native_body_a_routine_runs_and_the_text_says_so() {
+        let take = SongTake {
+            state: "/walk/taker/.factory/development-state.json".into(),
+            run_ref: "run:R1".into(),
+            unit: "release-check".into(),
+        };
+        let metadata = take_metadata(&take).unwrap();
+        assert_eq!(metadata["native-method"]["body"], "factory-song-take");
+        assert_eq!(
+            metadata["native-method"]["actions"],
+            json!(["factory:action/workflow.perform"])
+        );
+        assert_eq!(
+            metadata["native-method"]["song"],
+            json!({"state": "/walk/taker/.factory/development-state.json", "run_ref": "run:R1", "unit": "release-check"})
+        );
+        let body = with_take("# Release check\n", &take);
+        assert!(
+            body.contains("## On a Routine")
+                && body.contains("`release-check`")
+                && body.contains("run:R1"),
+            "{body}"
+        );
+        // What the Routine's own parser refuses is refused here, before anything is filed.
+        let relative = SongTake {
+            state: "walk/state.json".into(),
+            ..take.clone()
+        };
+        let error = take_metadata(&relative).unwrap_err();
+        assert_eq!(error.code(), "capture.song_invalid");
+        assert!(error.to_string().contains("absolute"), "{error}");
+        let blank = SongTake {
+            unit: String::new(),
+            ..take
+        };
+        assert!(take_metadata(&blank).is_err());
     }
 
     #[test]

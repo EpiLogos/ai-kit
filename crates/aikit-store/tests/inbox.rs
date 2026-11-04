@@ -443,6 +443,70 @@ fn promotion_writes_a_capsule_the_registry_loader_can_read_without_anyone_writin
 }
 
 #[test]
+fn metadata_the_capturer_states_reaches_the_promoted_capsule_and_a_later_statement_updates_a_waiting_one(
+) {
+    // A Method a Routine runs declares its native body in the capsule's [metadata] (O-I #844): the capture states it, the inbox
+    // keeps it beside the body, and the promotion writes it into the manifest the registry loader reads.
+    let tmp = tempfile::tempdir().unwrap();
+    let (home, index) = setup(tmp.path());
+    let inbox = Inbox::new(&home, &index);
+    let registry = tmp.path().join("registry");
+    let metadata = serde_json::json!({"native-method": {"schema": "aikit.native-method/v1", "body": "factory-song-take",
+        "actions": ["factory:action/workflow.perform"], "song": {"state": "/s.json", "run_ref": "run:R1", "unit": "u"}}});
+    let body = "# Release check\n\nRun the song again.\n";
+    let plain = inbox
+        .capture(Capture::new("METHOD: Release check", body).of_kind(Kind::Skill))
+        .unwrap()
+        .candidate;
+    assert_eq!(plain.metadata, None);
+    // The same text captured again with metadata: the waiting candidate takes it.
+    let again = inbox
+        .capture(
+            Capture::new("METHOD: Release check", body)
+                .of_kind(Kind::Skill)
+                .with_metadata(metadata.clone()),
+        )
+        .unwrap();
+    assert_eq!(again.duplicate_of.as_deref(), Some(plain.id.as_str()));
+    let kept = inbox
+        .candidates()
+        .unwrap()
+        .into_iter()
+        .find(|c| c.id == plain.id)
+        .unwrap();
+    assert_eq!(
+        kept.metadata.as_ref(),
+        Some(&metadata),
+        "kept beside the body"
+    );
+
+    let edits = PromotionEdits::new(cid("skill/test/release-check"), "METHOD: Release check");
+    let promoted = inbox.promote(&plain.id, &edits, &registry).unwrap();
+    let manifest = fs::read_to_string(&promoted.manifest_path).unwrap();
+    assert!(manifest.contains("[metadata.native-method]"), "{manifest}");
+    let load = load_registry(&registry, RegistrySource::personal()).unwrap();
+    assert!(load.problems.is_empty(), "{:?}", load.problems);
+    let capsule = load.catalog.get(&cid("skill/test/release-check")).unwrap();
+    let native = capsule
+        .metadata
+        .get("native-method")
+        .and_then(|v| v.as_table())
+        .unwrap();
+    assert_eq!(
+        native.get("body").and_then(|v| v.as_str()),
+        Some("factory-song-take")
+    );
+    assert_eq!(
+        native
+            .get("song")
+            .and_then(|v| v.get("run_ref"))
+            .and_then(|v| v.as_str()),
+        Some("run:R1"),
+        "the capsule carries the metadata as stated"
+    );
+}
+
+#[test]
 fn a_promoted_candidate_is_marked_promoted_and_leaves_the_queue() {
     let tmp = tempfile::tempdir().unwrap();
     let (home, index) = setup(tmp.path());

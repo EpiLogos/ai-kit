@@ -107,6 +107,20 @@ run_ref = "run:…"
 unit = "release-check"
 ```
 
+The person need not write that capsule by hand: `aikit capture TITLE --from-song
+--take-state STATE --take-run RUN --take-unit UNIT`, with the song's clip on
+stdin, writes the Method from the clip with that native body and song table in
+the metadata the capture keeps, and a section of its text saying what each run
+does. It waits in the inbox like any capture; the person's Accept (`aikit
+promote`) writes the metadata into the capsule's manifest. The binding is read
+back through the Routine's own parser before anything is filed, so a relative
+state or a missing unit is refused at the capture. The Method is filed for the
+AIKit home (`--scope home`, the default): a Routine resolves the Methods
+catalogued there, so a project- or session-scoped take is refused
+(`capture.song_take_scope`). Then prove the Method,
+prepare its schedule (`aikit routine prepare-schedule`) and create and enable
+the Routine as above.
+
 Each run of the Routine is one take: the runner calls `factory workflow perform
 <state> <run_ref> <unit> --json`, requires `factory.song-take/v1` and its take
 number, and records the take, the unit, the Run it came from, the take's Run and

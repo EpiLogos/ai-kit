@@ -5148,6 +5148,20 @@ pub struct CaptureArgs {
     /// until the person accepts it.
     #[arg(long = "from-song", conflicts_with_all = ["kind", "exports"])]
     pub from_song: bool,
+    /// With `--from-song`, the canon unit the song became in a Run (with
+    /// `--take-run` and `--take-unit`): the Method is then one a Routine runs,
+    /// each run a take of the song (`factory workflow perform STATE RUN UNIT`,
+    /// the native body `factory-song-take`), filed for your AIKit home where a
+    /// Routine finds it (`--scope home`, the default; any other scope is
+    /// refused). The Software Factory's developmental state, as an absolute path.
+    #[arg(long = "take-state", value_name = "PATH", requires_all = ["from_song", "take_run", "take_unit"])]
+    pub take_state: Option<String>,
+    /// The Run the canon unit stands in (with `--take-state`).
+    #[arg(long = "take-run", value_name = "RUN", requires_all = ["from_song", "take_state", "take_unit"])]
+    pub take_run: Option<String>,
+    /// The canon unit's key (with `--take-state`).
+    #[arg(long = "take-unit", value_name = "UNIT", requires_all = ["from_song", "take_state", "take_run"])]
+    pub take_unit: Option<String>,
 }
 
 #[derive(Debug, Args)]

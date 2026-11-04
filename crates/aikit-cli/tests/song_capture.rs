@@ -251,3 +251,139 @@ fn a_song_that_holds_a_secret_is_held_and_anything_else_is_refused() {
         "the refused capture filed nothing"
     );
 }
+
+/// O-I #844: a Routine on a song (DLW manual §19.1 Songs: "It comes round again by … a routine's schedule. The schedule is the
+/// routine's, and the song keeps none"). Captured with the canon unit it became in a Run (`--take-state`, `--take-run`,
+/// `--take-unit`), the Method the person accepts declares the native body `factory-song-take` bound to that unit: a Routine over it
+/// runs each run as a take of the song (`factory workflow perform`). Its text says so; nothing is promoted by the capture.
+#[test]
+fn a_song_captured_with_its_canon_unit_is_accepted_as_a_method_a_routine_takes_the_song_with() {
+    let world = World::new();
+    let state = "/walk/taker/.factory/development-state.json";
+    let captured = world.json(
+        &[
+            "capture",
+            "Release check",
+            "--from-song",
+            "--scope",
+            "home",
+            "--by",
+            "human",
+            "--take-state",
+            state,
+            "--take-run",
+            "run:R1",
+            "--take-unit",
+            "release-check",
+        ],
+        Some(&clip().to_string()),
+    );
+    let data = &captured["data"];
+    assert_eq!(data["state"], "ready", "{data}");
+    assert_eq!(
+        data["song"]["take"],
+        json!({"state": state, "run_ref": "run:R1", "unit": "release-check"}),
+        "the reply names the unit each run takes"
+    );
+    let candidate = data["candidate"].as_str().unwrap().to_owned();
+    let promoted = world.json(&["promote", &candidate], None);
+    let manifest = fs::read_to_string(promoted["data"]["manifest"].as_str().unwrap()).unwrap();
+    let capsule = aikit_core::Capsule::from_toml_str(&manifest).unwrap();
+    let native = aikit_cli::routine_native::NativeMethod::from_capsule(&capsule)
+        .unwrap()
+        .expect("the accepted Method declares its native body");
+    assert_eq!(native.body.as_str(), "factory-song-take");
+    let song = native.song.expect("bound to the canon unit");
+    assert_eq!(
+        (
+            song.state.to_string_lossy().as_ref(),
+            song.run_ref.as_str(),
+            song.unit.as_str()
+        ),
+        (state, "run:R1", "release-check")
+    );
+    let skill = fs::read_to_string(
+        PathBuf::from(promoted["data"]["root"].as_str().unwrap()).join("payload/SKILL.md"),
+    )
+    .unwrap();
+    assert!(
+        skill.contains("## On a Routine") && skill.contains("each run is a take"),
+        "{skill}"
+    );
+
+    // A take is bound only to a song's capture, all three named, the state absolute: else refused, and nothing filed.
+    let before = world.json(&["inbox"], None)["data"]["items"]
+        .as_array()
+        .unwrap()
+        .len();
+    for args in [
+        vec![
+            "capture",
+            "Half",
+            "--from-song",
+            "--take-state",
+            state,
+            "--json",
+        ],
+        vec![
+            "capture",
+            "Not a song",
+            "--take-state",
+            state,
+            "--take-run",
+            "run:R1",
+            "--take-unit",
+            "u",
+            "--json",
+        ],
+        vec![
+            "capture",
+            "Relative",
+            "--from-song",
+            "--take-state",
+            "walk/state.json",
+            "--take-run",
+            "run:R1",
+            "--take-unit",
+            "u",
+            "--json",
+        ],
+    ] {
+        let output = world.run(&args, Some(&clip().to_string()));
+        assert!(!output.status.success(), "{args:?} must be refused");
+    }
+    // A Routine runs a Method catalogued in the AIKit home (routine_dispatch.rs CatalogMethodResolver): a take's Method filed for the
+    // project would be accepted where no Routine finds it, so the capture says so instead.
+    let project = world.run(
+        &[
+            "capture",
+            "Project",
+            "--from-song",
+            "--scope",
+            "project",
+            "--take-state",
+            state,
+            "--take-run",
+            "run:R1",
+            "--take-unit",
+            "u",
+            "--json",
+        ],
+        Some(&clip().to_string()),
+    );
+    assert!(!project.status.success());
+    let said = String::from_utf8_lossy(&project.stdout).to_string()
+        + &String::from_utf8_lossy(&project.stderr);
+    assert!(
+        said.contains("capture.song_take_scope") && said.contains("--scope home"),
+        "{said}"
+    );
+    assert_eq!(
+        world.json(&["inbox"], None)["data"]["items"]
+            .as_array()
+            .unwrap()
+            .len(),
+        before,
+        "a refused take files nothing"
+    );
+}

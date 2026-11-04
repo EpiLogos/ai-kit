@@ -7247,6 +7247,19 @@ fn cmd_capture(cwd: &std::path::Path, a: CaptureArgs) -> Result<Reply> {
     }
     // A song's clip is written into a Method first, and the Method travels the
     // same road as any capture: scanned, compared, proposed, never promoted here.
+    // A song captured with the canon unit it became in a Run: the Method a Routine takes it with.
+    let take = match (a.take_state, a.take_run, a.take_unit) {
+        (Some(state), Some(run_ref), Some(unit)) => Some(aikit_cli::song_method::SongTake {
+            state,
+            run_ref,
+            unit,
+        }),
+        _ => None,
+    };
+    let metadata = take
+        .as_ref()
+        .map(aikit_cli::song_method::take_metadata)
+        .transpose()?;
     let (title, body, kind, source_ref, song) = if a.from_song {
         let clip: Value = serde_json::from_str(&body).map_err(|e| {
             AikitError::new(
@@ -7258,10 +7271,15 @@ fn cmd_capture(cwd: &std::path::Path, a: CaptureArgs) -> Result<Reply> {
             )
         })?;
         let method = aikit_cli::song_method::method_from_song(&clip, Some(&a.title))?;
-        let song = jval!({"clip": method.source_ref, "steps": method.steps});
+        let song = jval!({"clip": method.source_ref, "steps": method.steps,
+            "take": take.as_ref().map(|t| jval!({"state": t.state, "run_ref": t.run_ref, "unit": t.unit}))});
+        let body = match &take {
+            Some(take) => aikit_cli::song_method::with_take(&method.body, take),
+            None => method.body,
+        };
         (
             method.title,
-            method.body,
+            body,
             Some(aikit_core::Kind::Skill),
             a.source_ref.or(method.source_ref),
             Some(song),
@@ -7275,6 +7293,25 @@ fn cmd_capture(cwd: &std::path::Path, a: CaptureArgs) -> Result<Reply> {
         (a.title, body, kind, a.source_ref, None)
     };
 
+    let scope: aikit_store::inbox::CaptureScope = a
+        .scope
+        .as_deref()
+        .map(std::str::FromStr::from_str)
+        .transpose()?
+        .unwrap_or_default();
+    // A take's Method is run by a Routine, which resolves the Methods catalogued in
+    // this AIKit home (routine_dispatch.rs CatalogMethodResolver): one filed for a
+    // project or a session would be accepted where no Routine finds it.
+    if take.is_some() && scope != aikit_store::inbox::CaptureScope::Home {
+        return Err(AikitError::new(
+            "capture.song_take_scope",
+            format!(
+                "a song's take is run by a Routine, and a Routine runs a Method catalogued in your AIKit home: capture it with \
+                 --scope home (a {}-scoped Method is not one a Routine finds). Nothing is filed",
+                scope.as_str()
+            ),
+        ));
+    }
     let inbox = Inbox::new(service.home(), service.index());
     let capture = Capture {
         title,
@@ -7283,14 +7320,10 @@ fn cmd_capture(cwd: &std::path::Path, a: CaptureArgs) -> Result<Reply> {
         exports: a.exports,
         project_root: service.descriptor().project_root.clone(),
         session: service.descriptor().session_id.clone(),
-        scope: a
-            .scope
-            .as_deref()
-            .map(std::str::FromStr::from_str)
-            .transpose()?
-            .unwrap_or_default(),
+        scope,
         source_ref,
         by: a.by,
+        metadata,
     };
     // Scanned before storage, never before display: a secret must not reach a file.
     let outcome = inbox.capture_against(capture, service.snapshot())?;

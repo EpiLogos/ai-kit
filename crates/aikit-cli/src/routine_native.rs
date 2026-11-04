@@ -51,7 +51,7 @@ const NOW_ROLLOVER: &str = "projectcentral.now.rollover";
 const FACTORY_COLLECT: &str = "factory:action/telemetry.collect";
 const FACTORY_FIELD: &str = "factory:action/telemetry.field";
 const FILE_MAP_REFRESH: &str = "central.file-map.refresh";
-const FACTORY_PERFORM: &str = "factory:action/workflow.perform";
+pub(crate) const FACTORY_PERFORM: &str = "factory:action/workflow.perform";
 /// Factory's take of a song, the receipt a song's Routine run reads.
 const SONG_TAKE: &str = "factory.song-take/v1";
 
