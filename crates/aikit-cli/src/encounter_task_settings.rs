@@ -1,7 +1,8 @@
 //! An agent session's own settings, beside its bound task: how its track
 //! plays (its Name, Telemetry, Solo) and how its task launches, what follows it and how
 //! the agent works in it (name, colour, activator, output style, Loop with its
-//! stop condition and cap, Launch mode, Then, Quantize, what a Repeat varies,
+//! stop condition, its cap and the song its passes take again, Launch mode,
+//! Then, Quantize, what a Repeat varies,
 //! the Effort and Autonomy envelopes, and its source: the constellation it was
 //! made of). The task record stays the
 //! admission's; these settings are the person's, kept under their own revision
@@ -404,6 +405,38 @@ pub(super) fn constellation(value: &Value) -> Result<Value> {
     }
 }
 
+/// The song a Loop's passes take again (O-I #844; DLW manual §19.1 Songs: "It comes round again by Loop"): the canon unit a
+/// song's clip became on the task's track, in the Run that song stands in — the Software Factory's developmental state, the
+/// Run and the unit's key, as the person's Clip view chose its note. Nothing here reads Factory: the task executor asks
+/// Factory to perform each pass (`factory workflow perform`), and Factory refuses a unit that is no song.
+fn loop_song(value: &Value) -> Result<Value> {
+    let refused = || {
+        error("Loop's song is the canon unit its passes take again, as {state_path, run_ref, unit}: the absolute path of the Software Factory's developmental state, the Run's ref and the unit's key, each without spaces around it or control characters (the path at most 4096 characters, the others at most 256)")
+    };
+    let song = value
+        .as_object()
+        .filter(|song| song.len() == 3)
+        .ok_or_else(refused)?;
+    let field = |key: &str, max: usize| {
+        song.get(key)
+            .and_then(Value::as_str)
+            .filter(|text| {
+                !text.is_empty()
+                    && *text == text.trim()
+                    && text.chars().count() <= max
+                    && !text.chars().any(char::is_control)
+            })
+            .ok_or_else(refused)
+    };
+    let state_path = field("state_path", 4096)?;
+    if !std::path::Path::new(state_path).is_absolute() {
+        return Err(refused());
+    }
+    Ok(
+        json!({"state_path": state_path, "run_ref": field("run_ref", 256)?, "unit": field("unit", 256)?}),
+    )
+}
+
 fn flag(field: &str, value: &Value) -> Result<Value> {
     value
         .as_bool()
@@ -521,6 +554,7 @@ fn validate_task(changes: &Map<String, Value>) -> Result<Map<String, Value>> {
             ("loop", value) => flag("Loop", value)?,
             ("loop_until", value) => one_of("Loop's stop condition", value, LOOP_UNTILS)?,
             ("loop_cap", value) => count("Loop's cap", value, MAX_LOOP_CAP)?,
+            ("loop_song", value) => loop_song(value)?,
             ("launch", value) => launch_word(value)?,
             ("then", value) => then_word(value)?,
             ("quantize", value) => one_of("Quantize", value, QUANTIZES)?,
@@ -535,7 +569,7 @@ fn validate_task(changes: &Map<String, Value>) -> Result<Map<String, Value>> {
             ("effort", value) | ("autonomy", value) => value.clone(),
             (other, _) => {
                 return Err(error(format!(
-                    "A task has no setting {other}; it takes name, colour, active, register, form, loop, loop_until, loop_cap, launch, then, quantize, repeat_variable, repeat_levels, repeat_repeats, repeat_stop, envelope_mode, envelope_linked, source, effort and autonomy"
+                    "A task has no setting {other}; it takes name, colour, active, register, form, loop, loop_until, loop_cap, loop_song, launch, then, quantize, repeat_variable, repeat_levels, repeat_repeats, repeat_stop, envelope_mode, envelope_linked, source, effort and autonomy"
                 )))
             }
         };
@@ -638,6 +672,13 @@ fn with_take_run(
         (_, Err(error)) => refused(&error),
     };
     reading["task"]["take_run"] = run;
+    // What the task executor did with a song's loop at its last pass: the take Factory started, or why none was.
+    let task_ref = reading["task"]["task_ref"]
+        .as_str()
+        .unwrap_or_default()
+        .to_owned();
+    reading["task"]["loop_pass"] =
+        crate::encounter_task_executor::loop_pass(home, session, &task_ref);
     reading
 }
 
@@ -672,6 +713,8 @@ fn reading(
             "loop": value("loop", json!(false)),
             "loop_until": value("loop_until", json!("done")),
             "loop_cap": value("loop_cap", Value::Null),
+            // The song each of Loop's passes takes again; null while the task loops its own turn.
+            "loop_song": value("loop_song", Value::Null),
             "launch": value("launch", json!("trigger")),
             "then": value("then", json!("next")),
             "quantize": value("quantize", json!("global")),
@@ -1544,6 +1587,65 @@ mod tests {
             "null returns the cap to none"
         );
         assert_eq!(read["task"]["loop_until"], "pass", "the loop stands");
+    }
+
+    #[test]
+    fn loop_on_a_song_names_the_canon_unit_its_passes_take_and_a_song_named_otherwise_is_refused() {
+        // O-I #844: a Loop turned on with a song's canon note chosen names the song each pass takes again.
+        let task = bound("task:fixtures");
+        assert_eq!(
+            reading(&session(), None, Some(&task))["task"]["loop_song"],
+            Value::Null,
+            "a task loops itself until a song is named"
+        );
+        let song = json!({"state_path": "/walk/taker/.factory/development-state.json", "run_ref": "run:R1", "unit": "release-check"});
+        let looped = apply(
+            &session(),
+            None,
+            Some(&task),
+            json!({"task": {"task_ref": "task:fixtures", "set": {"loop": true, "loop_song": song}}}),
+            None,
+        )
+        .unwrap();
+        let read = reading(&session(), Some(&looped), Some(&task));
+        assert_eq!(read["task"]["loop"], true);
+        assert_eq!(read["task"]["loop_song"], song);
+        for bad in [
+            json!({"state_path": "walk/state.json", "run_ref": "run:R1", "unit": "release-check"}),
+            json!({"state_path": "/walk/state.json", "run_ref": "", "unit": "release-check"}),
+            json!({"state_path": "/walk/state.json", "run_ref": "run:R1", "unit": " release-check"}),
+            json!({"state_path": "/walk/state.json", "run_ref": "run:R1", "unit": "release-check", "take": 2}),
+            json!("release-check"),
+        ] {
+            let refused = apply(
+                &session(),
+                Some(looped.clone()),
+                Some(&task),
+                json!({"task": {"task_ref": "task:fixtures", "set": {"loop_song": bad}}}),
+                Some(&looped.revision),
+            )
+            .unwrap_err();
+            assert!(
+                refused
+                    .message()
+                    .starts_with("Loop's song is the canon unit its passes take again"),
+                "{}",
+                refused.message()
+            );
+        }
+        let cleared = apply(
+            &session(),
+            Some(looped.clone()),
+            Some(&task),
+            json!({"task": {"task_ref": "task:fixtures", "set": {"loop_song": null}}}),
+            Some(&looped.revision),
+        )
+        .unwrap();
+        assert_eq!(
+            reading(&session(), Some(&cleared), Some(&task))["task"]["loop_song"],
+            Value::Null,
+            "null returns the loop to the task's own turn"
+        );
     }
 
     #[test]

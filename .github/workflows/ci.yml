@@ -68,8 +68,19 @@ jobs:
       fail-fast: false
       matrix:
         package: [aikit-core, aikit-store, aikit-adapters, aikit-tui, aikit-cli]
+    # aikit-adapters' test binaries exhausted the runner's disk (ld SIGBUS, #583, 4 Nov 2026). Tests are unchanged; only
+    # debuginfo and toolchains the job never uses go. Same remedy as direct-agent-session.
+    env:
+      CARGO_PROFILE_DEV_DEBUG: "0"
+      CARGO_PROFILE_TEST_DEBUG: "0"
     steps:
       - uses: actions/checkout@v7.0.1
+      - name: Free runner disk the job never uses
+        shell: bash
+        run: |
+          df -h /
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL /usr/local/share/boost || true
+          df -h /
       - name: Install Rust 1.98
         run: |
           rustup toolchain install 1.98.0 --profile minimal

@@ -478,6 +478,7 @@ fn candidate(id: &str, title: &str, state: CandidateState, findings: Vec<Finding
         project_root: Some(PathBuf::from("/work/payments")),
         path: PathBuf::from(format!("/inbox/ready/{id}")),
         created_at: Timestamp::from_nanos(0),
+        metadata: None,
     }
 }
 
