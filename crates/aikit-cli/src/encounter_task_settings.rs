@@ -73,6 +73,11 @@ const MAX_REPEATS: u64 = 32;
 /// most 32), each its own words.
 const MAX_CONDITIONS: usize = 32;
 const MAX_CONDITION_CHARS: usize = 1024;
+/// The takes' own setting, Compare (DLW.md, Arrangement view: "None, a second
+/// take, or every take of a Repeat"): how the takes are drawn side by side,
+/// a line for each run and the readings as lanes. It is how they are read, so
+/// it changes while they run.
+const COMPARES: &[&str] = &["none", "second", "every"];
 const HANDOFF_RETIRED: &str = "Then's handoff and Hand off to are retired: to hand the work to another session, drag the task onto that session's track";
 const QUANTIZES: &[&str] = &["global", "now", "next-tool", "next-turn"];
 const MODES: &[&str] = &["automation", "modulation"];
@@ -655,11 +660,12 @@ fn validate_task(changes: &Map<String, Value>) -> Result<Map<String, Value>> {
             ("envelope_linked", value) => flag("The envelope link", value)?,
             ("source", value) => constellation(value)?,
             ("success", value) => success_conditions(value)?,
+            ("compare", value) => one_of("Compare", value, COMPARES)?,
             // Checked against the merged mode once every change is in.
             ("effort", value) | ("tool_calls", value) => value.clone(),
             (other, _) => {
                 return Err(error(format!(
-                    "A task has no setting {other}; it takes name, colour, active, register, form, loop, loop_until, loop_cap, loop_song, launch, then, quantize, repeat_variable, repeat_levels, repeat_repeats, repeat_stop, envelope_mode, envelope_linked, source, success, effort and tool_calls"
+                    "A task has no setting {other}; it takes name, colour, active, register, form, loop, loop_until, loop_cap, loop_song, launch, then, quantize, repeat_variable, repeat_levels, repeat_repeats, repeat_stop, envelope_mode, envelope_linked, source, success, compare, effort and tool_calls"
                 )))
             }
         };
@@ -845,6 +851,8 @@ fn reading(
             "source": value("source", bound.source.as_ref().map_or(Value::Null, |source| json!(source))),
             // The Success conditions the person typed for the task, in their words; none until one is added.
             "success": value("success", json!([])),
+            // How the takes are drawn side by side: none, a second take, or every take of the Repeat.
+            "compare": value("compare", json!("none")),
             "effort": value("effort", json!([])),
             "tool_calls": value("tool_calls", json!([])),
             // What the stored set held in retired words, each named with what took its place.
@@ -862,7 +870,7 @@ fn reading(
         "track": track,
         "task": task,
         "previous_task": previous,
-        "standing": "The person's settings for this session and its bound task: intent the owners of launch, model and delivery read. Colour null takes the session's colour; an empty envelope inherits the session's value (Tool calls the session's Scope); retired names what stored settings held in retired words and what took its place; a null loop cap sets no cap; Repeat's levels stay empty until chosen, and its variable, levels, repeats and stop when do not change while its takes run (a change starts a new set once they end); the source is the constellation the task was made of until another is set, and null when it was made of none; success holds the Success conditions the person typed for the task, in their words, and does not change while its takes run. A bound task's take_run is the run a Repeat's takes share in Actuation's words — the task and the session's own agent as an agent-jsonl body — or why there is none.",
+        "standing": "The person's settings for this session and its bound task: intent the owners of launch, model and delivery read. Colour null takes the session's colour; an empty envelope inherits the session's value (Tool calls the session's Scope); retired names what stored settings held in retired words and what took its place; a null loop cap sets no cap; Repeat's levels stay empty until chosen, and its variable, levels, repeats and stop when do not change while its takes run (a change starts a new set once they end); the source is the constellation the task was made of until another is set, and null when it was made of none; success holds the Success conditions the person typed for the task, in their words, and does not change while its takes run; compare is how its takes are drawn side by side (none, a second take, or every take of the Repeat), and changes while they run. A bound task's take_run is the run a Repeat's takes share in Actuation's words — the task and the session's own agent as an agent-jsonl body — or why there is none.",
     })
 }
 
@@ -2270,6 +2278,77 @@ mod tests {
         assert!(
             refused.contains("Success conditions") && refused.contains("takes:t9"),
             "{refused}"
+        );
+    }
+
+    /// The takes' own setting, Compare (O-I manual §19.1, Arrangement view:
+    /// "None, a second take, or every take of a Repeat"), is kept with the
+    /// task's settings, None until the person sets it. It is how the takes are
+    /// drawn side by side, not what they run under, so it changes while they
+    /// run.
+    #[test]
+    fn a_tasks_compare_is_its_settings_none_by_default_and_moves_while_its_takes_run() {
+        let task = bound("task:fixtures");
+        let read = reading(&session(), None, Some(&task));
+        assert_eq!(read["task"]["compare"], "none", "None until set");
+        let repeat = apply(
+            &session(),
+            None,
+            Some(&task),
+            json!({"task": {"task_ref": "task:fixtures", "set": {"launch": "repeat", "compare": "every"}}}),
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            reading(&session(), Some(&repeat), Some(&task))["task"]["compare"],
+            "every"
+        );
+        let refused = apply(
+            &session(),
+            Some(repeat.clone()),
+            Some(&task),
+            json!({"task": {"task_ref": "task:fixtures", "set": {"compare": "all"}}}),
+            Some(&repeat.revision),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            refused.contains("Compare takes one of none, second, every"),
+            "{refused}"
+        );
+        let running = apply(
+            &session(),
+            Some(repeat.clone()),
+            Some(&task),
+            json!({"takes": {"start": {"task_ref": "task:fixtures", "trace_ref": "takes:t9"}}}),
+            Some(&repeat.revision),
+        )
+        .unwrap();
+        let moved = apply(
+            &session(),
+            Some(running.clone()),
+            Some(&task),
+            json!({"task": {"task_ref": "task:fixtures", "set": {"compare": "second"}}}),
+            Some(&running.revision),
+        )
+        .unwrap();
+        let read = reading(&session(), Some(&moved), Some(&task));
+        assert_eq!(read["task"]["compare"], "second");
+        assert_eq!(
+            read["task"]["takes"]["trace_ref"], "takes:t9",
+            "the takes run on"
+        );
+        let reset = apply(
+            &session(),
+            Some(moved.clone()),
+            Some(&task),
+            json!({"task": {"task_ref": "task:fixtures", "set": {"compare": null}}}),
+            Some(&moved.revision),
+        )
+        .unwrap();
+        assert_eq!(
+            reading(&session(), Some(&reset), Some(&task))["task"]["compare"],
+            "none"
         );
     }
 

@@ -1054,4 +1054,10 @@ fn a_proposed_revision_of_one_member_waits_beside_the_one_in_use_until_accepted_
         refused(&["source", "refine", "accept", "skill/practice/alpha"]),
         "refinement.stale"
     );
+    // Follow picks up a revision the person accepted in Central; a source
+    // AIKit keeps has nothing there to follow.
+    assert_eq!(
+        refused(&["source", "refine", "follow", "skill/practice/alpha"]),
+        "refinement.not_handed"
+    );
 }
