@@ -143,6 +143,7 @@ fn admitted_factory_collect_runs_natively_and_refresh_rebuilds_the_hot_field() {
             actions: actions.clone(),
             credentials: vec![],
             factory: Some(binding.clone()),
+            song: None,
         }),
         authorised_actions: actions,
     };

@@ -35,7 +35,14 @@
 //!    (`factory attempt return --json`) says Task done (Factory admitted
 //!    its readable Return) or Test pass (its latest verification passed).
 //!    A task that serves no attempt, or a Factory that does not answer, has
-//!    no verdict: its loop runs on to its cap. A loop also ends at a turn
+//!    no verdict: its loop runs on to its cap. A loop on a song (`loop_song`,
+//!    the canon unit a song's clip became on the task's track, chosen in Clip
+//!    view; O-I #844, DLW manual §19.1 Songs: "It comes round again by Loop")
+//!    makes each pass a take of the song: the Software Factory starts a Run
+//!    of it (`factory workflow perform <state> <run> <unit> --json`,
+//!    `factory.song-take/v1`), and the pass's fresh turn names that take; a
+//!    take Factory refuses ends the loop there, in Factory's words, and the
+//!    settings disclose either (`loop_pass`). A loop also ends at a turn
 //!    that does not finish, or with the activator off. Once the loop
 //!    is spent (or off), Then follows: `again` launches the task afresh, its
 //!    loop counted over; `stop` does nothing further; and `next` — "the next
@@ -135,6 +142,10 @@ struct ExecutorState {
     applied_effort: Option<String>,
     #[serde(default)]
     applied_mode: Option<String>,
+    /// What a song's loop did at its last pass: the take Factory started
+    /// (`{take, run_ref}`), or why none was (`{refused}`).
+    #[serde(default)]
+    song_pass: Option<Value>,
     /// Every turn-end at or before this cursor has already been settled.
     #[serde(default)]
     settled_through_cursor: u64,
@@ -348,6 +359,61 @@ const ATTEMPT_RETURN_READING: &str = "factory.attempt-return-reading/v1";
 pub(crate) trait LoopVerdicts {
     /// Factory's reading of `attempt_ref`'s Return in `run_ref`.
     fn attempt_return(&self, state_path: &str, run_ref: &str, attempt_ref: &str) -> Result<Value>;
+    /// A take of the song the canon unit `unit` names, in the song `run_ref` performs: the Run Factory starts for it
+    /// (`factory workflow perform`). An owner that performs no song refuses in its words.
+    fn perform_take(&self, _state_path: &str, _run_ref: &str, _unit: &str) -> Result<Value> {
+        Err(error(
+            "No Software Factory here performs a song's take (`factory workflow perform`)",
+        ))
+    }
+}
+
+/// Factory's take of a song, the receipt a song's loop reads.
+const SONG_TAKE: &str = "factory.song-take/v1";
+
+/// What a song's loop does at a pass: Factory started the take, and the pass's turn names it; or Factory refused, and the
+/// loop ends there.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum SongPass {
+    Take {
+        take: u64,
+        run_ref: String,
+        text: String,
+    },
+    Refused(String),
+}
+
+/// A pass of a song's loop (`task.loop_song`): Factory performs the song again, and the turn that follows names the take.
+fn song_pass(name: &str, song: &Value, verdicts: &dyn LoopVerdicts) -> SongPass {
+    let field = |key: &str| song[key].as_str().unwrap_or_default();
+    let unit = field("unit");
+    let receipt = match verdicts.perform_take(field("state_path"), field("run_ref"), unit) {
+        Ok(receipt) => receipt,
+        Err(why) => return SongPass::Refused(why.message().to_owned()),
+    };
+    let take = receipt["take"].as_u64();
+    let run_ref = receipt["commission"]["commission"]["runRef"].as_str();
+    match (receipt["contract"] == SONG_TAKE, take, run_ref) {
+        (true, Some(take), Some(run_ref)) => SongPass::Take {
+            take,
+            run_ref: run_ref.to_owned(),
+            text: format!("{name} — take {take} of the song {unit}: Software Factory started the Run {run_ref} for it (`factory workflow perform`), and its attempt Actions start that Run's units."),
+        },
+        _ => SongPass::Refused(format!(
+            "Factory answered no take of the song {unit} ({SONG_TAKE}): the Factory installed here may predate `factory workflow perform`."
+        )),
+    }
+}
+
+/// What the executor did with the last pass of `task_ref`'s song loop on `session`, for the settings reading: the take
+/// (`{take, run_ref}`), why none was made (`{refused}`), or null — no song's pass yet, or another task's.
+pub(crate) fn loop_pass(home: &AikitHome, session: &ResourceRef, task_ref: &str) -> Value {
+    read_state(home, session)
+        .ok()
+        .flatten()
+        .filter(|state| state.task_ref == task_ref)
+        .and_then(|state| state.song_pass)
+        .unwrap_or(Value::Null)
 }
 
 /// Whether Factory's reading of an attempt meets Loop's stop condition:
@@ -409,6 +475,23 @@ impl FactoryVerdicts {
 }
 
 impl LoopVerdicts for FactoryVerdicts {
+    fn perform_take(&self, state_path: &str, run_ref: &str, unit: &str) -> Result<Value> {
+        use aikit_adapters::runner::SystemRunner;
+        let mut command = std::process::Command::new(&self.factory);
+        command.args(["workflow", "perform", state_path, run_ref, unit, "--json"]);
+        let output = SystemRunner::new()
+            .with_timeout(FACTORY_WRITE_LIMIT)
+            .with_output_limit_bytes(4 * 1024 * 1024)
+            .capture_command(&mut command)?;
+        if !output.ok() {
+            return Err(error(format!(
+                "Factory did not perform the take of {unit}: {}",
+                refusal_words(&output.stderr)
+            )));
+        }
+        serde_json::from_str(&output.stdout)
+            .map_err(|e| error(format!("Factory's take receipt is unreadable: {e}")))
+    }
     fn attempt_return(&self, state_path: &str, run_ref: &str, attempt_ref: &str) -> Result<Value> {
         use aikit_adapters::runner::SystemRunner;
         let mut command = std::process::Command::new(&self.factory);
@@ -438,6 +521,19 @@ impl LoopVerdicts for FactoryVerdicts {
 /// Factory answers a reading of its own state; the bound is for a Factory
 /// that never answers, not a pace.
 const FACTORY_READ_LIMIT: Duration = Duration::from_secs(15);
+/// A take commissions a Run under Factory's developmental lock, which another
+/// writer may hold for a while: a longer bound than a read's, still not a pace.
+const FACTORY_WRITE_LIMIT: Duration = Duration::from_secs(60);
+
+/// Factory's refusal in its own words: the message of the diagnostic it
+/// writes to stderr under `--json` (`factory.workflow-diagnostic/v1`), else
+/// what it wrote there.
+fn refusal_words(stderr: &str) -> String {
+    serde_json::from_str::<Value>(stderr.trim())
+        .ok()
+        .and_then(|reply| reply["error"]["message"].as_str().map(str::to_owned))
+        .unwrap_or_else(|| stderr.trim().to_owned())
+}
 
 /// A turn's end is a finish when it completed; a cancelled or failed turn is
 /// not (`aikit_store` encounter.rs reads the same `TurnEnded` stop).
@@ -600,6 +696,7 @@ fn settle_session(
         settled_through_cursor: 0,
         pending_turn_end_cursor: None,
         loop_runs: 0,
+        song_pass: None,
     });
     if state.task_ref != task_ref {
         // A rebound session starts the task's own time over, exactly as its
@@ -616,6 +713,7 @@ fn settle_session(
             settled_through_cursor: 0,
             pending_turn_end_cursor: None,
             loop_runs: 0,
+            song_pass: None,
         };
     }
 
@@ -879,9 +977,27 @@ fn settle_turn_end(
             .and_then(|attempts| loop_stop(task, &attempts, verdicts))
             .unwrap_or(false);
     let after = after_turn(active, task, turn_end.finished, state.loop_runs, stop_met);
-    let launched = after != AfterTurn::Rest
-        && solo_gate(home, session).is_ok()
-        && resubmit(service, session, name).is_ok();
+    let song = task.get("loop_song").filter(|song| song.is_object());
+    let launched = match (after, song) {
+        (AfterTurn::Rest, _) => false,
+        _ if solo_gate(home, session).is_err() => false,
+        // A song's loop: each pass is a take of the song, and the turn that follows names it.
+        (AfterTurn::Loop, Some(song)) => match song_pass(name, song, verdicts) {
+            SongPass::Take {
+                take,
+                run_ref,
+                text,
+            } => {
+                state.song_pass = Some(serde_json::json!({"take": take, "run_ref": run_ref}));
+                resubmit(service, session, &text).is_ok()
+            }
+            SongPass::Refused(why) => {
+                state.song_pass = Some(serde_json::json!({"refused": why}));
+                false
+            }
+        },
+        _ => resubmit(service, session, name).is_ok(),
+    };
     // A loop's count lives only across its own runs: anything else ends the
     // loop, and the task's next launch counts it over.
     state.loop_runs = match after {
@@ -1206,6 +1322,140 @@ mod tests {
         assert_eq!(after_turn(true, &again, true, 3, false), AfterTurn::Loop);
     }
 
+    /// Factory as a song's loop meets it: each take it starts, numbered in order, or its refusal in its words.
+    struct ScriptedTakes {
+        refuse_after: Option<u64>,
+        asked: std::cell::RefCell<Vec<(String, String, String)>>,
+    }
+    impl LoopVerdicts for ScriptedTakes {
+        fn attempt_return(&self, _state: &str, _run: &str, _attempt: &str) -> Result<Value> {
+            Err(error("Factory: no attempt here"))
+        }
+        fn perform_take(&self, state: &str, run: &str, unit: &str) -> Result<Value> {
+            let mut asked = self.asked.borrow_mut();
+            asked.push((state.into(), run.into(), unit.into()));
+            let take = asked.len() as u64;
+            if self.refuse_after.is_some_and(|after| take > after) {
+                return Err(error("Factory did not perform the take: The set release-check names has moved since it was rendered. Nothing is performed."));
+            }
+            Ok(
+                json!({"contract": SONG_TAKE, "take": take, "unit": unit, "of": run,
+                "commission": {"commission": {"runRef": format!("run:TAKE{take}")}}, "execution": "not-requested"}),
+            )
+        }
+    }
+
+    #[test]
+    fn a_loop_on_a_song_takes_the_song_again_each_pass_through_factorys_perform() {
+        // O-I #844: "It comes round again by Loop" — each pass a take of its own, a Run Factory starts.
+        let song = json!({"state_path": "/walk/taker/.factory/development-state.json", "run_ref": "run:R1", "unit": "release-check"});
+        let factory = ScriptedTakes {
+            refuse_after: Some(2),
+            asked: Default::default(),
+        };
+        let first = song_pass("verify the change", &song, &factory);
+        assert_eq!(
+            first,
+            SongPass::Take {
+                take: 1,
+                run_ref: "run:TAKE1".into(),
+                text: "verify the change — take 1 of the song release-check: Software Factory started the Run run:TAKE1 for it (`factory workflow perform`), and its attempt Actions start that Run's units.".into(),
+            }
+        );
+        assert_eq!(
+            factory.asked.borrow().first().unwrap(),
+            &(
+                "/walk/taker/.factory/development-state.json".to_string(),
+                "run:R1".to_string(),
+                "release-check".to_string()
+            ),
+            "the take is the song the loop names, in the Run it stands in"
+        );
+        assert!(matches!(
+            song_pass("verify the change", &song, &factory),
+            SongPass::Take { take: 2, .. }
+        ));
+        // Factory refuses the third: the loop ends there, in Factory's words, and nothing is resubmitted.
+        match song_pass("verify the change", &song, &factory) {
+            SongPass::Refused(why) => {
+                assert!(why.contains("has moved since it was rendered"), "{why}")
+            }
+            other => panic!("a refused take ends the loop: {other:?}"),
+        }
+        // An answer that is no take of a song is said, never read as one.
+        struct Elsewhere;
+        impl LoopVerdicts for Elsewhere {
+            fn attempt_return(&self, _: &str, _: &str, _: &str) -> Result<Value> {
+                Err(error("none"))
+            }
+            fn perform_take(&self, _: &str, _: &str, _: &str) -> Result<Value> {
+                Ok(json!({"contract": "factory.workflow-edit/v1"}))
+            }
+        }
+        assert!(
+            matches!(song_pass("t", &song, &Elsewhere), SongPass::Refused(why) if why.contains(SONG_TAKE))
+        );
+        // Factory's refusal reaches the loop in its words: the diagnostic it writes under --json, else its stderr.
+        assert_eq!(
+            refusal_words(
+                r#"{"contract":"factory.workflow-diagnostic/v1","error":{"code":"workflow.song_take","message":"release-check is a task, not a song. Nothing is performed."}}"#
+            ),
+            "release-check is a task, not a song. Nothing is performed."
+        );
+        assert_eq!(
+            refusal_words("  Unknown workflow operation perform\n"),
+            "Unknown workflow operation perform"
+        );
+        // A Factory that predates perform refuses through the trait's own words.
+        let old = ScriptedFactory {
+            answers: Default::default(),
+            asked: Default::default(),
+        };
+        assert!(matches!(song_pass("t", &song, &old), SongPass::Refused(_)));
+    }
+
+    #[test]
+    fn the_settings_disclose_what_the_executor_did_with_the_last_pass_of_a_songs_loop() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = AikitHome::at(dir.path().canonicalize().unwrap());
+        let session = session("song-loop");
+        assert_eq!(
+            loop_pass(&home, &session, "task:fixtures"),
+            Value::Null,
+            "no pass yet"
+        );
+        let mut state = ExecutorState {
+            schema: STATE_SCHEMA.into(),
+            agent_session: session.clone(),
+            task_ref: "task:fixtures".into(),
+            started_at_unix_ms: 1,
+            baseline_effort: None,
+            baseline_mode: None,
+            applied_effort: None,
+            applied_mode: None,
+            settled_through_cursor: 0,
+            pending_turn_end_cursor: None,
+            loop_runs: 1,
+            song_pass: Some(json!({"take": 3, "run_ref": "run:TAKE3"})),
+        };
+        publish_state(&home, &session, &state).unwrap();
+        assert_eq!(
+            loop_pass(&home, &session, "task:fixtures"),
+            json!({"take": 3, "run_ref": "run:TAKE3"})
+        );
+        assert_eq!(
+            loop_pass(&home, &session, "task:other"),
+            Value::Null,
+            "another task's pass is not this one's"
+        );
+        state.song_pass = Some(json!({"refused": "Factory did not perform the take."}));
+        publish_state(&home, &session, &state).unwrap();
+        assert_eq!(
+            loop_pass(&home, &session, "task:fixtures")["refused"],
+            "Factory did not perform the take."
+        );
+    }
+
     #[test]
     fn only_a_completed_turn_is_a_finish() {
         assert!(turn_finished(
@@ -1281,6 +1531,7 @@ mod tests {
             settled_through_cursor: 7,
             pending_turn_end_cursor: Some(8),
             loop_runs: 2,
+            song_pass: None,
         };
         publish_state(&home, &who, &state).unwrap();
         let back = read_state(&home, &who).unwrap().unwrap();
@@ -1389,6 +1640,7 @@ mod tests {
             settled_through_cursor: 0,
             pending_turn_end_cursor: None,
             loop_runs: 0,
+            song_pass: None,
         };
         // Published at who's own path despite naming another session.
         let path = state_path(&home, &who);

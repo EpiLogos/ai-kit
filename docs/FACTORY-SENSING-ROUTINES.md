@@ -84,3 +84,34 @@ aikit now-context factory-sensing --config-file /absolute/redis-now.json \
 has no signals. A failed Redis or Factory read fails the Routine with a stage
 and owner error in its receipt. Recovery reads the native Factory field again
 and republishes it; no whole-World census or `whoami` call is required.
+
+## A song's take on a Routine's schedule
+
+A song comes round again by a Routine (O-I #844; DLW manual §19.1 Songs: the
+schedule is the routine's, and the song keeps none). A Method capsule whose
+`body` is `factory-song-take` declares the one Factory action
+`factory:action/workflow.perform` and binds the song's canon unit in the Run it
+stands in, in a `[metadata.native-method.song]` table: the absolute `state`
+path, the `run_ref` and the `unit`. A Method with the song body carries no
+`factory` table, and another body carries no `song` table.
+
+```toml
+[metadata.native-method]
+schema = "aikit.native-method/v1"
+body = "factory-song-take"
+actions = ["factory:action/workflow.perform"]
+
+[metadata.native-method.song]
+state = "/absolute/project/.factory/development-state.json"
+run_ref = "run:…"
+unit = "release-check"
+```
+
+Each run of the Routine is one take: the runner calls `factory workflow perform
+<state> <run_ref> <unit> --json`, requires `factory.song-take/v1` and its take
+number, and records the take, the unit, the Run it came from, the take's Run and
+the clip in the native run receipt. Factory numbers the take; a refusal (the
+clip's set has moved, the unit is no song, another perform took that number)
+fails the run in Factory's words, and nothing else is called. Without a grant of
+the perform action the run calls nothing. Software Factory's attempt Actions
+start the take's units as they do any Run's.

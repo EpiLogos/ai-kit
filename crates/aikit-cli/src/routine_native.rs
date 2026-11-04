@@ -51,6 +51,9 @@ const NOW_ROLLOVER: &str = "projectcentral.now.rollover";
 const FACTORY_COLLECT: &str = "factory:action/telemetry.collect";
 const FACTORY_FIELD: &str = "factory:action/telemetry.field";
 const FILE_MAP_REFRESH: &str = "central.file-map.refresh";
+const FACTORY_PERFORM: &str = "factory:action/workflow.perform";
+/// Factory's take of a song, the receipt a song's Routine run reads.
+const SONG_TAKE: &str = "factory.song-take/v1";
 
 /// A native body AIKit knows how to execute. Adding one is a code change and
 /// a review, never a capsule's self-declaration.
@@ -61,6 +64,10 @@ pub enum NativeBody {
     CentralFileMapRefresh,
     FactoryCollect,
     FactoryFieldRefresh,
+    /// A take of a song (O-I #844; DLW manual §19.1 Songs: "It comes round again by … a routine's schedule. The schedule
+    /// is the routine's, and the song keeps none"): the Software Factory starts a Run of the song the Method's canon unit
+    /// names (`factory workflow perform`), each run of the Routine a take of its own.
+    FactorySongTake,
 }
 
 impl NativeBody {
@@ -70,6 +77,7 @@ impl NativeBody {
             "central-file-map-refresh" => Some(Self::CentralFileMapRefresh),
             "factory-collect" => Some(Self::FactoryCollect),
             "factory-field-refresh" => Some(Self::FactoryFieldRefresh),
+            "factory-song-take" => Some(Self::FactorySongTake),
             _ => None,
         }
     }
@@ -80,6 +88,7 @@ impl NativeBody {
             Self::CentralFileMapRefresh => "central-file-map-refresh",
             Self::FactoryCollect => "factory-collect",
             Self::FactoryFieldRefresh => "factory-field-refresh",
+            Self::FactorySongTake => "factory-song-take",
         }
     }
 
@@ -88,7 +97,7 @@ impl NativeBody {
         match self {
             Self::CentralDayRollover => &[TIME_POLICY, DAY_ENSURE, WORLD, NOW_ROLLOVER],
             Self::CentralFileMapRefresh => &[FILE_MAP_REFRESH],
-            Self::FactoryCollect | Self::FactoryFieldRefresh => &[],
+            Self::FactoryCollect | Self::FactoryFieldRefresh | Self::FactorySongTake => &[],
         }
     }
     fn required_factory_actions(self) -> &'static [&'static str] {
@@ -96,6 +105,7 @@ impl NativeBody {
             Self::CentralDayRollover | Self::CentralFileMapRefresh => &[],
             Self::FactoryCollect => &[FACTORY_COLLECT, FACTORY_FIELD],
             Self::FactoryFieldRefresh => &[FACTORY_FIELD],
+            Self::FactorySongTake => &[FACTORY_PERFORM],
         }
     }
 }
@@ -107,6 +117,16 @@ pub struct FactoryMethodBinding {
     pub state: PathBuf,
     pub policy: PathBuf,
     pub project_world_ref: String,
+}
+
+/// The song a take Method performs again: the canon unit a song's clip became on a track, in the Run that song stands in
+/// — the Software Factory's developmental state, the Run and the unit's key. Part of the Method's revision and its proof,
+/// so a Routine cannot perform another song at dispatch; the schedule is the Routine's, and the song keeps none.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct SongTakeBinding {
+    pub state: PathBuf,
+    pub run_ref: String,
+    pub unit: String,
 }
 
 /// One owner credential a native body needs, for the named Actions only.
@@ -122,6 +142,7 @@ pub struct NativeMethod {
     pub actions: Vec<ResourceRef>,
     pub credentials: Vec<CredentialNeed>,
     pub factory: Option<FactoryMethodBinding>,
+    pub song: Option<SongTakeBinding>,
 }
 
 /// `central:action/<name>` — the ref form a native Method declares.
@@ -157,7 +178,7 @@ impl NativeMethod {
             .and_then(NativeBody::parse)
             .ok_or_else(|| {
                 metadata_error(format!(
-                    "{}: native body is missing or not one AIKit executes (central-day-rollover, central-file-map-refresh, factory-collect, factory-field-refresh)",
+                    "{}: native body is missing or not one AIKit executes (central-day-rollover, central-file-map-refresh, factory-collect, factory-field-refresh, factory-song-take)",
                     capsule.id
                 ))
             })?;
@@ -251,8 +272,59 @@ impl NativeMethod {
         } else {
             if table.get("factory").is_some() {
                 return Err(metadata_error(format!(
-                    "{}: DAY body cannot carry a Factory binding",
+                    "{}: the {} body cannot carry a Factory telemetry binding",
+                    capsule.id,
+                    body.as_str()
+                )));
+            }
+            None
+        };
+        let song = if body == NativeBody::FactorySongTake {
+            let binding = table
+                .get("song")
+                .and_then(toml::Value::as_table)
+                .ok_or_else(|| {
+                    metadata_error(format!(
+                        "{}: the factory-song-take body requires [metadata.native-method.song]: the state, run_ref and unit of the song it performs",
+                        capsule.id
+                    ))
+                })?;
+            let text = |name: &str, max: usize| -> Result<String> {
+                binding
+                    .get(name)
+                    .and_then(toml::Value::as_str)
+                    .filter(|raw| {
+                        !raw.is_empty()
+                            && *raw == raw.trim()
+                            && raw.len() <= max
+                            && !raw.chars().any(char::is_control)
+                    })
+                    .map(str::to_owned)
+                    .ok_or_else(|| {
+                        metadata_error(format!(
+                            "{}: the song binding requires {name}, without spaces around it or control characters",
+                            capsule.id
+                        ))
+                    })
+            };
+            let state = PathBuf::from(text("state", 4096)?);
+            if !state.is_absolute() {
+                return Err(metadata_error(format!(
+                    "{}: the song binding's state must be an absolute path",
                     capsule.id
+                )));
+            }
+            Some(SongTakeBinding {
+                state,
+                run_ref: text("run_ref", 256)?,
+                unit: text("unit", 256)?,
+            })
+        } else {
+            if table.get("song").is_some() {
+                return Err(metadata_error(format!(
+                    "{}: the {} body cannot carry a song binding",
+                    capsule.id,
+                    body.as_str()
                 )));
             }
             None
@@ -289,6 +361,7 @@ impl NativeMethod {
             actions,
             credentials,
             factory,
+            song,
         }))
     }
 }
@@ -1097,6 +1170,97 @@ impl NativeActionRunner {
     }
 }
 
+impl NativeActionRunner {
+    /// One take of the Method's song: the Software Factory starts a Run of it (`factory workflow perform <state> <run>
+    /// <unit> --json`), under the Routine's admitted authority, and the receipt names the take and its Run. A take Factory
+    /// refuses fails the run in Factory's words; nothing executes here — Factory's attempt Actions start the take's units.
+    fn song_take(&self, run: &mut Run<'_>) -> (RunStatus, Value) {
+        let Some(song) = run.method.song.clone() else {
+            return (
+                RunStatus::Failed,
+                json!({"error": "the factory-song-take body names no song; nothing ran"}),
+            );
+        };
+        let input = json!({"state": song.state, "run_ref": song.run_ref, "unit": song.unit});
+        let outcome = if !run
+            .request
+            .authorised_actions
+            .iter()
+            .any(|granted| granted.as_str() == FACTORY_PERFORM)
+        {
+            Err(CallError::Refused(format!(
+                "the Routine's admitted authority does not grant {FACTORY_PERFORM}; nothing was called"
+            )))
+        } else {
+            let mut process = SystemRunner::new().with_timeout(ACTION_BUDGET);
+            process = process.with_env_removed("CENTRAL_NATIVE_TOKEN");
+            for need in &run.method.credentials {
+                process = process.with_env_removed(&need.env);
+            }
+            let argv = vec![
+                self.factory.clone(),
+                "workflow".into(),
+                "perform".into(),
+                song.state.display().to_string(),
+                song.run_ref.clone(),
+                song.unit.clone(),
+                "--json".into(),
+            ];
+            process
+                .run(&argv)
+                .map_err(|error| CallError::Owner {
+                    code: error.code().to_owned(),
+                    message: error.to_string(),
+                })
+                .and_then(|output| {
+                    if output.status != 0 {
+                        let said = serde_json::from_str::<Value>(output.stderr.trim())
+                            .ok()
+                            .and_then(|reply| reply["error"]["message"].as_str().map(str::to_owned))
+                            .unwrap_or_else(|| output.stderr.trim().to_owned());
+                        return Err(CallError::Owner {
+                            code: "factory.command_failed".into(),
+                            message: format!("Factory did not perform the take of {}: {said}", song.unit),
+                        });
+                    }
+                    serde_json::from_str::<Value>(&output.stdout).map_err(|error| CallError::Owner {
+                        code: "factory.invalid_json".into(),
+                        message: format!("factory workflow perform did not return JSON: {error}"),
+                    })
+                })
+                .and_then(|receipt| {
+                    if receipt["contract"] == SONG_TAKE && receipt["take"].is_u64() {
+                        Ok(receipt)
+                    } else {
+                        Err(CallError::Owner {
+                            code: "factory.unexpected_contract".into(),
+                            message: format!("Factory answered no take of the song {} ({SONG_TAKE}): the Factory installed here may predate `factory workflow perform`", song.unit),
+                        })
+                    }
+                })
+        };
+        run.calls.push(ActionCall {
+            action: FACTORY_PERFORM.into(),
+            input,
+            ok: outcome.is_ok(),
+            code: outcome.as_ref().err().and_then(|e| match e {
+                CallError::Owner { code, .. } => Some(code.clone()),
+                CallError::Refused(_) => None,
+            }),
+            message: outcome.as_ref().err().map(ToString::to_string),
+            credential_env: None,
+        });
+        match outcome {
+            Ok(receipt) => (
+                RunStatus::Completed,
+                json!({"take": receipt["take"], "unit": song.unit, "of": song.run_ref,
+                    "run_ref": receipt["commission"]["commission"]["runRef"], "clip_ref": receipt["clipRef"]}),
+            ),
+            Err(error) => (RunStatus::Failed, json!({"error": error.to_string()})),
+        }
+    }
+}
+
 impl RoutineRunner for NativeActionRunner {
     fn run(&self, request: RoutineRunRequest) -> RoutineRunOutcome {
         let Some(method) = request.native.clone() else {
@@ -1117,6 +1281,7 @@ impl RoutineRunner for NativeActionRunner {
             NativeBody::CentralFileMapRefresh => self.file_map_refresh(&mut run),
             NativeBody::FactoryCollect => self.factory_sensing(&mut run, true),
             NativeBody::FactoryFieldRefresh => self.factory_sensing(&mut run, false),
+            NativeBody::FactorySongTake => self.song_take(&mut run),
         };
         let receipt = json!({
             "schema": NATIVE_RUN_RECEIPT_SCHEMA,
@@ -1420,6 +1585,168 @@ project_world_ref = "project:Alpha"
             .unwrap();
         assert_eq!(root.body, NativeBody::FactoryFieldRefresh);
         assert_eq!(root.factory.unwrap().project_world_ref, "control:root");
+    }
+
+    const SONG: &str = r#"
+[metadata.native-method]
+schema = "aikit.native-method/v1"
+body = "factory-song-take"
+actions = ["factory:action/workflow.perform"]
+[metadata.native-method.song]
+state = "/walk/taker/.factory/development-state.json"
+run_ref = "run:R1"
+unit = "release-check"
+"#;
+
+    #[test]
+    fn a_songs_take_method_binds_the_canon_unit_its_routine_performs_again() {
+        // O-I #844 (DLW manual §19.1 Songs: "It comes round again by … a routine's schedule. The schedule is the routine's,
+        // and the song keeps none"): the Method names the song; the Routine over it holds the schedule.
+        let method = NativeMethod::from_capsule(&capsule(SONG)).unwrap().unwrap();
+        assert_eq!(method.body, NativeBody::FactorySongTake);
+        let song = method.song.unwrap();
+        assert_eq!(
+            song.state,
+            PathBuf::from("/walk/taker/.factory/development-state.json")
+        );
+        assert_eq!(
+            (song.run_ref.as_str(), song.unit.as_str()),
+            ("run:R1", "release-check")
+        );
+        assert!(method.factory.is_none());
+        for broken in [
+            SONG.replace("actions = [\"factory:action/workflow.perform\"]", "actions = []"),
+            SONG.replace("/walk/taker/.factory/development-state.json", "taker/state.json"),
+            SONG.replace("unit = \"release-check\"\n", ""),
+            SONG.replace("run_ref = \"run:R1\"", "run_ref = \"\""),
+            SONG.replace("[metadata.native-method.song]", "[metadata.native-method.factory]"),
+            format!("{FULL}[metadata.native-method.song]\nstate = \"/s.json\"\nrun_ref = \"run:R1\"\nunit = \"u\"\n"),
+        ] {
+            assert_eq!(
+                NativeMethod::from_capsule(&capsule(&broken)).unwrap_err().code(),
+                "routine.native_method_invalid",
+                "{broken}"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    mod song_take {
+        use super::*;
+        use std::os::unix::fs::PermissionsExt;
+
+        /// A Factory the test writes: it answers `workflow perform` with the take it is given, or refuses as Factory does
+        /// (its diagnostic on stderr, exit 2), and keeps what it was asked.
+        fn factory(dir: &std::path::Path, answer: &str, refuse: bool) -> String {
+            let path = dir.join("factory");
+            let asked = dir.join("asked");
+            let body = if refuse {
+                format!(
+                    "echo \"$@\" >> '{}'\necho '{answer}' >&2\nexit 2\n",
+                    asked.display()
+                )
+            } else {
+                format!("echo \"$@\" >> '{}'\necho '{answer}'\n", asked.display())
+            };
+            std::fs::write(&path, format!("#!/bin/sh\n{body}")).unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+            path.display().to_string()
+        }
+
+        fn request(method: NativeMethod, granted: &[&str]) -> RoutineRunRequest {
+            let reference = |raw: &str| ResourceRef::parse(raw).unwrap();
+            RoutineRunRequest {
+                routine_ref: reference("routine/release-check-nightly"),
+                invocation_ref: reference("routine-invocation/song-1"),
+                trigger_observation_ref: reference("routine-trigger/song-1"),
+                method_ref: reference("skill/taker/release-check-take"),
+                method_revision: aikit_core::resource::SourceRevision::parse(format!(
+                    "blake3:{}",
+                    "0".repeat(64)
+                ))
+                .unwrap(),
+                prompt: String::new(),
+                observation_payload: None,
+                time_schedule: None,
+                native: Some(method),
+                authorised_actions: granted.iter().map(|raw| reference(raw)).collect(),
+            }
+        }
+
+        fn runner(dir: &std::path::Path, factory: String) -> NativeActionRunner {
+            NativeActionRunner {
+                home: aikit_store::AikitHome::at(dir.join("home")),
+                central_root: dir.to_path_buf(),
+                ctrl: "ctrl".into(),
+                factory,
+            }
+        }
+
+        #[test]
+        fn each_run_of_the_routine_is_a_take_factory_starts_and_the_receipt_names_it() {
+            let dir = tempfile::tempdir().unwrap();
+            let take = r#"{"contract":"factory.song-take/v1","take":2,"unit":"release-check","of":"run:R1","commission":{"commission":{"runRef":"run:TAKE2"}},"execution":"not-requested"}"#;
+            let runner = runner(dir.path(), factory(dir.path(), take, false));
+            let method = NativeMethod::from_capsule(&capsule(SONG)).unwrap().unwrap();
+            let outcome = runner.run(request(method, &["factory:action/workflow.perform"]));
+            assert_eq!(outcome.status, RunStatus::Completed, "{}", outcome.detail);
+            let detail: Value = serde_json::from_str(&outcome.detail).unwrap();
+            assert_eq!(detail["result"]["take"], 2);
+            assert_eq!(detail["result"]["run_ref"], "run:TAKE2");
+            assert_eq!(detail["result"]["unit"], "release-check");
+            assert_eq!(
+                std::fs::read_to_string(dir.path().join("asked")).unwrap().trim(),
+                "workflow perform /walk/taker/.factory/development-state.json run:R1 release-check --json",
+                "the take is the song the Method names, in the Run it stands in"
+            );
+            let receipt: Value = serde_json::from_slice(
+                &std::fs::read(detail["receipt"].as_str().unwrap()).unwrap(),
+            )
+            .unwrap();
+            assert_eq!(receipt["method_body"], "factory-song-take");
+            assert_eq!(
+                receipt["calls"][0]["action"],
+                "factory:action/workflow.perform"
+            );
+            assert_eq!(receipt["calls"][0]["ok"], true);
+        }
+
+        #[test]
+        fn a_take_factory_refuses_fails_the_run_in_factorys_words_and_no_grant_calls_nothing() {
+            let dir = tempfile::tempdir().unwrap();
+            let refusal = r#"{"contract":"factory.workflow-diagnostic/v1","error":{"code":"workflow.song_set","message":"The set release-check names has moved since it was rendered. Nothing is performed."}}"#;
+            let runner = runner(dir.path(), factory(dir.path(), refusal, true));
+            let method = NativeMethod::from_capsule(&capsule(SONG)).unwrap().unwrap();
+            let outcome = runner.run(request(
+                method.clone(),
+                &["factory:action/workflow.perform"],
+            ));
+            assert_eq!(outcome.status, RunStatus::Failed);
+            assert!(
+                outcome
+                    .detail
+                    .contains("has moved since it was rendered. Nothing is performed."),
+                "{}",
+                outcome.detail
+            );
+            let ungranted = runner.run(request(method, &[]));
+            assert_eq!(ungranted.status, RunStatus::Failed);
+            assert!(
+                ungranted
+                    .detail
+                    .contains("does not grant factory:action/workflow.perform"),
+                "{}",
+                ungranted.detail
+            );
+            assert_eq!(
+                std::fs::read_to_string(dir.path().join("asked"))
+                    .unwrap()
+                    .lines()
+                    .count(),
+                1,
+                "the ungranted run called nothing"
+            );
+        }
     }
 
     #[test]
