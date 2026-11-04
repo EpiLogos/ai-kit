@@ -1296,8 +1296,11 @@ impl<E: UpgradeEnv> Driver<'_, E> {
         });
         self.note(transaction, status != "needs-operator", summary);
         transaction.phase = phase;
-        self.save(transaction)?;
-        self.write_receipt(transaction)
+        transaction.updated_at_unix_ms = self.env.now_unix_ms();
+        // The receipt is on disk before the terminal phase is: a reader that sees the upgrade end (`apply --wait`, `status`)
+        // finds the receipt it names.
+        self.write_receipt(transaction)?;
+        self.store.save(transaction)
     }
 
     fn write_receipt(&self, transaction: &Transaction) -> Result<()> {

@@ -973,6 +973,7 @@ fn skill_route(command: &SkillSub) -> &'static str {
             SkillOverlaySub::Clear(_) => "cmd_skill_overlay_clear",
         },
         SkillSub::Export(_) => "cmd_skill_export",
+        SkillSub::Reach => "cmd_skill_reach",
     }
 }
 
@@ -3019,6 +3020,11 @@ pub enum SkillSub {
     /// (`aikit.practice-capsule/v1`) another World can adopt with
     /// `system source add-capsule`.
     Export(SkillExportArgs),
+    /// The delivery check: does every authored skill reach every harness
+    /// root a session reads, one copy each? Reads the user scope's generation
+    /// and the harness roots, changes nothing, and exits non-zero on any gap,
+    /// naming each with the way out.
+    Reach,
 }
 
 #[derive(Debug, Args)]

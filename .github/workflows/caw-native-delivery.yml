@@ -27,10 +27,19 @@ jobs:
       # this pin carries the protected-placement basis in protected_objects and
       # the covered-file hardlink/parent-identity fences those tests assert.
       WORKCELL_SHA: 7bcedadca6ee3541fb369092f8622353993453bf
+      # Actuation, Central, Workcell and AIKit all build on one runner's disk: without debuginfo the links fit in it.
+      CARGO_PROFILE_DEV_DEBUG: "0"
+      CARGO_PROFILE_TEST_DEBUG: "0"
     steps:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
+      - name: Free runner disk the job never uses
+        shell: bash
+        run: |
+          df -h /
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL /usr/local/share/boost || true
+          df -h /
       - name: Retain exact source under test
         shell: bash
         run: |
