@@ -39,6 +39,18 @@ pub struct OwnerAsk {
     pub evidence_refs: Vec<String>,
 }
 
+impl OwnerAsk {
+    /// Whether anything here asks the person (a plain send carries none).
+    pub fn is_asked(&self) -> bool {
+        self.propose
+            || self.subject.is_some()
+            || self.proposed_owner.is_some()
+            || !self.options.is_empty()
+            || self.now_ref.is_some()
+            || !self.evidence_refs.is_empty()
+    }
+}
+
 const SUBJECT_LIMIT: usize = 280;
 
 /// The first line, bounded to Central's one-line subject on a char boundary.

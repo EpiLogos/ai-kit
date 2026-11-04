@@ -2394,7 +2394,9 @@ pub enum GatewaySub {
     /// (from `who --json`) binds it to that exact occupancy generation instead:
     /// never delivered to a successor or a same-named peer, held with its
     /// reason while that instance is not current (on `--require-workcell`).
-    Send(GatewaySendArgs),
+    /// Boxed: what it asks of the person (`--propose`, `--option`, …) makes it
+    /// the largest of the gateway's verbs.
+    Send(Box<GatewaySendArgs>),
     /// The Communiques waiting for an occupant; `--ack` marks them delivered
     /// to this body's verified occupant generation.
     Inbox(GatewayInboxArgs),
@@ -2766,6 +2768,29 @@ pub struct GatewaySendArgs {
     /// steer at its next turn.
     #[arg(long, value_name = "queue|steer", default_value = "queue", value_parser = ["queue", "steer"])]
     pub handling: String,
+    /// To the owner (`--to @owner`): a proposal the person accepts or
+    /// declines, instead of a question. Central's receiving ledger holds it,
+    /// attributed to your Position, with the Communique it answers
+    /// (`--reply-to`).
+    #[arg(long)]
+    pub propose: bool,
+    /// With --propose: the owner that would carry the proposal out
+    /// (`factory` makes an accepted proposal a Run in the person's Inbox).
+    #[arg(long = "for", value_name = "OWNER", requires = "propose")]
+    pub proposed_owner: Option<String>,
+    /// To the owner: the one line the person's Inbox shows (default: the
+    /// words' first line).
+    #[arg(long, value_name = "TEXT")]
+    pub subject: Option<String>,
+    /// To the owner: an answer offered for a question (repeat it).
+    #[arg(long = "option", value_name = "TEXT")]
+    pub options: Vec<String>,
+    /// To the owner: the NOW the request belongs to.
+    #[arg(long = "now-ref", value_name = "NOW")]
+    pub now_ref: Option<String>,
+    /// To the owner: a reference the person can open beside it (repeat it).
+    #[arg(long = "evidence", value_name = "REF")]
+    pub evidence_refs: Vec<String>,
     #[command(flatten)]
     pub carrier: GatewayQueryArgs,
 }
@@ -5958,6 +5983,11 @@ pub struct HarnessAuthArgs {
     /// catalog slug or embedded profile slug.
     #[arg(value_name = "HARNESS")]
     pub harness: String,
+    /// Run the harness's declared native logged-in check (its own status
+    /// command) and report whether it says signed in, per provider; nothing
+    /// else the harness prints is carried. A harness with none reports none.
+    #[arg(long)]
+    pub check: bool,
 }
 
 #[derive(Debug, Args)]

@@ -1773,6 +1773,95 @@ fn a_successor_generation_receives_what_its_predecessor_never_received() {
     );
 }
 
+/// O-I #844 Compose (lead ruling, round 15): a Position answers a Communique by proposing to the person —
+/// `--to @owner --propose`, replying to the Communique it answers — and Central's receiving ledger holds
+/// the proposal from that Position with the Communique it answers. What asks the person rides only a send
+/// to the person.
+#[test]
+fn a_position_proposes_to_the_person_through_centrals_receiving_ledger_replying_to_what_it_answers()
+{
+    let world = World::new();
+    let base = body(&world, "a", "workcell:a", "agency-gateway/a");
+    let guardian = base.as_occupant(GUARDIAN, "guardian-1");
+    let words =
+        "Compose: a first score\n\n```json\n{\"contract\":\"factory.workflow-edit/v1\"}\n```";
+    let proposed = guardian.ok(&[
+        "gateway",
+        "send",
+        "--to",
+        "@owner",
+        "--propose",
+        "--subject",
+        "Compose: a first score for the song",
+        "--reply-to",
+        "aikit:communique:ask-1",
+        "--body",
+        words,
+    ]);
+    assert_eq!(proposed["addressed"], "owner");
+    assert_eq!(proposed["return_ref"], "central:return:fixture:1");
+    let received = || world.world()["received"].clone();
+    let input = received()[0].clone();
+    assert_eq!(input["request"]["kind"], "proposal");
+    assert_eq!(
+        input["request"]["subject"],
+        "Compose: a first score for the song"
+    );
+    assert_eq!(input["request"]["body"], words);
+    assert!(input["request"].get("proposed_owner_ref").is_none());
+    assert_eq!(input["reply_to"], "aikit:communique:ask-1");
+    assert_eq!(input["declared_producer"]["ref"], GUARDIAN);
+    assert_eq!(input["declared_producer"]["attribution"], "verified");
+    // --for names who would carry it out; without --propose the person is asked a question.
+    guardian.ok(&[
+        "gateway",
+        "send",
+        "--to",
+        "@owner",
+        "--propose",
+        "--for",
+        "factory",
+        "--body",
+        "Run it",
+    ]);
+    assert_eq!(received()[1]["request"]["proposed_owner_ref"], "factory");
+    guardian.ok(&[
+        "gateway", "send", "--to", "@owner", "--option", "yes", "--option", "no", "--body",
+        "Shall I?",
+    ]);
+    assert_eq!(received()[2]["request"]["kind"], "question");
+    assert_eq!(received()[2]["request"]["options"], json!(["yes", "no"]));
+    // A proposal is accepted or declined, so offered answers are refused in AIKit's words.
+    let refused = guardian.refused(&[
+        "gateway",
+        "send",
+        "--to",
+        "@owner",
+        "--propose",
+        "--option",
+        "yes",
+        "--body",
+        "x",
+    ]);
+    assert_eq!(refused["code"], "gateway.owner_proposal_options");
+    // What asks the person never rides a send to a Position, and is never dropped silently.
+    let refused = guardian.refused(&[
+        "gateway",
+        "send",
+        "--to",
+        STEWARD,
+        "--propose",
+        "--body",
+        "x",
+    ]);
+    assert_eq!(refused["code"], "gateway.owner_ask_not_owner");
+    assert_eq!(received().as_array().map(Vec::len), Some(3));
+    assert!(
+        state_file_communiques(&base.home).is_empty(),
+        "nothing was journalled as a Communique"
+    );
+}
+
 #[test]
 fn identity_gaps_are_labelled_and_unknown_positions_are_refused_with_the_next_command() {
     let world = World::new();
