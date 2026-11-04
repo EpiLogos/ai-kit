@@ -238,6 +238,9 @@ impl SessionSpaceApplicationStore {
     /// `drag_out_intents`): the new space is made and the session attached
     /// there first, and it is detached from `from` last, so it never stands in
     /// no space; each space keeps its history. Answers the receipts in order.
+    /// A step that fails says what stands and what to press next; a drag out
+    /// that stopped once the session stood in its own space is finished by
+    /// the next press, there, whatever `into` that press names.
     pub fn drag_out(
         &self,
         from: &SessionSpaceRef,
@@ -246,6 +249,42 @@ impl SessionSpaceApplicationStore {
         label: Option<String>,
     ) -> Result<Vec<SessionSpaceReceipt>> {
         let source = self.load(from)?;
+        // A drag out that stopped partway seated the session in a space of
+        // its own while `from` still holds it: the next press finishes there.
+        let marker = format!("dragged out of {from}");
+        if source.agent_sessions.contains_key(agent_session) {
+            if let Some(half) = self.list()?.into_iter().find(|space| {
+                space.id() != from
+                    && space
+                        .agent_sessions
+                        .get(agent_session)
+                        .is_some_and(|seat| seat.provenance.contains(&marker))
+            }) {
+                let mut receipts = Vec::new();
+                if source.benched.contains(agent_session) && !half.benched.contains(agent_session) {
+                    let bench = self.stage(
+                        Some(half.id()),
+                        SessionSpaceMutation::BenchAgentSession {
+                            agent_session: agent_session.clone(),
+                            benched: true,
+                        },
+                    )?;
+                    receipts.push(self.apply(&bench).map_err(|why| {
+                        drag_out_stopped(agent_session, from, half.id(), "its bench", &why)
+                    })?);
+                }
+                let detach = self.stage(
+                    Some(from),
+                    SessionSpaceMutation::DetachAgentSession {
+                        agent_session: agent_session.clone(),
+                    },
+                )?;
+                receipts.push(self.apply(&detach).map_err(|why| {
+                    drag_out_stopped(agent_session, from, half.id(), "leaving its rack", &why)
+                })?);
+                return Ok(receipts);
+            }
+        }
         if self.state_file(&into).exists() {
             return Err(AikitError::new(
                 "session_space.drag_out_into_standing",
@@ -261,9 +300,33 @@ impl SessionSpaceApplicationStore {
             label,
         )?;
         let mut receipts = Vec::new();
+        let mut seated = false;
         for (index, intent) in intents.into_iter().enumerate() {
-            let preview = self.stage((index > 0).then_some(&into), intent)?;
-            receipts.push(self.apply(&preview)?);
+            let step = match &intent {
+                SessionSpaceMutation::Create { .. } => "making the space",
+                SessionSpaceMutation::BindProjectContext { .. } => "its Project",
+                SessionSpaceMutation::AttachAgentSession { .. } => "seating the session",
+                _ => "its bench",
+            };
+            let attach = matches!(intent, SessionSpaceMutation::AttachAgentSession { .. });
+            let applied = self
+                .stage((index > 0).then_some(&into), intent)
+                .and_then(|preview| self.apply(&preview));
+            receipts.push(applied.map_err(|why| {
+                if seated {
+                    drag_out_stopped(agent_session, from, &into, step, &why)
+                } else {
+                    AikitError::new(
+                        "session_space.drag_out_unseated",
+                        format!(
+                            "Drag out stopped at {step}: {from} still holds {agent_session}, chain and all; {}{}. Press Drag out again.",
+                            why.message(),
+                            if index > 0 { format!("; {into} stands without it") } else { String::new() }
+                        ),
+                    )
+                }
+            })?);
+            seated |= attach;
         }
         let detach = self.stage(
             Some(from),
@@ -271,7 +334,9 @@ impl SessionSpaceApplicationStore {
                 agent_session: agent_session.clone(),
             },
         )?;
-        receipts.push(self.apply(&detach)?);
+        receipts.push(self.apply(&detach).map_err(|why| {
+            drag_out_stopped(agent_session, from, &into, "leaving its rack", &why)
+        })?);
         Ok(receipts)
     }
 
@@ -523,6 +588,24 @@ impl SessionSpaceApplicationStore {
         fs::rename(&temp, path)
             .map_err(|error| io_error("session_space.commit_failed", path, &error))
     }
+}
+
+/// A drag out that stopped after the session was seated in its own space:
+/// what stands, and what to press next (the next press finishes there).
+fn drag_out_stopped(
+    agent_session: &aikit_core::resource::ResourceRef,
+    from: &SessionSpaceRef,
+    into: &SessionSpaceRef,
+    step: &str,
+    why: &AikitError,
+) -> AikitError {
+    AikitError::new(
+        "session_space.drag_out_stopped",
+        format!(
+            "Drag out stopped at {step}: {agent_session} stands in {into}, its own space, and still in {from}; {}. Press Drag out again to finish: it takes the session out of {from}.",
+            why.message()
+        ),
+    )
 }
 
 fn receipt_at<'a>(
@@ -816,6 +899,55 @@ mod tests {
                 .is_err(),
             "a refusal writes nothing"
         );
+    }
+
+    #[test]
+    fn a_drag_out_that_stopped_partway_is_finished_by_the_next_press_in_the_space_it_began() {
+        // Recoverable in words: the session stands in the space it was dragged into and in its rack; the next press detaches it.
+        let (_dir, store) = store();
+        let crew = create(&store, "crew").space;
+        let half = create(&store, "ada-half").space;
+        let ada = ResourceRef::parse("agent-session/ada").unwrap();
+        for (space, provenance) in [
+            (&crew, "seated"),
+            (&crew, ""),
+            (&half, "dragged out of session-space/crew"),
+        ] {
+            if provenance.is_empty() {
+                let cy = SessionSpaceAgentAttachmentIntent {
+                    agent_session: ResourceRef::parse("agent-session/cy").unwrap(),
+                    purpose: None,
+                    provenance: vec![],
+                };
+                let attach = store
+                    .stage(
+                        Some(space),
+                        SessionSpaceMutation::AttachAgentSession { attachment: cy },
+                    )
+                    .unwrap();
+                store.apply(&attach).unwrap();
+                continue;
+            }
+            let attach = store
+                .stage(
+                    Some(space),
+                    SessionSpaceMutation::AttachAgentSession {
+                        attachment: SessionSpaceAgentAttachmentIntent {
+                            agent_session: ada.clone(),
+                            purpose: Some("a chain".into()),
+                            provenance: vec![provenance.into()],
+                        },
+                    },
+                )
+                .unwrap();
+            store.apply(&attach).unwrap();
+        }
+        let fresh = SessionSpaceRef::parse("session-space/ada-fresh").unwrap();
+        let receipts = store.drag_out(&crew, &ada, fresh.clone(), None).unwrap();
+        assert_eq!(receipts.len(), 1, "only the detach was left: {receipts:?}");
+        assert!(!store.load(&crew).unwrap().agent_sessions.contains_key(&ada));
+        assert!(store.load(&half).unwrap().agent_sessions.contains_key(&ada));
+        assert!(store.load(&fresh).is_err(), "no third space is made");
     }
 
     #[test]

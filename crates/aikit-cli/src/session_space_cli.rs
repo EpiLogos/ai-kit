@@ -480,6 +480,26 @@ enum Command {
         #[arg(long)]
         label: Option<String>,
     },
+    /// Swap a chain's agent for another (O-I manual §19.15, the Agent rack's
+    /// Hot-Swap), keeping the rest of its chain: a new, separately attributed
+    /// session is minted for --agent-ref and seated in --space with the
+    /// chain's purpose and bench, the chain's track settings and task are
+    /// carried onto it, and --agent-session is detached last. A swap that
+    /// stopped partway is finished by the same call.
+    HotSwap {
+        #[arg(long)]
+        space: String,
+        #[arg(long)]
+        agent_session: String,
+        #[arg(long)]
+        agent_ref: String,
+        /// The project directory the new session's Agency is minted for.
+        #[arg(long = "project-cwd", value_name = "DIR")]
+        project_cwd: PathBuf,
+        /// The new session's ref; otherwise one is minted for the agent.
+        #[arg(long)]
+        into: Option<String>,
+    },
     /// Compare two receipt-backed semantic states.
     Compare {
         space: String,
@@ -1457,6 +1477,27 @@ fn run(cli: Cli) -> Result<()> {
             space_ref(&into)?,
             label,
         )?),
+        Command::HotSwap {
+            space,
+            agent_session,
+            agent_ref,
+            project_cwd,
+            into,
+        } => emit(&hot_swap_with(
+            home,
+            &space_ref(&space)?,
+            &ResourceRef::parse(agent_session)?,
+            &ResourceRef::parse(agent_ref)?,
+            into.map(ResourceRef::parse).transpose()?,
+            |into, agent, for_task| {
+                let mint = if for_task {
+                    crate::encounter_service::mint_task_from_cli
+                } else {
+                    crate::encounter_service::mint_from_cli
+                };
+                mint(home, &project_cwd, into, Some(agent.clone()))
+            },
+        )?),
         Command::Compare {
             space,
             from_sequence,
@@ -1477,6 +1518,197 @@ fn run(cli: Cli) -> Result<()> {
         }
         Command::Explain { space } => emit(&home.session_space_explain(&space_ref(&space)?, None)?),
     }
+}
+
+pub const HOT_SWAP_SCHEMA: &str = "aikit.session-space-hot-swap/v1";
+
+/// Hot-Swap (O-I manual §19.15, the Agent rack: "Swaps the chain's agent, or
+/// the set, for another from the browser, and keeps the rest of its chain").
+/// AIKit never turns a session into another agent ("A canonical session must
+/// not silently become another Agent; create a separately attributed
+/// session"), so the chain's agent changes by its session: `mint` gives a new
+/// session its Agency for `agent` (for a task too, where the chain holds
+/// one); it is attached to the chain's own space with the chain's purpose
+/// and bench (`hot_swap_intents`), the chain's track settings (its name,
+/// Telemetry, Solo, Wait and On no answer) are written onto it, the chain's
+/// task is copied onto it with its settings, and `from` is detached last,
+/// so the chain never stands empty and its Project contexts are the space's
+/// own. Each step answers its receipt, in order. A step that fails stops the
+/// swap and says what stands and what to press next; a session already
+/// seated "hot-swapped in for" `from` is finished by the next call, not
+/// seated again.
+pub(crate) fn hot_swap_with(
+    home: &AikitHome,
+    space: &SessionSpaceRef,
+    from: &ResourceRef,
+    agent: &ResourceRef,
+    into: Option<ResourceRef>,
+    mint: impl FnOnce(&ResourceRef, &ResourceRef, bool) -> Result<serde_json::Value>,
+) -> Result<serde_json::Value> {
+    use crate::encounter_service::EncounterService;
+    use serde_json::json;
+    let owner = SessionSpaceApplicationStore::new(home.clone());
+    let state = owner.load(space)?;
+    let marker = format!("hot-swapped in for {from}");
+    let half = state
+        .agent_sessions
+        .values()
+        .find(|seat| seat.provenance.iter().any(|p| p == &marker))
+        .map(|seat| seat.agent_session.clone());
+    let resumed = half.is_some();
+    let into = match (half, into) {
+        (Some(half), _) => half,
+        (None, Some(into)) => into,
+        (None, None) => {
+            let tail = agent.as_str().rsplit(['/', ':']).next().unwrap_or("agent");
+            let slug: String = tail
+                .chars()
+                .map(|c| {
+                    if c.is_ascii_alphanumeric() {
+                        c.to_ascii_lowercase()
+                    } else {
+                        '-'
+                    }
+                })
+                .collect();
+            ResourceRef::parse(format!(
+                "agent-session/{}-{}",
+                slug.trim_matches('-'),
+                ulid::Ulid::generate().to_string().to_lowercase()
+            ))?
+        }
+    };
+    if !state.agent_sessions.contains_key(from) {
+        return Err(AikitError::new(
+            "session_space.hot_swap_unattached",
+            format!("{from} is not a session of {space}, so there is no chain of it to swap"),
+        ));
+    }
+    // Every refusal comes before any effect.
+    let mut intents = if resumed {
+        let mut rest = Vec::new();
+        if state.benched.contains(from) && !state.benched.contains(&into) {
+            rest.push(SessionSpaceMutation::BenchAgentSession {
+                agent_session: into.clone(),
+                benched: true,
+            });
+        }
+        rest.push(SessionSpaceMutation::DetachAgentSession {
+            agent_session: from.clone(),
+        });
+        rest
+    } else {
+        aikit_core::session_space_application::hot_swap_intents(&state, from, &into)?
+    };
+    if let Some(bound) = EncounterService::read_agency_binding(home, from)? {
+        if &bound.agent_ref == agent {
+            return Err(AikitError::new(
+                "session_space.hot_swap_same_agent",
+                format!("{from} already is {agent}: Hot-Swap seats another agent's session in its place"),
+            ));
+        }
+    }
+    let task = EncounterService::read_task(home, from)?;
+    if !task.is_null() && task["ready"] != true {
+        return Err(AikitError::new(
+            "session_space.hot_swap_task_preparing",
+            format!("{from}'s task is still being prepared: Hot-Swap once it is ready, and the task goes with the chain"),
+        ));
+    }
+    let stopped = |step: &str, why: &AikitError| {
+        AikitError::new(
+            "session_space.hot_swap_stopped",
+            format!(
+                "Hot-Swap stopped at {step}: {into}, {agent}'s session, stands in {space} beside {from}, which still holds the chain; {why}. Press Hot-Swap with {agent} on the chain again to finish: it carries the rest and detaches {from}."
+            ),
+        )
+    };
+    let mut steps = Vec::new();
+    let bound = EncounterService::read_agency_binding(home, &into)?;
+    if bound.as_ref().is_none_or(|bound| &bound.agent_ref != agent) {
+        let minted = mint(&into, agent, !task.is_null()).map_err(|why| {
+            if resumed {
+                stopped("the mint", &why)
+            } else {
+                AikitError::new(
+                    "session_space.hot_swap_unseated",
+                    format!(
+                        "Hot-Swap changed nothing: AIKit did not seat a session for {agent}: {}; the chain keeps {from}",
+                        why.message()
+                    ),
+                )
+            }
+        })?;
+        steps.push(json!({"step": "mint", "agent_session": into.as_str(), "outcome": minted}));
+    }
+    let detach = intents.pop().expect("the detach is always last");
+    for intent in intents {
+        let step = match &intent {
+            SessionSpaceMutation::BenchAgentSession { .. } => "bench",
+            _ => "attach",
+        };
+        let receipt = owner
+            .stage(Some(space), intent)
+            .and_then(|preview| owner.apply(&preview))
+            .map_err(|why| {
+                if step == "attach" {
+                    AikitError::new(
+                        "session_space.hot_swap_unseated",
+                        format!(
+                            "Hot-Swap stopped before the chain changed: {into} has {agent}'s Agency but is not seated in {space}: {}; the chain keeps {from}. Press Hot-Swap again.",
+                            why.message()
+                        ),
+                    )
+                } else {
+                    stopped("the bench", &why)
+                }
+            })?;
+        steps.push(json!({"step": step, "receipt": receipt}));
+    }
+    let from_settings = EncounterService::read_session_settings(home, from)?;
+    let mut track = serde_json::Map::new();
+    for key in from_settings["track"]["set"]
+        .as_array()
+        .into_iter()
+        .flatten()
+    {
+        if let Some(key) = key.as_str() {
+            track.insert(key.to_owned(), from_settings["track"][key].clone());
+        }
+    }
+    if !track.is_empty() {
+        let expected = EncounterService::read_session_settings(home, &into)?["revision"]
+            .as_str()
+            .map(aikit_core::SourceRevision::parse)
+            .transpose()?;
+        let reading = EncounterService::write_session_settings(
+            home,
+            &into,
+            json!({"track": track}),
+            expected.as_ref(),
+        )
+        .map_err(|why| stopped("its settings", &why))?;
+        steps.push(json!({"step": "settings", "reading": reading}));
+    }
+    if !task.is_null() && EncounterService::read_task(home, &into)?.is_null() {
+        let copy = EncounterService::copy_task(home, &into, from, None)
+            .map_err(|why| stopped("its task", &why))?;
+        steps.push(json!({"step": "task", "copy": copy}));
+    }
+    let receipt = owner
+        .stage(Some(space), detach)
+        .and_then(|preview| owner.apply(&preview))
+        .map_err(|why| stopped(&format!("detaching {from}"), &why))?;
+    steps.push(json!({"step": "detach", "receipt": receipt}));
+    Ok(json!({
+        "schema": HOT_SWAP_SCHEMA,
+        "space": space.to_string(),
+        "from": from.as_str(),
+        "into": into.as_str(),
+        "agent_ref": agent.as_str(),
+        "resumed": resumed,
+        "steps": steps,
+    }))
 }
 
 #[cfg(unix)]
@@ -2150,5 +2382,219 @@ mod provider_selection_tests {
         )
         .expect_err("a create intent has no provider to select");
         assert_eq!(error.code(), "session_space.provider_flag_misplaced");
+    }
+}
+
+#[cfg(test)]
+mod hot_swap_tests {
+    use super::*;
+    use aikit_core::session_space_application::SessionSpaceAgentAttachmentIntent;
+    use serde_json::{json, Value};
+    use std::cell::RefCell;
+
+    fn r(s: &str) -> ResourceRef {
+        ResourceRef::parse(s).unwrap()
+    }
+
+    /// A home holding `session-space/crew` with `sessions`, each a chain of the rack.
+    fn crew(sessions: &[&str]) -> (tempfile::TempDir, AikitHome, SessionSpaceRef) {
+        let dir = tempfile::tempdir().unwrap();
+        let home = AikitHome::at(dir.path().canonicalize().unwrap().join("home"));
+        home.ensure_layout().unwrap();
+        let owner = SessionSpaceApplicationStore::new(home.clone());
+        let space = space_ref("session-space/crew").unwrap();
+        let create = owner
+            .stage(
+                None,
+                SessionSpaceMutation::Create {
+                    id: space.clone(),
+                    label: Some("crew".into()),
+                },
+            )
+            .unwrap();
+        owner.apply(&create).unwrap();
+        for session in sessions {
+            let attach = owner
+                .stage(
+                    Some(&space),
+                    SessionSpaceMutation::AttachAgentSession {
+                        attachment: SessionSpaceAgentAttachmentIntent {
+                            agent_session: r(&format!("agent-session/{session}")),
+                            purpose: Some(format!("{session}'s chain")),
+                            provenance: vec!["seated".into()],
+                        },
+                    },
+                )
+                .unwrap();
+            owner.apply(&attach).unwrap();
+        }
+        (dir, home, space)
+    }
+
+    #[test]
+    fn hot_swap_takes_the_space_the_chain_and_the_other_agent() {
+        let cli = Cli::try_parse_from([
+            "aikit-session-space",
+            "hot-swap",
+            "--space",
+            "session-space/crew",
+            "--agent-session",
+            "agent-session/ada",
+            "--agent-ref",
+            "agent/other",
+            "--project-cwd",
+            "/w/o-i",
+        ])
+        .unwrap();
+        assert!(
+            matches!(cli.command, Command::HotSwap { .. }),
+            "{:?}",
+            cli.command
+        );
+    }
+
+    #[test]
+    fn hot_swap_seats_the_other_agent_with_the_chains_settings_and_detaches_the_old_last() {
+        // O-I manual §19.15: Hot-Swap "Swaps the chain's agent ... and keeps the rest of its chain".
+        let (_dir, home, space) = crew(&["ada", "cy"]);
+        let ada = r("agent-session/ada");
+        let owner = SessionSpaceApplicationStore::new(home.clone());
+        let bench = owner
+            .stage(
+                Some(&space),
+                SessionSpaceMutation::BenchAgentSession {
+                    agent_session: ada.clone(),
+                    benched: true,
+                },
+            )
+            .unwrap();
+        owner.apply(&bench).unwrap();
+        crate::encounter_service::EncounterService::write_session_settings(
+            &home,
+            &ada,
+            json!({"track": {"name": "Fixtures lane", "solo": true, "wait": 900, "no_answer": "deny"}}),
+            None,
+        )
+        .unwrap();
+        let minted = RefCell::new(Vec::new());
+        let swap = hot_swap_with(
+            &home,
+            &space,
+            &ada,
+            &r("agent/other"),
+            None,
+            |into, agent, for_task| {
+                minted
+                    .borrow_mut()
+                    .push((into.clone(), agent.clone(), for_task));
+                Ok(json!({"ok": true, "data": {"agent_ref": agent.as_str()}}))
+            },
+        )
+        .unwrap();
+        let steps: Vec<&str> = swap["steps"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|step| step["step"].as_str().unwrap())
+            .collect();
+        assert_eq!(
+            steps,
+            ["mint", "attach", "bench", "settings", "detach"],
+            "{swap}"
+        );
+        let into = r(swap["into"].as_str().unwrap());
+        assert_eq!(
+            minted.borrow().as_slice(),
+            [(into.clone(), r("agent/other"), false)]
+        );
+        let after = owner.load(&space).unwrap();
+        assert!(
+            !after.agent_sessions.contains_key(&ada),
+            "the old session leaves last"
+        );
+        assert!(after.agent_sessions.contains_key(&r("agent-session/cy")));
+        assert!(
+            after.benched.contains(&into),
+            "the chain's bench is carried"
+        );
+        let reading =
+            crate::encounter_service::EncounterService::read_session_settings(&home, &into)
+                .unwrap();
+        assert_eq!(reading["track"]["name"], "Fixtures lane");
+        assert_eq!(reading["track"]["solo"], true);
+        assert_eq!(reading["track"]["wait"], 900);
+        assert_eq!(reading["track"]["no_answer"], "deny");
+    }
+
+    #[test]
+    fn a_hot_swap_that_cannot_seat_the_agent_changes_nothing_and_says_so() {
+        let (_dir, home, space) = crew(&["ada", "cy"]);
+        let ada = r("agent-session/ada");
+        let owner = SessionSpaceApplicationStore::new(home.clone());
+        let before = owner.load(&space).unwrap();
+        let refused = hot_swap_with(&home, &space, &ada, &r("agent/other"), None, |_, _, _| {
+            Err(AikitError::new(
+                "agency_mint.refused",
+                "Actuation refused the minted agency request",
+            ))
+        })
+        .unwrap_err();
+        assert!(
+            refused.to_string().contains("Hot-Swap changed nothing")
+                && refused
+                    .to_string()
+                    .contains("the chain keeps agent-session/ada"),
+            "{refused}"
+        );
+        assert_eq!(owner.load(&space).unwrap(), before);
+    }
+
+    #[test]
+    fn a_hot_swap_that_stopped_partway_finishes_when_pressed_again() {
+        // Recoverable in words: what stands, and what to press next.
+        let (_dir, home, space) = crew(&["ada", "cy"]);
+        let ada = r("agent-session/ada");
+        let half = r("agent-session/other-half");
+        let owner = SessionSpaceApplicationStore::new(home.clone());
+        let attach = owner
+            .stage(
+                Some(&space),
+                SessionSpaceMutation::AttachAgentSession {
+                    attachment: SessionSpaceAgentAttachmentIntent {
+                        agent_session: half.clone(),
+                        purpose: Some("ada's chain".into()),
+                        provenance: vec!["hot-swapped in for agent-session/ada".into()],
+                    },
+                },
+            )
+            .unwrap();
+        owner.apply(&attach).unwrap();
+        let swap = hot_swap_with(
+            &home,
+            &space,
+            &ada,
+            &r("agent/other"),
+            None,
+            |into, _, _| {
+                assert_eq!(
+                    into, &half,
+                    "the half-seated session is finished, not a third one"
+                );
+                Ok(json!({"ok": true}))
+            },
+        )
+        .unwrap();
+        assert_eq!(swap["resumed"], true);
+        let steps: Vec<Value> = swap["steps"].as_array().unwrap().clone();
+        assert_eq!(steps.first().unwrap()["step"], "mint");
+        assert_eq!(steps.last().unwrap()["step"], "detach");
+        assert!(
+            steps.iter().all(|step| step["step"] != "attach"),
+            "it is already seated"
+        );
+        let after = owner.load(&space).unwrap();
+        assert!(
+            !after.agent_sessions.contains_key(&ada) && after.agent_sessions.contains_key(&half)
+        );
     }
 }

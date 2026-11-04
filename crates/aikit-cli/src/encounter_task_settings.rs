@@ -1,5 +1,5 @@
 //! An agent session's own settings, beside its bound task: how its track
-//! plays (its Name, Telemetry, Solo) and how its task launches, what follows it and how
+//! plays (its Name, Telemetry, Solo, and Scope's Wait and On no answer) and how its task launches, what follows it and how
 //! the agent works in it (name, colour, activator, output style, Loop with its
 //! stop condition, its cap and the song its passes take again, Launch mode,
 //! Then, Quantize, what a Repeat varies,
@@ -73,6 +73,8 @@ const EFFORTS: &[&str] = &["inherit", "low", "medium", "high", "max"];
 /// Scope's Tool calls for this task, and what Autonomy's words became: the
 /// task executor plays them (`encounter_task_executor.rs`).
 use crate::encounter_task_executor::{AUTONOMY_RETIRED, TOOL_CALLS};
+/// Scope's Wait and On no answer, which AIKit's executor plays.
+use crate::encounter_task_executor::{NO_ANSWERS, WAIT_DEFAULT, WAIT_SECONDS};
 /// Modulation raises or lowers the session's own value by these steps.
 const STEPS: std::ops::RangeInclusive<i64> = -2..=2;
 
@@ -555,9 +557,19 @@ fn validate_track(changes: &Map<String, Value>) -> Result<Map<String, Value>> {
             ("name", value) => words("Name", value, 200)?,
             ("telemetry", value) => flag("Telemetry", value)?,
             ("solo", value) => flag("Solo", value)?,
+            // Scope's Asks (O-I manual §19.12): how long a request waits before
+            // it counts as unanswered, and what AIKit's executor then does.
+            ("wait", value) => value
+                .as_u64()
+                .filter(|seconds| WAIT_SECONDS.contains(seconds))
+                .map(|seconds| json!(seconds))
+                .ok_or_else(|| {
+                    error("Wait is a whole number of seconds from 900 (15 min) to 86400 (24 h)")
+                })?,
+            ("no_answer", value) => one_of("On no answer", value, NO_ANSWERS)?,
             (other, _) => {
                 return Err(error(format!(
-                    "A track has no setting {other}; it takes name, telemetry and solo"
+                    "A track has no setting {other}; it takes name, telemetry, solo, wait and no_answer"
                 )))
             }
         };
@@ -730,6 +742,14 @@ fn with_take_run(
     reading
 }
 
+/// What AIKit's executor did with the session's asks (its requests held past
+/// their Wait, what the decision helper did with each), beside the settings
+/// that drove it.
+fn with_asks(home: &AikitHome, session: &ResourceRef, mut reading: Value) -> Value {
+    reading["asks"] = crate::encounter_task_executor::asks_reading(home, session);
+    reading
+}
+
 /// The reading: every value as it stands, defaults stated, what the person
 /// set listed, and a previous task's settings disclosed but not applied.
 fn reading(
@@ -744,6 +764,8 @@ fn reading(
         "name": track_set.get("name").cloned().unwrap_or(Value::Null),
         "telemetry": track_set.get("telemetry").cloned().unwrap_or(json!(true)),
         "solo": track_set.get("solo").cloned().unwrap_or(json!(false)),
+        "wait": track_set.get("wait").cloned().unwrap_or(json!(WAIT_DEFAULT)),
+        "no_answer": track_set.get("no_answer").cloned().unwrap_or(json!("hold")),
         "set": track_set.keys().collect::<Vec<_>>(),
     });
     let stored = record.and_then(|r| r.task.as_ref());
@@ -1011,11 +1033,15 @@ impl EncounterService {
         let record = read_record(home, session)?;
         let bound = bound_task(home, session)?;
         let host = crate::encounter_take_body::TakeHost::of_this_process(home);
-        Ok(with_take_run(
+        Ok(with_asks(
             home,
             session,
-            &host,
-            reading(session, record.as_ref(), bound.as_ref()),
+            with_take_run(
+                home,
+                session,
+                &host,
+                reading(session, record.as_ref(), bound.as_ref()),
+            ),
         ))
     }
 
@@ -1042,11 +1068,15 @@ impl EncounterService {
             }
             let record = read_record(home, session)?;
             let bound = bound_task(home, session)?;
-            readings.push(with_take_run(
+            readings.push(with_asks(
                 home,
                 session,
-                &host,
-                reading(session, record.as_ref(), bound.as_ref()),
+                with_take_run(
+                    home,
+                    session,
+                    &host,
+                    reading(session, record.as_ref(), bound.as_ref()),
+                ),
             ));
         }
         Ok(json!({"schema": LIST_SCHEMA, "readings": readings}))
@@ -1079,11 +1109,17 @@ impl EncounterService {
         )?;
         publish(home, session, &record)?;
         let host = crate::encounter_take_body::TakeHost::of_this_process(home);
-        Ok(with_take_run(
+        // The written reading is the one a read gives: with the take run, and
+        // what AIKit's executor did with the session's asks.
+        Ok(with_asks(
             home,
             session,
-            &host,
-            reading(session, Some(&record), bound.as_ref()),
+            with_take_run(
+                home,
+                session,
+                &host,
+                reading(session, Some(&record), bound.as_ref()),
+            ),
         ))
     }
 }
@@ -1325,11 +1361,54 @@ mod tests {
         )
         .unwrap_err();
         assert!(
-            unknown
-                .to_string()
-                .contains("A track has no setting arm; it takes name, telemetry and solo"),
+            unknown.to_string().contains(
+                "A track has no setting arm; it takes name, telemetry, solo, wait and no_answer"
+            ),
             "{unknown}"
         );
+    }
+
+    #[test]
+    fn wait_and_on_no_answer_are_the_sessions_own_with_the_manuals_bounds_and_defaults() {
+        // O-I manual §19.12 Asks: Wait "15 min–24 h", default "4 h"; On no answer "Hold · Deny", default "Hold".
+        let unset = reading(&session(), None, None);
+        assert_eq!(unset["track"]["wait"], 14400);
+        assert_eq!(unset["track"]["no_answer"], "hold");
+        let set = apply(
+            &session(),
+            None,
+            None,
+            json!({"track": {"wait": 900, "no_answer": "deny"}}),
+            None,
+        )
+        .unwrap();
+        let read = reading(&session(), Some(&set), None);
+        assert_eq!(read["track"]["wait"], 900);
+        assert_eq!(read["track"]["no_answer"], "deny");
+        for (field, value) in [
+            ("wait", json!(899)),
+            ("wait", json!(86401)),
+            ("wait", json!("4h")),
+            ("no_answer", json!("allow")),
+        ] {
+            let refused = apply(
+                &session(),
+                None,
+                None,
+                json!({"track": {field: value}}),
+                None,
+            )
+            .unwrap_err()
+            .to_string();
+            assert!(
+                refused.contains(if field == "wait" {
+                    "Wait is a whole number of seconds from 900 (15 min) to 86400 (24 h)"
+                } else {
+                    "On no answer takes one of hold, deny"
+                }),
+                "{refused}"
+            );
+        }
     }
 
     #[test]

@@ -251,6 +251,17 @@ impl SessionSpaceAgentSetBinding {
     }
 }
 
+/// The decision helper of a SessionSpace (O-I manual §19.20, the Agent rack:
+/// "one helper answers every agent of the rack"): one session of the space
+/// that the rack's agents' asks go to first. What it does not answer goes on
+/// to the person, as before. The space names one or none.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionSpaceDecisionHelperBinding {
+    pub agent_session: ResourceRef,
+    #[serde(default)]
+    pub provenance: Vec<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionSpaceFocus {
     pub target: ResourceRef,
@@ -289,6 +300,10 @@ pub struct SessionSpaceAuthoredState {
     /// launch reaches it. Absent from a space that benches nothing.
     #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
     pub benched: BTreeSet<ResourceRef>,
+    /// The session of this space that answers its agents' asks first, where
+    /// one is named (O-I manual §19.20). Absent from a space that names none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub decision_helper: Option<SessionSpaceDecisionHelperBinding>,
 }
 
 impl SessionSpaceAuthoredState {
@@ -306,6 +321,7 @@ impl SessionSpaceAuthoredState {
             focus: None,
             agent_set: None,
             benched: BTreeSet::new(),
+            decision_helper: None,
         }
     }
 
@@ -360,6 +376,13 @@ impl SessionSpaceAuthoredState {
             .find(|session| !self.agent_sessions.contains_key(*session))
         {
             return Err(bench_unattached(session, self.id()));
+        }
+        if let Some(helper) = self
+            .decision_helper
+            .as_ref()
+            .filter(|helper| !self.agent_sessions.contains_key(&helper.agent_session))
+        {
+            return Err(helper_unattached(&helper.agent_session, self.id()));
         }
         for (binding_ref, binding) in &self.working_surfaces {
             if binding_ref != &binding.binding {
@@ -498,6 +521,13 @@ pub enum SessionSpaceMutation {
     },
     /// Name no agent set.
     UnbindAgentSet,
+    /// Name the session of this space that answers its agents' asks first,
+    /// replacing any it named.
+    BindDecisionHelper {
+        binding: SessionSpaceDecisionHelperBinding,
+    },
+    /// Name no decision helper; its session stays in the space.
+    UnbindDecisionHelper,
     Restore {
         target: Box<SessionSpaceAuthoredState>,
         evidence: String,
@@ -647,6 +677,14 @@ fn apply_intent(
             state.agent_sessions.remove(agent_session);
             state.benched.remove(agent_session);
             if state
+                .decision_helper
+                .as_ref()
+                .is_some_and(|helper| &helper.agent_session == agent_session)
+            {
+                state.decision_helper = None;
+                changed.push(change("decision-helper", agent_session.as_str(), "unbound"));
+            }
+            if state
                 .focus
                 .as_ref()
                 .is_some_and(|focus| focus.target == *agent_session)
@@ -756,6 +794,25 @@ fn apply_intent(
             binding.validate()?;
             state.agent_set = Some(binding.clone());
             changed.push(change("agent-set", binding.agent_set_ref.as_str(), "bound"));
+        }
+        SessionSpaceMutation::BindDecisionHelper { binding } => {
+            if !state.agent_sessions.contains_key(&binding.agent_session) {
+                return Err(helper_unattached(&binding.agent_session, state.id()));
+            }
+            state.decision_helper = Some(binding.clone());
+            changed.push(change(
+                "decision-helper",
+                binding.agent_session.as_str(),
+                "bound",
+            ));
+        }
+        SessionSpaceMutation::UnbindDecisionHelper => {
+            let subject = state
+                .decision_helper
+                .take()
+                .map(|helper| helper.agent_session.to_string())
+                .unwrap_or_else(|| "none".into());
+            changed.push(change("decision-helper", subject, "unbound"));
         }
         SessionSpaceMutation::UnbindAgentSet => {
             let subject = state
@@ -877,6 +934,95 @@ pub fn drag_out_intents(
         });
     }
     Ok(intents)
+}
+
+/// What Hot-Swap stages in the chain's own space (O-I manual §19.15, the
+/// Agent rack: Hot-Swap "Swaps the chain's agent ... and keeps the rest of its
+/// chain"), in apply order: `into`, another agent's separately attributed
+/// session, is attached with the chain's purpose (and benched where the chain
+/// is), and `from` is detached last, so the chain never stands empty. AIKit
+/// never turns a session into another agent ("A canonical session must not
+/// silently become another Agent; create a separately attributed session"):
+/// the owner mints `into` for the other agent before these, and carries the
+/// chain's settings and task onto it before the last. Refused in words: a
+/// session the space does not hold, an `into` that already stands there, the
+/// decision helper (it answers the rack and has no agent to swap), and a
+/// working surface that binds `from`.
+pub fn hot_swap_intents(
+    space: &SessionSpaceAuthoredState,
+    from: &ResourceRef,
+    into: &ResourceRef,
+) -> Result<Vec<SessionSpaceMutation>> {
+    let refused = |code: &'static str, message: String| Err(AikitError::new(code, message));
+    let Some(attachment) = space.agent_sessions.get(from) else {
+        return refused(
+            "session_space.hot_swap_unattached",
+            format!(
+                "{from} is not a session of {}, so there is no chain of it to swap",
+                space.id()
+            ),
+        );
+    };
+    if space.agent_sessions.contains_key(into) {
+        return refused(
+            "session_space.hot_swap_into_standing",
+            format!(
+                "{into} already stands in {}: Hot-Swap seats a new session in {from}'s place",
+                space.id()
+            ),
+        );
+    }
+    if space
+        .decision_helper
+        .as_ref()
+        .is_some_and(|helper| &helper.agent_session == from)
+    {
+        return refused(
+            "session_space.hot_swap_decision_helper",
+            format!(
+                "{from} is the decision helper of {}: it answers the rack's agents and holds no agent to swap",
+                space.id()
+            ),
+        );
+    }
+    if let Some(binding) = space
+        .working_surfaces
+        .values()
+        .find(|binding| &binding.agent_session == from)
+    {
+        return refused(
+            "session_space.hot_swap_working_surface",
+            format!(
+                "{from} works in the surface {} of {}; unbind that working surface before swapping its agent",
+                binding.binding,
+                space.id()
+            ),
+        );
+    }
+    let mut seat = attachment.clone();
+    seat.agent_session = into.clone();
+    seat.provenance = vec![format!("hot-swapped in for {from}")];
+    let mut intents = vec![SessionSpaceMutation::AttachAgentSession { attachment: seat }];
+    if space.benched.contains(from) {
+        intents.push(SessionSpaceMutation::BenchAgentSession {
+            agent_session: into.clone(),
+            benched: true,
+        });
+    }
+    intents.push(SessionSpaceMutation::DetachAgentSession {
+        agent_session: from.clone(),
+    });
+    Ok(intents)
+}
+
+/// A decision helper names only a session the space holds.
+fn helper_unattached(session: &ResourceRef, space: &SessionSpaceRef) -> AikitError {
+    AikitError::new(
+        "session_space.decision_helper_unattached",
+        format!(
+            "{session} is not a session of {space}, so it cannot be its decision helper; attach it first"
+        ),
+    )
 }
 
 /// A bench names only a session the space holds.
@@ -1280,6 +1426,130 @@ mod tests {
             refused.code(),
             "session_space.drag_out_membership_without_context"
         );
+    }
+
+    #[test]
+    fn hot_swap_seats_the_other_agents_session_in_the_chains_place_and_detaches_the_old_last() {
+        // O-I manual §19.15: Hot-Swap "Swaps the chain's agent ... and keeps the rest of its chain"; AIKit's law: "A canonical
+        // session must not silently become another Agent; create a separately attributed session".
+        let space = rack("crew", &["ada", "cy"]);
+        let ada = ResourceRef::parse("agent-session/ada").unwrap();
+        let space = stage_session_space(
+            Some(&space),
+            SessionSpaceMutation::BenchAgentSession {
+                agent_session: ada.clone(),
+                benched: true,
+            },
+        )
+        .unwrap()
+        .proposed;
+        let swapped = ResourceRef::parse("agent-session/ada-swapped").unwrap();
+        let intents = hot_swap_intents(&space, &ada, &swapped).unwrap();
+        assert!(
+            matches!(intents.last(), Some(SessionSpaceMutation::DetachAgentSession { agent_session }) if agent_session == &ada),
+            "the old session leaves last: {intents:?}"
+        );
+        let mut state = space.clone();
+        for intent in intents {
+            state = stage_session_space(Some(&state), intent).unwrap().proposed;
+        }
+        assert!(
+            !state.agent_sessions.contains_key(&ada),
+            "the old session is detached"
+        );
+        let seat = &state.agent_sessions[&swapped];
+        assert_eq!(
+            seat.purpose.as_deref(),
+            Some("ada's chain"),
+            "the chain keeps its purpose"
+        );
+        assert!(seat
+            .provenance
+            .iter()
+            .any(|p| p == "hot-swapped in for agent-session/ada"));
+        assert!(
+            state.benched.contains(&swapped),
+            "a benched chain stays benched"
+        );
+        assert_eq!(
+            state.project_contexts, space.project_contexts,
+            "the same Project contexts"
+        );
+    }
+
+    #[test]
+    fn hot_swap_refuses_in_words_what_it_cannot_carry() {
+        let space = rack("crew", &["ada", "cy"]);
+        let ada = ResourceRef::parse("agent-session/ada").unwrap();
+        let cy = ResourceRef::parse("agent-session/cy").unwrap();
+        let nobody = ResourceRef::parse("agent-session/nobody").unwrap();
+        let fresh = ResourceRef::parse("agent-session/fresh").unwrap();
+        let refused = hot_swap_intents(&space, &nobody, &fresh).unwrap_err();
+        assert_eq!(refused.code(), "session_space.hot_swap_unattached");
+        let refused = hot_swap_intents(&space, &ada, &cy).unwrap_err();
+        assert_eq!(refused.code(), "session_space.hot_swap_into_standing");
+        let refused = hot_swap_intents(&space, &ada, &ada).unwrap_err();
+        assert_eq!(refused.code(), "session_space.hot_swap_into_standing");
+        let helped = stage_session_space(
+            Some(&space),
+            SessionSpaceMutation::BindDecisionHelper {
+                binding: SessionSpaceDecisionHelperBinding {
+                    agent_session: cy.clone(),
+                    provenance: vec!["dropped on the rack".into()],
+                },
+            },
+        )
+        .unwrap()
+        .proposed;
+        let refused = hot_swap_intents(&helped, &cy, &fresh).unwrap_err();
+        assert_eq!(refused.code(), "session_space.hot_swap_decision_helper");
+    }
+
+    #[test]
+    fn a_decision_helper_is_one_session_of_the_space_and_leaves_with_it() {
+        // O-I manual §19.20: "one helper answers every agent of the rack".
+        let space = rack("crew", &["ada", "settle"]);
+        let settle = ResourceRef::parse("agent-session/settle").unwrap();
+        let nobody = ResourceRef::parse("agent-session/nobody").unwrap();
+        let bind = |session: &ResourceRef| SessionSpaceMutation::BindDecisionHelper {
+            binding: SessionSpaceDecisionHelperBinding {
+                agent_session: session.clone(),
+                provenance: vec!["dropped on the rack".into()],
+            },
+        };
+        let refused = stage_session_space(Some(&space), bind(&nobody)).unwrap_err();
+        assert_eq!(refused.code(), "session_space.decision_helper_unattached");
+        let preview = stage_session_space(Some(&space), bind(&settle)).unwrap();
+        assert_eq!(preview.changed[0].relation, "decision-helper");
+        let helped = preview.proposed;
+        assert_eq!(
+            helped.decision_helper.as_ref().map(|h| &h.agent_session),
+            Some(&settle)
+        );
+        let unbound =
+            stage_session_space(Some(&helped), SessionSpaceMutation::UnbindDecisionHelper)
+                .unwrap()
+                .proposed;
+        assert!(unbound.decision_helper.is_none());
+        assert!(
+            unbound.agent_sessions.contains_key(&settle),
+            "unbinding keeps the session"
+        );
+        let detached = stage_session_space(
+            Some(&helped),
+            SessionSpaceMutation::DetachAgentSession {
+                agent_session: settle.clone(),
+            },
+        )
+        .unwrap();
+        assert!(
+            detached.proposed.decision_helper.is_none(),
+            "the helper leaves with its session"
+        );
+        assert!(detached
+            .changed
+            .iter()
+            .any(|c| c.relation == "decision-helper" && c.change == "unbound"));
     }
 
     #[test]
