@@ -385,6 +385,7 @@ impl Harness {
                 forked_from: None,
                 context_revision: 1,
                 ingress: GatewayIngressPolicy {
+                    kind_rules: Default::default(),
                     default: GatewayIngressDecision::Allow,
                     sender_overrides: Default::default(),
                 },
@@ -1129,6 +1130,7 @@ fn a_denied_or_pairing_sender_never_starts_a_turn() {
         forked_from: None,
         context_revision: 1,
         ingress: GatewayIngressPolicy {
+            kind_rules: Default::default(),
             default: GatewayIngressDecision::Pair,
             sender_overrides: [("blocked-sender".into(), GatewayIngressDecision::Deny)]
                 .into_iter()
@@ -1920,6 +1922,7 @@ fn connector_pause_and_resume_stop_ingress_and_show_in_health() {
             forked_from: None,
             context_revision: 1,
             ingress: GatewayIngressPolicy {
+                kind_rules: Default::default(),
                 default: GatewayIngressDecision::Allow,
                 sender_overrides: Default::default(),
             },
@@ -2358,6 +2361,7 @@ fn skills_listing_discloses_the_surface_and_names_the_invocation_law() {
             forked_from: None,
             context_revision: 1,
             ingress: GatewayIngressPolicy {
+                kind_rules: Default::default(),
                 default: GatewayIngressDecision::Allow,
                 sender_overrides: Default::default(),
             },
@@ -3192,6 +3196,7 @@ fn a_denied_or_unpaired_sender_cannot_ask() {
         forked_from: None,
         context_revision: 1,
         ingress: GatewayIngressPolicy {
+            kind_rules: Default::default(),
             default: GatewayIngressDecision::Pair,
             sender_overrides: [("blocked-sender".into(), GatewayIngressDecision::Deny)]
                 .into_iter()

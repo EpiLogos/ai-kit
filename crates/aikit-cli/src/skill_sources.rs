@@ -143,6 +143,11 @@ pub struct SourceState {
     pub active_snapshot: Option<String>,
     #[serde(default)]
     pub history: Vec<String>,
+    /// Proposed revisions of single members (O-I manual §19.7, Refining a
+    /// skill), each a snapshot of its own beside the active one. Absent from
+    /// the file when none waits, so a state without proposals reads as before.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub proposals: Vec<ProposedRevision>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -581,8 +586,9 @@ pub fn active_snapshot_of(home: &AikitHome, id: &str) -> Option<String> {
 }
 
 /// Every retained snapshot of a managed source that holds `capsule_id`, as
-/// `(digest, capsule directory)`: active first, then the candidate and the
-/// rollback history, newest first. Empty when `id` is not a managed source.
+/// `(digest, capsule directory)`: active first, then the candidate, any
+/// proposed revision waiting beside them, and the rollback history, newest
+/// first. Empty when `id` is not a managed source.
 pub fn retained_capsule_dirs(
     home: &AikitHome,
     id: &str,
@@ -599,6 +605,12 @@ pub fn retained_capsule_dirs(
         .active_snapshot
         .into_iter()
         .chain(state.candidate_snapshot)
+        .chain(
+            state
+                .proposals
+                .into_iter()
+                .map(|proposal| proposal.snapshot),
+        )
         .chain(state.history.into_iter().rev())
     {
         if !digests.contains(&digest) {
@@ -1094,6 +1106,587 @@ pub fn rollback(home: &AikitHome, id: &str) -> Result<SnapshotRecord> {
     state.active_snapshot = Some(previous.clone());
     write_toml_atomic(&source_dir(home, id).join(STATE_FILE), &state)?;
     Ok(record)
+}
+
+// ---------------------------------------------------------------------------
+// Refining a skill (O-I manual §19.7): one proposed revision of one member
+// ---------------------------------------------------------------------------
+//
+// A skill that the work keeps pulling against gets one drafted revision, and
+// the revision waits beside the one in use until the person answers it. It is
+// kept where the member's revisions are already kept: its source's snapshots.
+// A proposal is a snapshot of its own — the active snapshot with that one
+// member's files replaced by the draft — named in the source's state beside
+// the candidate, the active snapshot and the rollback history, so `praxis read
+// --revision` reads it as any retained revision. Nothing in use changes until
+// Accept, which makes the proposal's snapshot active with the one before kept
+// to Roll back to (History takes it back); Discard drops it. A Repeat over
+// Skillset carries it into one take's World only (§19.1), and the take is kept
+// with the proposal as its Test.
+
+/// A close that shows the reason a revision is proposed, in the words of the
+/// reading that found it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RefinementReason {
+    pub task_ref: String,
+    pub reason: String,
+}
+
+/// A take that ran under a proposed revision (its trace), the takes of its
+/// Repeat that ran beside it, and the take's own NOW where Central kept one.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RefinementTest {
+    pub trace: String,
+    #[serde(default)]
+    pub beside: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub now_ref: Option<String>,
+}
+
+/// One proposed revision of one member, as its source keeps it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProposedRevision {
+    pub member: String,
+    /// The snapshot that holds the revision.
+    pub snapshot: String,
+    /// The active snapshot the revision was drafted on.
+    pub based_on: String,
+    #[serde(default)]
+    pub why: Vec<RefinementReason>,
+    pub proposed_at_unix_seconds: u64,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tests: Vec<RefinementTest>,
+}
+
+/// A member's revision in one snapshot: the snapshot and the capsule revision
+/// AIKit's catalogue gives the member there.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct RevisionAt {
+    pub snapshot: String,
+    pub revision: String,
+}
+
+/// A proposed revision as it is read: beside the revision in use, with why it
+/// was proposed and the takes that ran under it.
+#[derive(Debug, Clone, Serialize)]
+pub struct Refinement {
+    pub member: String,
+    pub source: String,
+    /// Whose operation keeps the member's next revision: `aikit` for a source
+    /// AIKit owns, `central` for a skill whose source Central keeps.
+    pub owner: &'static str,
+    pub why: Vec<RefinementReason>,
+    pub proposed: RevisionAt,
+    pub in_use: RevisionAt,
+    /// The revision in use is no longer the one the proposal was drafted on.
+    pub stale: bool,
+    pub proposed_at_unix_seconds: u64,
+    pub tests: Vec<RefinementTest>,
+}
+
+/// What Accept did: the member's next revision, and the snapshot Roll back
+/// returns to.
+#[derive(Debug, Clone, Serialize)]
+pub struct AcceptedRevision {
+    pub member: String,
+    pub source: String,
+    pub revision: String,
+    pub active_snapshot: String,
+    pub rollback_to: String,
+}
+
+/// What Discard dropped.
+#[derive(Debug, Clone, Serialize)]
+pub struct DiscardedRevision {
+    pub discarded: String,
+    pub source: String,
+    pub snapshot: String,
+    /// The revision in use, which stays.
+    pub in_use: Option<String>,
+}
+
+fn refinement_error(code: &'static str, message: impl Into<String>) -> AikitError {
+    AikitError::new(code, message)
+}
+
+/// The source a member's id names (`skill/<source>/<tail>`) and its state.
+fn member_source(home: &AikitHome, member: &str) -> Result<(String, SourceSpec, SourceState)> {
+    aikit_core::CapsuleId::parse(member)?;
+    let mut parts = member.split('/');
+    let (Some("skill"), Some(source), Some(_)) = (parts.next(), parts.next(), parts.next()) else {
+        return Err(refinement_error(
+            "refinement.not_a_member",
+            format!("`{member}` names no skill of a source AIKit keeps (a member is `skill/<source>/<name>`)"),
+        ));
+    };
+    if validate_id(source).is_err() || !source_dir(home, source).join(SPEC_FILE).is_file() {
+        return Err(refinement_error(
+            "refinement.not_a_member",
+            format!("AIKit keeps no skill source `{source}`, so `{member}` has no revisions here"),
+        ));
+    }
+    Ok((
+        source.to_owned(),
+        load_spec(home, source)?,
+        load_state(home, source)?,
+    ))
+}
+
+/// The capsule revision AIKit's catalogue gives `member` in one snapshot.
+fn member_revision(home: &AikitHome, source: &str, snapshot: &str, member: &str) -> Result<String> {
+    let registry = snapshot_dir(home, source, snapshot).join("registry");
+    let loaded = load_registry(&registry, RegistrySource::new(source.to_string()))?;
+    loaded
+        .catalog
+        .capsules()
+        .into_iter()
+        .find(|capsule| capsule.id.to_string() == member)
+        .and_then(|capsule| {
+            capsule
+                .revision
+                .as_ref()
+                .map(|revision| revision.to_string())
+        })
+        .ok_or_else(|| {
+            refinement_error(
+                "refinement.not_a_member",
+                format!("snapshot `{snapshot}` of `{source}` holds no `{member}`"),
+            )
+        })
+}
+
+/// The files of one skill directory, sorted, with their modes: what a
+/// revision's identity and its read-back are computed over.
+pub(crate) fn tree_files(root: &Path) -> Result<Vec<(String, u32, Vec<u8>)>> {
+    fn walk(root: &Path, dir: &Path, out: &mut Vec<(String, u32, Vec<u8>)>) -> Result<()> {
+        let mut entries: Vec<_> = fs::read_dir(dir)
+            .map_err(|error| io("refinement.read_failed", dir, error))?
+            .collect::<std::result::Result<_, _>>()
+            .map_err(|error| io("refinement.read_failed", dir, error))?;
+        entries.sort_by_key(|entry| entry.file_name());
+        for entry in entries {
+            let path = entry.path();
+            let kind = entry
+                .file_type()
+                .map_err(|error| io("refinement.read_failed", &path, error))?;
+            if kind.is_symlink() {
+                return Err(refinement_error(
+                    "refinement.symlink",
+                    format!(
+                        "`{}` is a link; a revision carries files only",
+                        path.display()
+                    ),
+                ));
+            }
+            if kind.is_dir() {
+                walk(root, &path, out)?;
+                continue;
+            }
+            let bytes =
+                fs::read(&path).map_err(|error| io("refinement.read_failed", &path, error))?;
+            #[cfg(unix)]
+            let mode = {
+                use std::os::unix::fs::PermissionsExt;
+                entry
+                    .metadata()
+                    .map_err(|error| io("refinement.read_failed", &path, error))?
+                    .permissions()
+                    .mode()
+                    & 0o7777
+            };
+            #[cfg(not(unix))]
+            let mode = 0;
+            out.push((
+                path_text(path.strip_prefix(root).unwrap_or(&path)),
+                mode,
+                bytes,
+            ));
+        }
+        Ok(())
+    }
+    let mut out = Vec::new();
+    walk(root, root, &mut out)?;
+    Ok(out)
+}
+
+/// Copy a snapshot tree (directories and files, modes kept).
+pub(crate) fn copy_tree(from: &Path, to: &Path) -> Result<()> {
+    fs::create_dir_all(to).map_err(|error| io("refinement.write_failed", to, error))?;
+    for entry in fs::read_dir(from).map_err(|error| io("refinement.read_failed", from, error))? {
+        let entry = entry.map_err(|error| io("refinement.read_failed", from, error))?;
+        let (source, target) = (entry.path(), to.join(entry.file_name()));
+        let kind = entry
+            .file_type()
+            .map_err(|error| io("refinement.read_failed", &source, error))?;
+        if kind.is_dir() {
+            copy_tree(&source, &target)?;
+        } else if kind.is_file() {
+            fs::copy(&source, &target)
+                .map_err(|error| io("refinement.write_failed", &target, error))?;
+            copy_permissions(&source, &target)?;
+        }
+    }
+    Ok(())
+}
+
+fn refinement_of(
+    home: &AikitHome,
+    source: &str,
+    spec: &SourceSpec,
+    state: &SourceState,
+    proposal: &ProposedRevision,
+) -> Result<Refinement> {
+    let active = state.active_snapshot.clone().unwrap_or_default();
+    let in_use = if active.is_empty() {
+        RevisionAt {
+            snapshot: active.clone(),
+            revision: String::new(),
+        }
+    } else {
+        RevisionAt {
+            revision: member_revision(home, source, &active, &proposal.member).unwrap_or_default(),
+            snapshot: active.clone(),
+        }
+    };
+    Ok(Refinement {
+        member: proposal.member.clone(),
+        source: source.to_owned(),
+        owner: if matches!(spec.kind, SourceKind::Central { .. }) {
+            "central"
+        } else {
+            "aikit"
+        },
+        why: proposal.why.clone(),
+        proposed: RevisionAt {
+            revision: member_revision(home, source, &proposal.snapshot, &proposal.member)?,
+            snapshot: proposal.snapshot.clone(),
+        },
+        stale: active != proposal.based_on,
+        in_use,
+        proposed_at_unix_seconds: proposal.proposed_at_unix_seconds,
+        tests: proposal.tests.clone(),
+    })
+}
+
+/// Propose one revision of one member: `revised` is a directory holding the
+/// revised skill, under the member's own name. One proposal per member waits
+/// at a time; it changes something, and it is drafted on the revision in use.
+pub fn propose_revision(
+    home: &AikitHome,
+    member: &str,
+    revised: &Path,
+    why: Vec<RefinementReason>,
+) -> Result<Refinement> {
+    let (source, spec, mut state) = member_source(home, member)?;
+    let active = state.active_snapshot.clone().ok_or_else(|| {
+        refinement_error(
+            "refinement.no_active",
+            format!("skill source `{source}` has no active snapshot, so `{member}` has no revision in use to revise"),
+        )
+    })?;
+    let record = load_snapshot(home, &source, &active)?;
+    let Some(in_use) = record.skills.iter().find(|skill| skill.id == member) else {
+        return Err(refinement_error(
+            "refinement.not_a_member",
+            format!(
+                "`{member}` is not a skill of source `{source}` as it stands (snapshot `{active}`)"
+            ),
+        ));
+    };
+    if state
+        .proposals
+        .iter()
+        .any(|proposal| proposal.member == member)
+    {
+        return Err(refinement_error(
+            "refinement.already_proposed",
+            format!("a revision of `{member}` is already proposed: one revision of one member waits at a time; accept or discard it first"),
+        ));
+    }
+    if why.is_empty()
+        || why
+            .iter()
+            .any(|reason| reason.task_ref.trim().is_empty() || reason.reason.trim().is_empty())
+    {
+        return Err(refinement_error(
+            "refinement.why",
+            "a proposed revision names the closes that show its reason: each a task and its reason (§19.7: nothing is refined because it is old or little used)",
+        ));
+    }
+    let draft = agent_skills::validate(revised)?;
+    if draft.name != in_use.name {
+        return Err(refinement_error(
+            "refinement.renamed",
+            format!(
+                "the draft is the skill `{}`, not `{}`: a revision keeps the member's name",
+                draft.name, in_use.name
+            ),
+        ));
+    }
+    reject_symlinks(revised)?;
+    let member_dir = |snapshot: &Path| snapshot.join("registry/capsules").join(member);
+    let active_dir = snapshot_dir(home, &source, &active);
+    let mut revised_files = Vec::new();
+    for relative in &draft.files {
+        let from = revised.join(relative);
+        let bytes = fs::read(&from).map_err(|error| io("refinement.read_failed", &from, error))?;
+        #[cfg(unix)]
+        let mode = {
+            use std::os::unix::fs::PermissionsExt;
+            fs::metadata(&from)
+                .map_err(|error| io("refinement.read_failed", &from, error))?
+                .permissions()
+                .mode()
+                & 0o7777
+        };
+        #[cfg(not(unix))]
+        let mode = 0;
+        revised_files.push((relative.clone(), mode, bytes));
+    }
+    revised_files.sort_by(|left, right| left.0.cmp(&right.0));
+    if tree_files(&member_dir(&active_dir).join("payload"))? == revised_files {
+        return Err(refinement_error(
+            "refinement.unchanged",
+            format!("the draft of `{member}` is the revision in use: a proposal changes something"),
+        ));
+    }
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"aikit-skill-proposed-revision-v1\n");
+    hash_field(&mut hasher, &active);
+    hash_field(&mut hasher, member);
+    for (relative, mode, bytes) in &revised_files {
+        hash_field(&mut hasher, relative);
+        hasher.update(&mode.to_le_bytes());
+        hasher.update(&(bytes.len() as u64).to_le_bytes());
+        hasher.update(bytes);
+    }
+    let digest = hasher.finalize().to_hex().to_string();
+    let dir = source_dir(home, &source);
+    let staging = dir.join(format!(".staging-{}", ulid::Ulid::generate()));
+    let built = (|| -> Result<()> {
+        copy_tree(&active_dir, &staging)?;
+        let capsule = member_dir(&staging);
+        let payload = capsule.join("payload");
+        fs::remove_dir_all(&payload)
+            .map_err(|error| io("refinement.write_failed", &payload, error))?;
+        for (relative, _, bytes) in &revised_files {
+            let to = payload.join(relative);
+            if let Some(parent) = to.parent() {
+                fs::create_dir_all(parent)
+                    .map_err(|error| io("refinement.write_failed", parent, error))?;
+            }
+            fs::write(&to, bytes).map_err(|error| io("refinement.write_failed", &to, error))?;
+            copy_permissions(&revised.join(relative), &to)?;
+        }
+        // The manifest keeps everything the member carried (its Control
+        // ground facts among them); only what the draft says it is changes.
+        let manifest_path = capsule.join("manifest.toml");
+        let text = fs::read_to_string(&manifest_path)
+            .map_err(|error| io("refinement.read_failed", &manifest_path, error))?;
+        let mut manifest: toml::Table = toml::from_str(&text).map_err(|error| {
+            refinement_error(
+                "refinement.manifest",
+                format!("{}: {error}", manifest_path.display()),
+            )
+        })?;
+        manifest.insert(
+            "description".into(),
+            toml::Value::String(draft.description.clone()),
+        );
+        fs::write(
+            &manifest_path,
+            toml::to_string_pretty(&manifest)
+                .map_err(|error| refinement_error("refinement.manifest", error.to_string()))?,
+        )
+        .map_err(|error| io("refinement.write_failed", &manifest_path, error))?;
+        let mut snapshot = record.clone();
+        snapshot.digest = digest.clone();
+        write_toml_atomic(&staging.join(SNAPSHOT_FILE), &snapshot)
+    })();
+    if let Err(error) = built {
+        let _ = fs::remove_dir_all(&staging);
+        return Err(error);
+    }
+    let final_dir = dir.join("snapshots").join(&digest);
+    if final_dir.exists() {
+        fs::remove_dir_all(&staging)
+            .map_err(|error| io("refinement.write_failed", &staging, error))?;
+    } else {
+        fs::rename(&staging, &final_dir)
+            .map_err(|error| io("refinement.write_failed", &final_dir, error))?;
+    }
+    let proposal = ProposedRevision {
+        member: member.to_owned(),
+        snapshot: digest,
+        based_on: active,
+        why,
+        proposed_at_unix_seconds: std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|elapsed| elapsed.as_secs())
+            .unwrap_or_default(),
+        tests: Vec::new(),
+    };
+    state.proposals.push(proposal.clone());
+    write_toml_atomic(&dir.join(STATE_FILE), &state)?;
+    refinement_of(home, &source, &spec, &state, &proposal)
+}
+
+/// Every proposed revision AIKit keeps, each beside the revision in use.
+pub fn refinements(home: &AikitHome) -> Result<Vec<Refinement>> {
+    let mut out = Vec::new();
+    for source in registered_ids(home)? {
+        let state = load_state(home, &source)?;
+        if state.proposals.is_empty() {
+            continue;
+        }
+        let spec = load_spec(home, &source)?;
+        for proposal in &state.proposals {
+            out.push(refinement_of(home, &source, &spec, &state, proposal)?);
+        }
+    }
+    Ok(out)
+}
+
+/// The proposal standing for `member`, as it is read.
+pub fn refinement(home: &AikitHome, member: &str) -> Result<Refinement> {
+    let (source, spec, state) = member_source(home, member)?;
+    let proposal = state
+        .proposals
+        .iter()
+        .find(|proposal| proposal.member == member)
+        .ok_or_else(|| no_proposal(member))?;
+    refinement_of(home, &source, &spec, &state, proposal)
+}
+
+fn no_proposal(member: &str) -> AikitError {
+    refinement_error(
+        "refinement.none",
+        format!("no proposed revision of `{member}` stands"),
+    )
+}
+
+/// The proposed revision's own skill directory (its snapshot's payload).
+pub fn proposed_payload(home: &AikitHome, refinement: &Refinement) -> PathBuf {
+    snapshot_dir(home, &refinement.source, &refinement.proposed.snapshot)
+        .join("registry/capsules")
+        .join(&refinement.member)
+        .join("payload")
+}
+
+/// Keep a take that ran under a proposed revision with the proposal (its Test).
+pub fn record_test(home: &AikitHome, member: &str, test: RefinementTest) -> Result<()> {
+    let (source, _, mut state) = member_source(home, member)?;
+    let proposal = state
+        .proposals
+        .iter_mut()
+        .find(|proposal| proposal.member == member)
+        .ok_or_else(|| no_proposal(member))?;
+    proposal.tests.retain(|kept| kept.trace != test.trace);
+    proposal.tests.push(test);
+    write_toml_atomic(&source_dir(home, &source).join(STATE_FILE), &state)
+}
+
+/// Accept: keep the proposal as the member's next revision. The snapshot it
+/// is in becomes active, the one before stays to Roll back to, and the
+/// person's answer is the review its revision needed.
+pub fn accept_revision(home: &AikitHome, member: &str) -> Result<AcceptedRevision> {
+    let (source, spec, mut state) = member_source(home, member)?;
+    let index = state
+        .proposals
+        .iter()
+        .position(|proposal| proposal.member == member)
+        .ok_or_else(|| no_proposal(member))?;
+    if matches!(spec.kind, SourceKind::Central { .. }) {
+        return Err(refinement_error(
+            "refinement.owner_is_central",
+            format!("Central keeps the source of `{member}` (source `{source}` is bound to Central's ground): its next revision is Central's to keep, and Central has no operation that takes a proposed revision yet. Discard it here, or revise the skill in Central's ground, then sync and promote."),
+        ));
+    }
+    let proposal = state.proposals[index].clone();
+    let active = state.active_snapshot.clone().unwrap_or_default();
+    if active != proposal.based_on {
+        return Err(refinement_error(
+            "refinement.stale",
+            format!("the revision of `{member}` was drafted on snapshot `{}`, and source `{source}` now stands at `{active}`: discard it, and propose again on the revision in use", proposal.based_on),
+        ));
+    }
+    // The person's Accept is the review the revised member needed; the other
+    // members are the bytes already trusted in the revision in use.
+    let registry_source = RegistrySource::new(source.clone());
+    let loaded = load_registry(
+        &snapshot_dir(home, &source, &proposal.snapshot).join("registry"),
+        registry_source.clone(),
+    )?;
+    let capsule = loaded
+        .catalog
+        .capsules()
+        .into_iter()
+        .find(|capsule| capsule.id.to_string() == member)
+        .ok_or_else(|| {
+            refinement_error(
+                "refinement.not_a_member",
+                format!("the proposed snapshot holds no `{member}`"),
+            )
+        })?;
+    let Some(capsule_revision) = capsule.revision.clone() else {
+        return Err(refinement_error(
+            "refinement.not_a_member",
+            format!("the proposed `{member}` has no revision"),
+        ));
+    };
+    let revision = capsule_revision.to_string();
+    let index_db = Index::open(&home.database())?;
+    TrustStore::new(&index_db).record(
+        &TrustKey::new(registry_source, capsule.id.clone(), capsule_revision),
+        TrustState::Trusted,
+        Some("user-accepted refinement"),
+    )?;
+    state
+        .history
+        .retain(|item| item != &active && item != &proposal.snapshot);
+    state.history.push(active.clone());
+    state.active_snapshot = Some(proposal.snapshot.clone());
+    state.proposals.remove(index);
+    write_toml_atomic(&source_dir(home, &source).join(STATE_FILE), &state)?;
+    Ok(AcceptedRevision {
+        member: member.to_owned(),
+        source,
+        revision,
+        active_snapshot: proposal.snapshot,
+        rollback_to: active,
+    })
+}
+
+/// Discard: drop the proposal; the revision in use stays. Its snapshot goes
+/// with it unless the source names it otherwise.
+pub fn discard_revision(home: &AikitHome, member: &str) -> Result<DiscardedRevision> {
+    let (source, _, mut state) = member_source(home, member)?;
+    let index = state
+        .proposals
+        .iter()
+        .position(|proposal| proposal.member == member)
+        .ok_or_else(|| no_proposal(member))?;
+    let proposal = state.proposals.remove(index);
+    write_toml_atomic(&source_dir(home, &source).join(STATE_FILE), &state)?;
+    let named = state
+        .active_snapshot
+        .iter()
+        .chain(state.candidate_snapshot.iter())
+        .chain(state.history.iter())
+        .chain(state.proposals.iter().map(|other| &other.snapshot))
+        .any(|digest| digest == &proposal.snapshot);
+    if !named {
+        let dir = snapshot_dir(home, &source, &proposal.snapshot);
+        if dir.exists() {
+            fs::remove_dir_all(&dir).map_err(|error| io("refinement.write_failed", &dir, error))?;
+        }
+    }
+    Ok(DiscardedRevision {
+        discarded: member.to_owned(),
+        source,
+        snapshot: proposal.snapshot,
+        in_use: state.active_snapshot,
+    })
 }
 
 /// What removing a source took with it.
@@ -1714,4 +2307,68 @@ pub fn report_central_generation(home: &AikitHome, generation: &str, target: &Pa
         }
     }
     warnings
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn skill(dir: &Path, name: &str, marker: &str) {
+        fs::create_dir_all(dir.join("references")).unwrap();
+        fs::write(
+            dir.join("SKILL.md"),
+            format!(
+                "---\nname: {name}\ndescription: A member under refinement.\n---\n\n{marker}\n"
+            ),
+        )
+        .unwrap();
+        fs::write(dir.join("references/rules.md"), format!("{marker}\n")).unwrap();
+    }
+
+    /// A skill whose source Central keeps is Central's to revise: AIKit holds
+    /// the proposal beside the revision in use, but its Accept says in words
+    /// that Central has no operation to keep it, and Discard still drops it.
+    #[test]
+    fn a_central_sources_proposal_is_refused_accept_in_words_and_can_be_discarded() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = AikitHome::at(temp.path().join("aikit"));
+        home.ensure_layout().unwrap();
+        let source = temp.path().join("practice");
+        skill(&source.join("alpha"), "alpha", "alpha-one");
+        add_directory(&home, "practice", &source, false).unwrap();
+        sync(&home, "practice").unwrap();
+        promote(&home, "practice", false, &[]).unwrap();
+        let draft = temp.path().join("drafts/alpha");
+        skill(&draft, "alpha", "alpha-two");
+        let why = vec![RefinementReason {
+            task_ref: "task:plan".into(),
+            reason: "Not met".into(),
+        }];
+        propose_revision(&home, "skill/practice/alpha", &draft, why).unwrap();
+        // The source is Central's: its registration names Central's ground.
+        let mut spec = load_spec(&home, "practice").unwrap();
+        spec.kind = SourceKind::Central {
+            central_root: temp.path().join("central"),
+            source_ref: "skills".into(),
+        };
+        write_toml_atomic(&source_dir(&home, "practice").join(SPEC_FILE), &spec).unwrap();
+        let listed = refinements(&home).unwrap();
+        assert_eq!(listed[0].owner, "central");
+        let refused = accept_revision(&home, "skill/practice/alpha").unwrap_err();
+        assert_eq!(refused.code(), "refinement.owner_is_central");
+        assert!(
+            refused.message().contains("Central keeps the source"),
+            "{}",
+            refused.message()
+        );
+        let state = load_state(&home, "practice").unwrap();
+        assert_eq!(
+            state.proposals.len(),
+            1,
+            "a refused Accept keeps the proposal"
+        );
+        let discarded = discard_revision(&home, "skill/practice/alpha").unwrap();
+        assert_eq!(discarded.discarded, "skill/practice/alpha");
+        assert!(refinements(&home).unwrap().is_empty());
+    }
 }

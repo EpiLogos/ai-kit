@@ -20,9 +20,17 @@
 //!   harness's own words on each turn as the task executor gives it
 //!   (`tool_calls_answer`). `inherit` applies nothing. It answers what was
 //!   applied and confirmed — `{ready, provider, model, agent, level}` — or
-//!   refuses in words. A skillset or a budget has no owner operation on a
-//!   fresh resident yet, so a take that varies one is refused before anything
-//!   opens. Autonomy is retired: Tool calls took its place.
+//!   refuses in words. A Skillset level (`set`, or `set+member`) is a set of
+//!   skills, or that set with one proposed revision of one member in it
+//!   (§19.1; §19.7 Refining a skill): before the resident opens, the set is
+//!   carried into the take's World where its harness reads its project's
+//!   skills (pi `.pi/skills`), the proposed revision in place of the member's
+//!   revision in use, so it is in effect for that take only and nothing in
+//!   the person's Home or project changes; what was carried is read back from
+//!   the World, and the take is kept with the proposal as its Test. A budget
+//!   has no owner operation on a fresh resident yet, so a take that varies one
+//!   is refused before anything opens. Autonomy is retired: Tool calls took
+//!   its place.
 //! - `turn {turn: {iteration, prompt}}` takes one turn of the resident and
 //!   answers `{status, output, usage}`: the agent acts in its World in its
 //!   own loop, and Actuation reads the stop condition between turns.
@@ -322,6 +330,11 @@ enum Level {
     Effort(String),
     /// Tool calls' word: the take's answer to the harness's requests.
     ToolCalls(String),
+    /// A set of skills, or that set with one member's proposed revision.
+    Skillset {
+        set: String,
+        member: Option<String>,
+    },
     Inherit,
 }
 
@@ -348,11 +361,192 @@ fn level_of(level: &Value, model: &str) -> std::result::Result<Level, String> {
             crate::encounter_task_executor::TOOL_CALLS.join(", ")
         )),
         "autonomy" => Err(crate::encounter_task_executor::AUTONOMY_RETIRED.to_owned()),
-        "skillset" | "budget" => Err(format!(
-            "A take's body applies a model, an effort or Tool calls to the session's agent; a {variable} has no owner operation on a fresh resident yet, so this take cannot vary it"
+        "skillset" => {
+            let (set, member) = match value.split_once('+') {
+                Some((set, member)) => (set.trim(), Some(member.trim())),
+                None => (value.trim(), None),
+            };
+            if set.is_empty() || member.is_some_and(str::is_empty) {
+                return Err(format!(
+                    "A Skillset level names a set, or a set and the one member whose proposed revision it carries (set+member); the take was given {value}"
+                ));
+            }
+            Ok(Level::Skillset {
+                set: set.to_owned(),
+                member: member.map(str::to_owned),
+            })
+        }
+        "budget" => Err(format!(
+            "A take's body applies a model, an effort, Tool calls or a set to the session's agent; a {variable} has no owner operation on a fresh resident yet, so this take cannot vary it"
         )),
         other => Err(format!("A take's body applies no {other} level")),
     }
+}
+
+/// What a Skillset take carried into its World, read back from it.
+struct Carried {
+    reading: Value,
+    /// The member whose proposed revision the take carried.
+    proposed: Option<String>,
+}
+
+/// Carry a set into the take's World where its harness reads its project's
+/// skills: each member's revision in use, and in place of `member`'s its
+/// proposed revision. The set is the skill tree there for this take: what
+/// stood at the prefix in the World is replaced (a link is unlinked, never
+/// followed). A member AIKit cannot carry as it stands is withheld with
+/// AIKit's own reason. Each carried tree is read back from the World.
+fn carry_set(
+    home: &AikitHome,
+    world: &Path,
+    harness: &str,
+    prefix: &str,
+    set: &str,
+    member: Option<&str>,
+) -> std::result::Result<Carried, String> {
+    use aikit_core::catalog::Catalog;
+    let relative = Path::new(prefix);
+    if relative.is_absolute()
+        || relative
+            .components()
+            .any(|part| !matches!(part, std::path::Component::Normal(_)))
+    {
+        return Err(format!(
+            "{harness}'s skill tree {prefix} is not a path inside the take's World"
+        ));
+    }
+    let loaded = aikit_store::skillsets::load(home, set)
+        .map_err(|error| format!("AIKit holds no set {set}: {}", error.message()))?;
+    let members = loaded.all_members();
+    let refinement = match member {
+        None => None,
+        Some(member) => {
+            if !members.iter().any(|id| id.to_string() == member) {
+                return Err(format!(
+                    "{member} is not a member of {set}: a Skillset take carries one proposed revision of one of its set's members"
+                ));
+            }
+            let refinement = crate::skill_sources::refinement(home, member).map_err(|error| {
+                if error.code() == "refinement.none" {
+                    format!("A Skillset take carries a member's proposed revision, and no proposed revision of {member} stands")
+                } else {
+                    format!("The proposed revision of {member} could not be read: {}", error.message())
+                }
+            })?;
+            if refinement.stale {
+                return Err(format!(
+                    "The proposed revision of {member} was drafted on a revision no longer in use: discard it and propose again on the one in use"
+                ));
+            }
+            Some(refinement)
+        }
+    };
+    let service = crate::app::Service::open_user_scope(home.clone())
+        .map_err(|error| format!("AIKit's catalogue could not be read: {}", error.message()))?;
+    let catalog = service.snapshot();
+    let view = service.resolved();
+    let mut carried: Vec<(String, PathBuf, Value)> = Vec::new();
+    let mut withheld = Vec::new();
+    for id in &members {
+        let withhold = |reason: String| json!({"id": id.to_string(), "reason": reason});
+        if let Some(reason) = view.unavailable_reason(id) {
+            withheld.push(withhold(reason.describe()));
+            continue;
+        }
+        let Some(capsule) = catalog.get(id) else {
+            withheld.push(withhold("not present in any registry".into()));
+            continue;
+        };
+        let aikit_core::capsule::Payload::Skill(section) = &capsule.payload else {
+            withheld.push(withhold(format!(
+                "{} is not a skill",
+                capsule.kind.as_str()
+            )));
+            continue;
+        };
+        let name = if section.export_name.is_empty() {
+            id.leaf().to_owned()
+        } else {
+            section.export_name.clone()
+        };
+        let proposed = refinement
+            .as_ref()
+            .filter(|refinement| refinement.member == id.to_string());
+        let (payload, revision) = match proposed {
+            Some(refinement) => (
+                crate::skill_sources::proposed_payload(home, refinement),
+                refinement.proposed.revision.clone(),
+            ),
+            None => match &capsule.root {
+                Some(root) => (
+                    root.join(&section.root),
+                    capsule
+                        .revision
+                        .as_ref()
+                        .map(ToString::to_string)
+                        .unwrap_or_default(),
+                ),
+                None => {
+                    withheld.push(withhold("has no payload on this machine".into()));
+                    continue;
+                }
+            },
+        };
+        if carried.iter().any(|(other, _, _)| *other == name) {
+            return Err(format!(
+                "Two members of {set} are the skill {name}; a harness's skill tree holds one skill of a name"
+            ));
+        }
+        carried.push((
+            name.clone(),
+            payload,
+            json!({"id": id.to_string(), "name": name, "revision": revision, "proposed": proposed.is_some()}),
+        ));
+    }
+    let root = world.join(relative);
+    match std::fs::symlink_metadata(&root) {
+        Ok(meta) if meta.file_type().is_symlink() || meta.is_file() => std::fs::remove_file(&root),
+        Ok(_) => std::fs::remove_dir_all(&root),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error),
+    }
+    .and_then(|_| std::fs::create_dir_all(&root))
+    .map_err(|error| format!("The take's World could not take the set at {prefix}: {error}"))?;
+    let mut rows = Vec::new();
+    for (name, payload, row) in carried {
+        let into = root.join(&name);
+        let read = |path: &Path| {
+            crate::skill_sources::tree_files(path).map_err(|error| {
+                format!("{name} could not be read for the take: {}", error.message())
+            })
+        };
+        let wanted = read(&payload)?;
+        crate::skill_sources::copy_tree(&payload, &into).map_err(|error| {
+            format!(
+                "{name} could not be carried into the take's World: {}",
+                error.message()
+            )
+        })?;
+        if read(&into)? != wanted {
+            return Err(format!(
+                "The take's World does not read back {name} as it was carried"
+            ));
+        }
+        rows.push(row);
+    }
+    let proposed = refinement.as_ref().map(|refinement| {
+        json!({"member": refinement.member, "revision": refinement.proposed.revision,
+            "in_use": refinement.in_use.revision, "source": refinement.source})
+    });
+    let mut reading = json!({"set": set, "harness": harness, "root": prefix,
+        "members": rows, "withheld": withheld});
+    if let Some(proposed) = proposed {
+        reading["proposed"] = proposed;
+    }
+    Ok(Carried {
+        reading,
+        proposed: refinement.map(|refinement| refinement.member),
+    })
 }
 
 /// The resident a take opened: its own session, exactly identified.
@@ -511,6 +705,23 @@ impl TakeBody {
             Ok(None) => None,
             Ok(Some(task)) => Some(take_now_request(&task, trace, &takes, &session, &level)?),
         };
+        // A set is carried into the World before the harness opens there, so it
+        // finds the set at session start.
+        let carried = match &plan {
+            Level::Skillset { set, member } => {
+                let (harness, prefix) =
+                    EncounterService::provider_skill_root(&self.home, provider)?;
+                Some(carry_set(
+                    &self.home,
+                    &world,
+                    &harness,
+                    &prefix,
+                    set,
+                    member.as_deref(),
+                )?)
+            }
+            _ => None,
+        };
         self.attach(&space, &session, trace).map_err(|error| {
             format!(
                 "The take's session could not be prepared: {}",
@@ -544,7 +755,14 @@ impl TakeBody {
             self.tool_calls = Some(word.clone());
         }
         match self.apply(model, &plan) {
-            Ok(applied) => {
+            Ok(mut applied) => {
+                if let Some(carried) = &carried {
+                    if let (Some(applied), Some(reading)) =
+                        (applied.as_object_mut(), carried.reading.as_object())
+                    {
+                        applied.extend(reading.clone());
+                    }
+                }
                 let now = match &now_request {
                     None => json!({"none": NO_TASK_NOW}),
                     Some(request) => {
@@ -566,6 +784,30 @@ impl TakeBody {
                         }
                     }
                 };
+                // The proposal keeps the take that ran under it, beside the takes
+                // of its Repeat: the Test of §19.7.
+                if let Some(member) = carried
+                    .as_ref()
+                    .and_then(|carried| carried.proposed.as_deref())
+                {
+                    let test = crate::skill_sources::RefinementTest {
+                        trace: trace.to_owned(),
+                        beside: takes
+                            .iter()
+                            .filter(|take| *take != trace)
+                            .cloned()
+                            .collect(),
+                        now_ref: now["now_ref"].as_str().map(str::to_owned),
+                    };
+                    if let Err(error) = crate::skill_sources::record_test(&self.home, member, test)
+                    {
+                        self.finalize();
+                        return Err(format!(
+                            "The proposed revision of {member} did not keep this take as its test: {}",
+                            error.message()
+                        ));
+                    }
+                }
                 let mut ready = json!({"ready": true, "provider": provider, "model": model,
                     "agent": agent, "agent_session": session.as_str(), "native_session_id": native,
                     "world": world, "applied": applied, "now": now});
@@ -627,7 +869,8 @@ impl TakeBody {
         }
         let mut applied = json!({"model": model});
         match plan {
-            Level::None | Level::Model | Level::Inherit => {}
+            // A set was carried into the World before the resident opened.
+            Level::None | Level::Model | Level::Inherit | Level::Skillset { .. } => {}
             Level::Effort(effort) => {
                 select(Some(effort)).map_err(|words| {
                     format!("The take's agent could not take the effort {effort}: {words}")
@@ -1125,12 +1368,27 @@ mod tests {
         assert!(level_of(&level("tool_calls", "reckless"), "m").is_err());
         let retired = level_of(&level("autonomy", "auto"), "m").unwrap_err();
         assert!(retired.contains("Autonomy is retired"), "{retired}");
-        for variable in ["skillset", "budget"] {
-            let refused = level_of(&level(variable, "x"), "m").unwrap_err();
-            assert!(
-                refused.contains("no owner operation on a fresh resident"),
-                "{refused}"
-            );
+        assert_eq!(
+            level_of(&level("skillset", "docs"), "m"),
+            Ok(Level::Skillset {
+                set: "docs".into(),
+                member: None
+            })
+        );
+        assert_eq!(
+            level_of(&level("skillset", "docs+skill/practice/alpha"), "m"),
+            Ok(Level::Skillset {
+                set: "docs".into(),
+                member: Some("skill/practice/alpha".into())
+            })
+        );
+        for value in ["+skill/practice/alpha", "docs+", " "] {
+            assert!(level_of(&level("skillset", value), "m").is_err(), "{value}");
         }
+        let refused = level_of(&level("budget", "x"), "m").unwrap_err();
+        assert!(
+            refused.contains("no owner operation on a fresh resident"),
+            "{refused}"
+        );
     }
 }

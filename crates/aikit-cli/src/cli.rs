@@ -870,6 +870,12 @@ fn source_route(command: &SourceSub) -> &'static str {
         SourceSub::Promote(_) => "cmd_source_promote",
         SourceSub::Rollback(_) => "cmd_source_rollback",
         SourceSub::Remove(_) => "cmd_source_remove",
+        SourceSub::Refine(refine) => match refine.command {
+            SourceRefineSub::Propose(_) => "cmd_source_refine_propose",
+            SourceRefineSub::List(_) => "cmd_source_refine_list",
+            SourceRefineSub::Accept(_) => "cmd_source_refine_accept",
+            SourceRefineSub::Discard(_) => "cmd_source_refine_discard",
+        },
     }
 }
 
@@ -1241,6 +1247,7 @@ fn gateway_route(command: &GatewaySub) -> &'static str {
             GatewayConnectorSub::Remove { .. } => "cmd_gateway_connector_remove",
         },
         GatewaySub::Agent(_) => "cmd_gateway_agent",
+        GatewaySub::Ingress(_) => "cmd_gateway_ingress",
         GatewaySub::Coexistence(_) => "cmd_gateway_coexistence",
         GatewaySub::Hoist(_) => "cmd_gateway_hoist",
         GatewaySub::Protocol(_) => "cmd_gateway_protocol",
@@ -2425,6 +2432,10 @@ pub enum GatewaySub {
     /// Canonical conversation control against a running gateway:
     /// `aikit gateway agent status|stop|new|sessions|restart|pause|resume`.
     Agent(GatewayAgentArgs),
+    /// Set or clear one sender kind's ingress rule on a binding:
+    /// `aikit gateway ingress --binding B --kind agent --decision allow|pair|deny|clear`.
+    /// A sender's own override still decides first, the binding's default last.
+    Ingress(GatewayIngressArgs),
     /// Describe or operate on a qualified World's explicitly offered native owner.
     NativeOwner(GatewayNativeOwnerArgs),
     /// Inspect the coexistence of harness gateways on this machine: detect
@@ -2651,6 +2662,23 @@ pub struct GatewayAgentArgs {
     /// model selector).
     #[arg(long, value_name = "MODEL")]
     pub model: Option<String>,
+    #[command(flatten)]
+    pub carrier: GatewayQueryArgs,
+}
+
+/// `aikit gateway ingress` — one sender kind's rule on one binding.
+#[derive(Debug, Args)]
+pub struct GatewayIngressArgs {
+    /// The gateway binding whose ingress is ruled, e.g. `gateway-binding/telegram`.
+    #[arg(long = "binding", value_name = "REF")]
+    pub binding_ref: String,
+    /// The sender kind: `human`, `agent`, `bot`, `system` or `unknown`.
+    #[arg(long, value_name = "KIND")]
+    pub kind: String,
+    /// `allow`, `pair` (the sender waits for an answer), `deny`, or `clear`
+    /// to drop the kind's rule.
+    #[arg(long, value_name = "DECISION")]
+    pub decision: String,
     #[command(flatten)]
     pub carrier: GatewayQueryArgs,
 }
@@ -3184,6 +3212,51 @@ pub enum SourceSub {
     /// source still has an active snapshot unless `--force` names the loss;
     /// recorded trust stays as review evidence.
     Remove(SourceRemoveArgs),
+    /// Refining a skill: one proposed revision of one member waits beside the
+    /// revision in use, kept in the member's source, until it is accepted
+    /// (the member's next revision, which Roll back takes back) or discarded.
+    Refine(SourceRefineCmd),
+}
+
+#[derive(Debug, Args)]
+pub struct SourceRefineCmd {
+    #[command(subcommand)]
+    pub command: SourceRefineSub,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum SourceRefineSub {
+    /// Propose a revision of one member from a directory holding the revised
+    /// skill under the member's own name. Nothing in use changes.
+    Propose(SourceRefineProposeArgs),
+    /// Every proposed revision, each beside the revision in use, with why it
+    /// was proposed and the takes that ran under it.
+    List(SourceListArgs),
+    /// Keep the proposal as the member's next revision.
+    Accept(SourceRefineMemberArgs),
+    /// Drop the proposal; the revision in use stays.
+    Discard(SourceRefineMemberArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct SourceRefineProposeArgs {
+    /// The member, `skill/<source>/<name>`.
+    #[arg(value_name = "MEMBER")]
+    pub member: String,
+    /// The directory holding the revised skill.
+    #[arg(long = "from", value_name = "DIR")]
+    pub from: std::path::PathBuf,
+    /// The closes that show the reason, as JSON `[{"task_ref","reason"}]`.
+    /// Prefix a path with @ to read a file.
+    #[arg(long = "why", value_name = "JSON|@FILE")]
+    pub why: String,
+}
+
+#[derive(Debug, Args)]
+pub struct SourceRefineMemberArgs {
+    /// The member, `skill/<source>/<name>`.
+    #[arg(value_name = "MEMBER")]
+    pub member: String,
 }
 
 #[derive(Debug, Args)]

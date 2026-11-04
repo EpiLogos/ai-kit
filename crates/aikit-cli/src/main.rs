@@ -1975,6 +1975,26 @@ fn cmd_gateway_dispatch(command: GatewayCmd, cwd: &std::path::Path) -> Result<Re
                 exit_code: json::EXIT_OK,
             })
         }
+        GatewaySub::Ingress(a) => {
+            let command = aikit_cli::gateway_ops::ingress_rule(&a)?;
+            let target = aikit_cli::gateway_ops::carrier_target(&home, &a.carrier)?;
+            let response =
+                aikit_adapters::gateway_command(&target, command, None).map_err(|error| {
+                    aikit_cli::gateway_ops::unreachable_hint(&error).unwrap_or(error)
+                })?;
+            let data = serde_json::to_value(&response).map_err(|error| {
+                AikitError::new(
+                    "cli.gateway_response_encode",
+                    format!("encode gateway response: {error}"),
+                )
+            })?;
+            Ok(Reply::Data {
+                context: EnvelopeContext::default(),
+                data,
+                warnings: vec![],
+                exit_code: json::EXIT_OK,
+            })
+        }
         GatewaySub::Coexistence(a) => {
             match aikit_cli::gateway_ops::coexistence_command(&home, &a)? {
                 aikit_cli::gateway_ops::CoexistenceOutput::Text(text) => Ok(Reply::Text(text)),
@@ -2149,6 +2169,7 @@ fn cmd_gateway_dispatch(command: GatewayCmd, cwd: &std::path::Path) -> Result<Re
                 | GatewaySub::Remote(_)
                 | GatewaySub::Connector(_)
                 | GatewaySub::Agent(_)
+                | GatewaySub::Ingress(_)
                 | GatewaySub::NativeOwner(_)
                 | GatewaySub::Coexistence(_)
                 | GatewaySub::Hoist(_)
@@ -2182,6 +2203,7 @@ fn cmd_gateway_dispatch(command: GatewayCmd, cwd: &std::path::Path) -> Result<Re
                 | GatewaySub::Remote(_)
                 | GatewaySub::Connector(_)
                 | GatewaySub::Agent(_)
+                | GatewaySub::Ingress(_)
                 | GatewaySub::NativeOwner(_)
                 | GatewaySub::Coexistence(_)
                 | GatewaySub::Hoist(_)
@@ -2880,6 +2902,43 @@ fn cmd_source(cwd: &std::path::Path, command: SourceCmd) -> Result<Reply> {
                 warnings,
             ))
         }
+        SourceSub::Refine(refine) => match refine.command {
+            SourceRefineSub::Propose(args) => {
+                let text = match args.why.strip_prefix('@') {
+                    Some(path) => std::fs::read_to_string(path).map_err(|error| {
+                        AikitError::new("refinement.why", format!("could not read {path}: {error}"))
+                    })?,
+                    None => args.why.clone(),
+                };
+                let why: Vec<skill_sources::RefinementReason> = serde_json::from_str(&text)
+                    .map_err(|error| {
+                        AikitError::new(
+                            "refinement.why",
+                            format!("--why is a JSON list of {{\"task_ref\",\"reason\"}}: {error}"),
+                        )
+                    })?;
+                let proposal =
+                    skill_sources::propose_revision(home, &args.member, &args.from, why)?;
+                Ok(source_reply(jval!(proposal), vec![]))
+            }
+            SourceRefineSub::List(_) => {
+                let proposals = skill_sources::refinements(home)?;
+                Ok(source_reply(jval!({ "proposals": proposals }), vec![]))
+            }
+            SourceRefineSub::Accept(args) => {
+                let accepted = skill_sources::accept_revision(home, &args.member)?;
+                // The member's next revision is a new catalogue, as a promotion is.
+                let mut warnings = Vec::new();
+                let user_scope = refresh_user_scope(home, &mut warnings);
+                let mut data = jval!(accepted);
+                data["user_scope"] = user_scope;
+                Ok(source_reply(data, warnings))
+            }
+            SourceRefineSub::Discard(args) => {
+                let discarded = skill_sources::discard_revision(home, &args.member)?;
+                Ok(source_reply(jval!(discarded), vec![]))
+            }
+        },
         SourceSub::Remove(args) => {
             let removed = skill_sources::remove(home, &args.id, args.force)?;
             Ok(source_reply(

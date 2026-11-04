@@ -341,6 +341,7 @@ impl FakeGateway {
                                 },
                                 surface_ref: None,
                                 ingress_default: GatewayIngressDecision::Allow,
+                                ingress_kinds: Default::default(),
                                 forked_from: None,
                                 context_revision: 1,
                             }],
@@ -553,6 +554,7 @@ fn fixture_binding() -> GatewayBinding {
         forked_from: None,
         context_revision: 1,
         ingress: GatewayIngressPolicy {
+            kind_rules: Default::default(),
             default: GatewayIngressDecision::Allow,
             sender_overrides: Default::default(),
         },
