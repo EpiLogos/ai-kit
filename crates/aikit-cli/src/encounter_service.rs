@@ -43,6 +43,7 @@ pub(crate) use agency::model::PreparedModel;
 pub use agency::speech::{
     configure as configure_local_speech, disclose as disclose_local_speech, LocalSpeechConfig,
 };
+pub(crate) use agency::{allocate_central_now, bound_task_now, close_central_now};
 pub use agency::{compose_agency_identity, EncounterCentralIdentityWorld};
 pub use agency::{
     conversation::{ConversationEntry, ConversationRecipientSpec, ConversationSendRequest},

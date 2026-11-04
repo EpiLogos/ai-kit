@@ -17,10 +17,11 @@
 //! (`SessionSpaceApplicationStore::list`), and for each one that answers a
 //! `Status` read (i.e. is actually resident) settles its task settings:
 //!
-//! 1. While the task is active, the Effort and Autonomy envelopes are played
-//!    through `ModelSelect`'s `provider_reasoning_effort` and `ModeSelect`'s
-//!    `provider_mode_id`, at the envelope's value for the task's elapsed time
-//!    (seconds since the executor first saw this session's task bound).
+//! 1. While the task is active, the Effort envelope is played through
+//!    `ModelSelect`'s `provider_reasoning_effort`, and the Tool calls envelope
+//!    answers the harness's requests to use a tool (`Permission`), each at the
+//!    envelope's value for the task's elapsed time (seconds since the executor
+//!    first saw this session's task bound).
 //! 2. A turn's end (`HostEvent::TurnEnded`, read back as `/event/TurnEnded`
 //!    on the session's own event page) is the task's own end (`after_turn`).
 //!    Only a finish runs anything: a turn that ends `Completed`. A turn a
@@ -89,14 +90,21 @@
 //! advertised `currentValue`, which would drift as the executor's own
 //! selections land.
 //!
-//! Autonomy has no such shared vocabulary: its words
-//! (`suggest`/`review`/`auto`) are AIKit's own, and a provider's permission
-//! modes are its own advertised ids (ACP `availableModes`), never guaranteed
-//! to carry those names. Lacking a named mapping, this executor places the
-//! three words at even positions along whatever modes the resident actually
-//! advertises (`proportional_index`) — the same derived placement Modulation
-//! uses for its steps — and documents that standing on every selection it
-//! makes, exactly as `ModeSelect`'s own receipts already do.
+//! Tool calls (O-I manual §19.1 Envelopes, §19.12 Asks: "The answer to the
+//! harness's request to use a tool: ask you each time, allow for this
+//! session, or allow always. You always give Deny yourself") is played as
+//! that answer, in the harness's own words: while the task stands at Session
+//! or Always, each request the session has pending is answered with the
+//! option the harness itself offers for it (`tool_calls_answer`) — an allow
+//! that names the session for Session, an allow-always that does not for
+//! Always — through the encounter's own `Permission`, under the same agency
+//! and context checks a person's answer passes. Ask and Inherit answer
+//! nothing, so the request waits for you; a harness that offers no such
+//! answer leaves it waiting too, and the settings say why (`tool_calls_play`).
+//! No word ever selects a deny. The envelope answers what the harness asks:
+//! it cannot make a harness ask what its own Scope already lets through.
+//! The Agent's Autonomy, which this executor once placed on the resident's
+//! permission modes, is retired (`encounter_task_settings.rs`).
 use crate::encounter_service::{EncounterRequest, EncounterService};
 use aikit_core::{AikitError, ResourceRef, Result};
 use aikit_store::{AikitHome, SessionSpaceApplicationStore};
@@ -137,11 +145,11 @@ struct ExecutorState {
     #[serde(default)]
     baseline_effort: Option<String>,
     #[serde(default)]
-    baseline_mode: Option<String>,
-    #[serde(default)]
     applied_effort: Option<String>,
+    /// What Tool calls did at its last answer: the request it answered and
+    /// with which of the harness's options, or why the request waits.
     #[serde(default)]
-    applied_mode: Option<String>,
+    tool_calls_play: Option<Value>,
     /// What a song's loop did at its last pass: the take Factory started
     /// (`{take, run_ref}`), or why none was (`{refused}`).
     #[serde(default)]
@@ -267,36 +275,79 @@ fn modulation_step_at(points: &[Value], seconds: f64) -> i64 {
     standing
 }
 
-/// Autonomy's own words, least to most autonomous. `inherit` carries no
-/// position: the executor never selects a mode for it.
-pub(crate) const AUTONOMY_WORDS: [&str; 3] = ["suggest", "review", "auto"];
+/// Scope's Tool calls for a task (O-I manual §19.1 Envelopes): which of the
+/// agent's tool calls wait for you. Inherit takes the session's own, its
+/// Scope's.
+pub(crate) const TOOL_CALLS: &[&str] = &["inherit", "ask", "session", "always"];
+/// What Autonomy's words became (§19.1 Envelopes, §19.12 Asks): the Agent's
+/// Autonomy is retired, and Scope's Tool calls carries what it set.
+pub(crate) const AUTONOMY_RETIRED: &str = "Autonomy is retired: Scope's Tool calls (tool_calls: inherit, ask, session, always) took its place, the answer to the harness's request to use a tool";
 
-pub(crate) fn autonomy_word_rank(word: &str) -> Option<usize> {
-    AUTONOMY_WORDS.iter().position(|w| *w == word)
+/// The harness's own option that answers one of its requests to use a tool
+/// with Tool calls' `word`, or why the request waits for you. Session takes an
+/// allow the harness names for its session (Hermes' `allow_session`, "Allow
+/// for session"); Always takes an allow-always that names no session. Ask
+/// and Inherit answer nothing, and nothing here ever selects a deny: "You
+/// always give Deny yourself".
+pub(crate) fn tool_calls_answer(
+    choices: &[Value],
+    word: &str,
+) -> std::result::Result<String, String> {
+    let named = |choice: &Value, words: &str| {
+        [&choice["option_id"], &choice["label"]].iter().any(|text| {
+            text.as_str()
+                .is_some_and(|text| text.to_lowercase().contains(words))
+        })
+    };
+    let allows = |choice: &&Value| {
+        choice["kind"]
+            .as_str()
+            .is_some_and(|kind| kind.starts_with("allow"))
+    };
+    let found = match word {
+        "session" => choices
+            .iter()
+            .filter(allows)
+            .find(|choice| named(choice, "session")),
+        "always" => choices
+            .iter()
+            .filter(allows)
+            .find(|choice| choice["kind"] == "allow_always" && !named(choice, "session")),
+        other => {
+            return Err(format!(
+                "Tool calls stands at {other}: the request waits for you"
+            ))
+        }
+    };
+    let offered = || {
+        choices
+            .iter()
+            .map(|choice| {
+                choice["label"]
+                    .as_str()
+                    .or(choice["option_id"].as_str())
+                    .unwrap_or("?")
+            })
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    match found.and_then(|choice| choice["option_id"].as_str()) {
+        Some(option) => Ok(option.to_owned()),
+        None if word == "session" => Err(format!(
+            "The harness names no answer for this session (it offers {}), so the request waits for you",
+            offered()
+        )),
+        None => Err(format!(
+            "The harness offers no answer that allows always (it offers {}), so the request waits for you",
+            offered()
+        )),
+    }
 }
 
 /// The value a provider-advertised select control stands at, read as the
 /// native observation serializes it (`NativeConfigSelector`).
 pub(crate) fn selector_current(selector: &Value) -> Option<&str> {
     selector["currentValue"].as_str()
-}
-
-/// Place rank `rank` of `ranks` evenly across `options` (both at least 1):
-/// rank 0 is the first option, the last rank is the last option, and ranks
-/// between land proportionally. This is the one derived mapping both
-/// Autonomy's words (onto the resident's advertised permission modes) and
-/// Modulation's steps (onto whatever the resident advertises for the moved
-/// envelope) are placed by; see the module doc for why neither has a named
-/// one to use instead.
-pub(crate) fn proportional_index(rank: usize, ranks: usize, options: usize) -> Option<usize> {
-    if ranks == 0 || options == 0 {
-        return None;
-    }
-    if ranks == 1 || options == 1 {
-        return Some(0);
-    }
-    let rank = rank.min(ranks - 1);
-    Some((rank * (options - 1) + (ranks - 1) / 2) / (ranks - 1))
 }
 
 /// Whether a turn-end observed this sweep may be settled now, or must wait
@@ -690,9 +741,8 @@ fn settle_session(
         task_ref: task_ref.clone(),
         started_at_unix_ms: now_unix_ms(),
         baseline_effort: None,
-        baseline_mode: None,
         applied_effort: None,
-        applied_mode: None,
+        tool_calls_play: None,
         settled_through_cursor: 0,
         pending_turn_end_cursor: None,
         loop_runs: 0,
@@ -707,9 +757,8 @@ fn settle_session(
             task_ref: task_ref.clone(),
             started_at_unix_ms: now_unix_ms(),
             baseline_effort: None,
-            baseline_mode: None,
             applied_effort: None,
-            applied_mode: None,
+            tool_calls_play: None,
             settled_through_cursor: 0,
             pending_turn_end_cursor: None,
             loop_runs: 0,
@@ -739,7 +788,7 @@ fn play_envelopes(
     let elapsed = elapsed_seconds(state);
     let empty = Vec::new();
     let effort_points = task["effort"].as_array().unwrap_or(&empty);
-    let autonomy_points = task["autonomy"].as_array().unwrap_or(&empty);
+    let tool_calls_points = task["tool_calls"].as_array().unwrap_or(&empty);
     let native_session_id = identity["native_session_id"].as_str().map(str::to_string);
 
     play_effort(
@@ -751,15 +800,18 @@ fn play_envelopes(
         native_session_id.as_deref(),
         state,
     );
-    play_autonomy(
-        service,
-        session,
-        autonomy_points,
-        modulation,
-        elapsed,
-        native_session_id.as_deref(),
-        state,
-    );
+    // Modulation has no session value of Tool calls to move (the settings
+    // keep Tool calls empty under it), so only Automation answers.
+    if !modulation {
+        play_tool_calls(
+            service,
+            session,
+            tool_calls_points,
+            elapsed,
+            identity,
+            state,
+        );
+    }
 }
 
 fn play_effort(
@@ -832,76 +884,62 @@ fn play_effort(
     }
 }
 
-fn play_autonomy(
+/// Answer the session's pending requests to use a tool with Tool calls'
+/// value at this second, in the harness's own words (`tool_calls_answer`).
+/// `identity` is the session's Status reading, which names its pending
+/// requests.
+fn play_tool_calls(
     service: &EncounterService,
     session: &ResourceRef,
     points: &[Value],
-    modulation: bool,
     elapsed: f64,
-    native_session_id: Option<&str>,
+    identity: &Value,
     state: &mut ExecutorState,
 ) {
-    let Ok(read) = service.apply(EncounterRequest::ModeRead {
-        agent_session: session.clone(),
-    }) else {
+    let Some(word) = automation_level_at(points, elapsed) else {
         return;
     };
-    let observation = &read["mode_observation"];
-    let options: Vec<String> = observation["available_modes"]
-        .as_array()
-        .map(|rows| {
-            rows.iter()
-                .filter_map(|row| row["id"].as_str().map(str::to_string))
-                .collect()
-        })
-        .unwrap_or_default();
-    if options.is_empty() {
+    if word == "inherit" {
         return;
     }
-    let desired = if modulation {
-        let baseline = match &state.baseline_mode {
-            Some(baseline) => baseline.clone(),
-            None => {
-                let current = observation["current_mode_id"].as_str().map(str::to_string);
-                state.baseline_mode = current.clone();
-                match current {
-                    Some(current) => current,
-                    None => return,
+    let empty = Vec::new();
+    for request in identity["permissions"].as_array().unwrap_or(&empty) {
+        let Some(request_id) = request["native_request_id"].as_str() else {
+            continue;
+        };
+        let choices = request["choices"].as_array().unwrap_or(&empty);
+        let play = match tool_calls_answer(choices, &word) {
+            Ok(option_id) => match service.apply(EncounterRequest::Permission {
+                agent_session: session.clone(),
+                request_id: request_id.to_owned(),
+                decision: aikit_adapters::interactive_connection::PermissionDecision::Selected {
+                    option_id: option_id.clone(),
+                },
+            }) {
+                Ok(_) => {
+                    serde_json::json!({"answered": request_id, "option_id": option_id, "tool_calls": word})
                 }
+                Err(refused) => serde_json::json!({"waiting": request_id, "tool_calls": word,
+                    "reason": format!("The encounter refused Tool calls' answer: {}", refused.message())}),
+            },
+            Err(reason) => {
+                serde_json::json!({"waiting": request_id, "tool_calls": word, "reason": reason})
             }
         };
-        let step = modulation_step_at(points, elapsed);
-        let base_index = options.iter().position(|o| o == &baseline).unwrap_or(0) as i64;
-        let index = (base_index + step).clamp(0, options.len() as i64 - 1) as usize;
-        options[index].clone()
-    } else {
-        let Some(word) = automation_level_at(points, elapsed) else {
-            return;
-        };
-        if word == "inherit" {
-            return;
-        }
-        let Some(rank) = autonomy_word_rank(&word) else {
-            return;
-        };
-        let Some(index) = proportional_index(rank, AUTONOMY_WORDS.len(), options.len()) else {
-            return;
-        };
-        options[index].clone()
-    };
-    if state.applied_mode.as_deref() == Some(desired.as_str()) {
-        return;
+        state.tool_calls_play = Some(play);
     }
-    if service
-        .apply(EncounterRequest::ModeSelect {
-            agent_session: session.clone(),
-            provider_mode_id: desired.clone(),
-            expected_native_session_id: native_session_id.map(str::to_string),
-        })
-        .is_ok()
-    {
-        state.applied_mode = Some(desired);
-    }
+}
+
+/// What a task's Tool calls did at its last answer: the request it answered
+/// with the harness's own option, or why the request waits for you. Null
+/// while it has answered nothing for this task.
+pub(crate) fn tool_calls_play(home: &AikitHome, session: &ResourceRef, task_ref: &str) -> Value {
+    read_state(home, session)
+        .ok()
+        .flatten()
+        .filter(|state| state.task_ref == task_ref)
+        .and_then(|state| state.tool_calls_play)
+        .unwrap_or(Value::Null)
 }
 
 /// The latest turn's end on this session's own event page, from the cursor
@@ -1078,43 +1116,61 @@ mod tests {
     }
 
     #[test]
-    fn autonomy_words_rank_least_to_most_autonomous() {
-        assert_eq!(autonomy_word_rank("suggest"), Some(0));
-        assert_eq!(autonomy_word_rank("review"), Some(1));
-        assert_eq!(autonomy_word_rank("auto"), Some(2));
-        assert_eq!(autonomy_word_rank("inherit"), None);
-        assert_eq!(autonomy_word_rank("whatever"), None);
+    fn tool_calls_answer_in_the_harnesss_own_words_and_never_deny() {
+        // Hermes names each answer (acp_adapter/permissions.py): once, session, always.
+        let hermes = serde_json::json!([
+            {"option_id": "allow_once", "label": "Allow once", "kind": "allow_once"},
+            {"option_id": "allow_session", "label": "Allow for session", "kind": "allow_always"},
+            {"option_id": "allow_always", "label": "Allow always", "kind": "allow_always"},
+            {"option_id": "deny", "label": "Deny", "kind": "reject_once"},
+            {"option_id": "deny_always", "label": "Deny always", "kind": "reject_always"},
+        ]);
+        let hermes = hermes.as_array().unwrap();
+        assert_eq!(
+            tool_calls_answer(hermes, "session"),
+            Ok("allow_session".into())
+        );
+        assert_eq!(
+            tool_calls_answer(hermes, "always"),
+            Ok("allow_always".into())
+        );
+        // A harness that names no session answer: Session waits, in words that name its answers.
+        let plain = serde_json::json!([
+            {"option_id": "allow_always", "label": "Always Allow", "kind": "allow_always"},
+            {"option_id": "allow", "label": "Allow", "kind": "allow_once"},
+            {"option_id": "reject", "label": "Reject", "kind": "reject_once"},
+        ]);
+        let plain = plain.as_array().unwrap();
+        assert_eq!(
+            tool_calls_answer(plain, "always"),
+            Ok("allow_always".into())
+        );
+        let waits = tool_calls_answer(plain, "session").unwrap_err();
+        assert!(
+            waits.contains("names no answer for this session")
+                && waits.contains("Always Allow, Allow, Reject"),
+            "{waits}"
+        );
+        // A gate that asks every time offers only once and deny: neither word answers it.
+        let gate = serde_json::json!([
+            {"option_id": "allow_once", "label": "Allow once", "kind": "allow_once"},
+            {"option_id": "deny", "label": "Deny", "kind": "reject_once"},
+        ]);
+        let gate = gate.as_array().unwrap();
+        for word in ["session", "always"] {
+            let waits = tool_calls_answer(gate, word).unwrap_err();
+            assert!(waits.contains("waits for you"), "{word}: {waits}");
+        }
+        // Ask and Inherit answer nothing; no word ever selects a deny.
+        for word in ["ask", "inherit"] {
+            assert!(tool_calls_answer(hermes, word).is_err(), "{word}");
+        }
+        let denies = serde_json::json!([
+            {"option_id": "always-session-deny", "label": "Deny for session", "kind": "reject_always"},
+        ]);
+        assert!(tool_calls_answer(denies.as_array().unwrap(), "session").is_err());
     }
 
-    #[test]
-    fn proportional_index_spans_the_options_evenly() {
-        // Three ranks over three options: each rank keeps its own position.
-        assert_eq!(proportional_index(0, 3, 3), Some(0));
-        assert_eq!(proportional_index(1, 3, 3), Some(1));
-        assert_eq!(proportional_index(2, 3, 3), Some(2));
-        // Three ranks over two options: the middle rank lands on one side, not
-        // between them (there is no "between" index), rounded to the nearer.
-        let placed = (0..3)
-            .map(|rank| proportional_index(rank, 3, 2).unwrap())
-            .collect::<Vec<_>>();
-        assert_eq!(placed[0], 0);
-        assert_eq!(placed[2], 1);
-        assert!(placed[1] == 0 || placed[1] == 1);
-        // Three ranks over five options: spread across the full range.
-        assert_eq!(proportional_index(0, 3, 5), Some(0));
-        assert_eq!(proportional_index(2, 3, 5), Some(4));
-        // Degenerate inputs never panic.
-        assert_eq!(proportional_index(0, 0, 5), None);
-        assert_eq!(proportional_index(0, 3, 0), None);
-        assert_eq!(proportional_index(0, 1, 5), Some(0));
-        assert_eq!(proportional_index(9, 3, 5), proportional_index(2, 3, 5));
-    }
-
-    // REPLACED (#787): `hold_and_loop_both_keep_going_only_while_active_once_never_does` and
-    // `then_actions_match_the_manuals_three_words` read Launch hold/loop as running the task again
-    // and Then handoff as a send to another session. Loop is its own setting and the handoff is
-    // retired (encounter_task_settings.rs `migrate` reads hold and loop as Loop on):
-    // `loop_runs_the_task_again_until_its_cap_then_again_launches_it_afresh` replaces both.
     #[test]
     fn loop_runs_the_task_again_until_its_cap_then_again_launches_it_afresh() {
         let task = |set: Value| {
@@ -1430,9 +1486,8 @@ mod tests {
             task_ref: "task:fixtures".into(),
             started_at_unix_ms: 1,
             baseline_effort: None,
-            baseline_mode: None,
             applied_effort: None,
-            applied_mode: None,
+            tool_calls_play: None,
             settled_through_cursor: 0,
             pending_turn_end_cursor: None,
             loop_runs: 1,
@@ -1454,6 +1509,19 @@ mod tests {
             loop_pass(&home, &session, "task:fixtures")["refused"],
             "Factory did not perform the take."
         );
+        // And what Tool calls did at its last answer, or why the request waits.
+        assert_eq!(
+            tool_calls_play(&home, &session, "task:fixtures"),
+            Value::Null
+        );
+        state.tool_calls_play = Some(json!({"waiting": "permission-1", "tool_calls": "session",
+            "reason": "The harness names no answer for this session (it offers Allow, Reject), so the request waits for you"}));
+        publish_state(&home, &session, &state).unwrap();
+        assert_eq!(
+            tool_calls_play(&home, &session, "task:fixtures")["waiting"],
+            "permission-1"
+        );
+        assert_eq!(tool_calls_play(&home, &session, "task:other"), Value::Null);
     }
 
     #[test]
@@ -1525,9 +1593,8 @@ mod tests {
             task_ref: "task:fixtures".into(),
             started_at_unix_ms: 1_700_000_000_000,
             baseline_effort: Some("medium".into()),
-            baseline_mode: None,
             applied_effort: Some("high".into()),
-            applied_mode: None,
+            tool_calls_play: None,
             settled_through_cursor: 7,
             pending_turn_end_cursor: Some(8),
             loop_runs: 2,
@@ -1634,9 +1701,8 @@ mod tests {
             task_ref: "task:fixtures".into(),
             started_at_unix_ms: 0,
             baseline_effort: None,
-            baseline_mode: None,
             applied_effort: None,
-            applied_mode: None,
+            tool_calls_play: None,
             settled_through_cursor: 0,
             pending_turn_end_cursor: None,
             loop_runs: 0,

@@ -48,6 +48,7 @@ pub(crate) mod speech;
 
 #[path = "encounter_task.rs"]
 mod task;
+pub(crate) use task::{allocate_central_now, bound_task_now, close_central_now};
 
 #[path = "encounter_task_expectation.rs"]
 mod task_expectation;

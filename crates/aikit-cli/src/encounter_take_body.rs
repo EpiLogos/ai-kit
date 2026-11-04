@@ -15,12 +15,14 @@
 //!   session's agent and provider, opens the fresh resident with the World as
 //!   its cwd, holds the configuration's model (`ModelSelect`) and applies the
 //!   take's level: a model is the model; an effort is `ModelSelect`'s
-//!   `provider_reasoning_effort`; an autonomy word is placed on the resident's
-//!   advertised permission modes as the task executor places it
-//!   (`ModeSelect`). `inherit` applies nothing. It answers what was applied
-//!   and confirmed — `{ready, provider, model, agent, level}` — or refuses in
-//!   words. A skillset or a budget has no owner operation on a fresh resident
-//!   yet, so a take that varies one is refused before anything opens.
+//!   `provider_reasoning_effort`; Tool calls (Ask, Session, Always) is the
+//!   take's answer to the harness's requests to use a tool, given in the
+//!   harness's own words on each turn as the task executor gives it
+//!   (`tool_calls_answer`). `inherit` applies nothing. It answers what was
+//!   applied and confirmed — `{ready, provider, model, agent, level}` — or
+//!   refuses in words. A skillset or a budget has no owner operation on a
+//!   fresh resident yet, so a take that varies one is refused before anything
+//!   opens. Autonomy is retired: Tool calls took its place.
 //! - `turn {turn: {iteration, prompt}}` takes one turn of the resident and
 //!   answers `{status, output, usage}`: the agent acts in its World in its
 //!   own loop, and Actuation reads the stop condition between turns.
@@ -28,10 +30,22 @@
 //!   request as its text and answers `{output, usage}` (a QL condition's
 //!   turns).
 //! - `finalize` releases the resident: an idle, exactly identified native
-//!   body, its canonical history kept.
+//!   body, its canonical history kept; and closes the take's NOW.
 //!
-//! A turn that asks for a tool's permission is cancelled: nobody answers the
-//! provider's consent for the person in a take. Usage is the provider's own
+//! Each take keeps its own NOW (§19.1: "that NOW names the takes it was run
+//! beside, so a take's close is read against its siblings' closes"): once the
+//! resident is open and its level applied, Central allocates the take a child
+//! of the session's task NOW ([`take_now_request`]) — its task the take's own,
+//! under the task's; its sources the takes Actuation says it runs beside
+//! (`configuration.takes`, the Repeat's family); its participant the take's
+//! session — and `finalize` closes it, which is the take's close. A session
+//! that holds no prepared task has no NOW for a take's to hang from, and the
+//! take says so (`now.none`).
+//!
+//! A turn that asks for a tool's permission is cancelled — nobody answers the
+//! provider's consent for the person in a take — unless the take varies Tool
+//! calls to Session or Always, the person's own answer: then the harness's
+//! own option for it is given, never a deny. Usage is the provider's own
 //! report, never estimated.
 //!
 //! The run the takes share, in Actuation's own words (research
@@ -43,6 +57,7 @@
 //! `agent-jsonl` process.
 use crate::encounter_resident_turn::{total_tokens, ResidentOwner, TurnAnswer, TurnWords};
 use crate::encounter_service::{EncounterRequest, EncounterService};
+use aikit_adapters::central_placement::{AllocatedCentralTask, CentralTaskRequest};
 use aikit_core::session_space::SessionSpaceRef;
 use aikit_core::session_space_application::{
     SessionSpaceAgentAttachmentIntent, SessionSpaceMutation,
@@ -71,6 +86,8 @@ const MAX_CALLS: u64 = 64;
 /// Why a session's takes have no run, in AIKit's words.
 pub const NEVER_OPENED: &str = "The session's agent has never opened: a take runs a fresh resident of the agent the session opened on, and this session's journal names none. Open the session once, then press Repeat again.";
 pub const NO_MODEL: &str = "The session's agent has opened, but AIKit observed no model on it: a take holds the session's model, and this agent advertised none.";
+/// Why a take keeps no NOW, in AIKit's words.
+pub const NO_TASK_NOW: &str = "The session holds no prepared task, so this take keeps no NOW of its own: a take's NOW hangs from its task's (O-I manual §19.1), and is allocated once the session's task is prepared.";
 
 const TAKE_TURN: TurnWords<'static> = TurnWords {
     session: "the take's session",
@@ -223,6 +240,79 @@ pub fn take_session(own: &ResourceRef, trace: &str) -> (SessionSpaceRef, Resourc
     )
 }
 
+/// Central's own words for a refusal of its owner, where its receipt names
+/// them; else AIKit's.
+fn central_words(error: &AikitError) -> String {
+    error
+        .details()
+        .get("native_receipt")
+        .and_then(|receipt| serde_json::from_str::<Value>(receipt).ok())
+        .and_then(|receipt| receipt["error"]["message"].as_str().map(str::to_owned))
+        .unwrap_or_else(|| error.message().to_owned())
+}
+
+/// A take's own task: under its task's, named by its trace.
+fn take_task_ref(task: &ResourceRef, trace: &str) -> std::result::Result<ResourceRef, String> {
+    ResourceRef::parse(format!("{task}:take:{trace}")).map_err(|error| {
+        format!(
+            "A take's NOW cannot be named for {trace}: {}",
+            error.message()
+        )
+    })
+}
+
+/// The NOW a take keeps (O-I manual §19.1: "Each take keeps its own NOW, and
+/// that NOW names the takes it was run beside, so a take's close is read
+/// against its siblings' closes"): a child of the session's task NOW, on the
+/// same Central, project and Workcell; its task the take's own; its sources
+/// the takes it was run beside, by their own tasks, which name their NOWs; its
+/// participant the take's session. `takes` is the Repeat's family as
+/// Actuation names it, this take among it; empty, the take is run beside none.
+pub(crate) fn take_now_request(
+    task: &AllocatedCentralTask,
+    trace: &str,
+    takes: &[String],
+    take: &ResourceRef,
+    level: &Value,
+) -> std::result::Result<CentralTaskRequest, String> {
+    let parent = task.allocation["now_ref"]
+        .as_str()
+        .filter(|now| !now.trim().is_empty())
+        .ok_or_else(|| "The session's task names no NOW for a take's to hang from".to_owned())?;
+    if !takes.is_empty() && !takes.iter().any(|other| other == trace) {
+        return Err(format!(
+            "The take {trace} is not among the takes its Repeat names"
+        ));
+    }
+    let task_ref = &task.request.task_ref;
+    let beside = takes
+        .iter()
+        .filter(|other| *other != trace)
+        .map(|other| take_task_ref(task_ref, other))
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    let varies = match (level["variable"].as_str(), level["value"].as_str()) {
+        (Some(variable), Some(value)) => format!(", varying {variable} {value}"),
+        _ => String::new(),
+    };
+    Ok(CentralTaskRequest {
+        ctrl_bin: task.request.ctrl_bin.clone(),
+        central_root: task.request.central_root.clone(),
+        project: task.request.project.clone(),
+        task_ref: take_task_ref(task_ref, trace)?,
+        purpose: format!(
+            "A take of {task_ref} ({trace}){varies}: run beside {} other takes of its Repeat, named in its sources, so its close is read against theirs (O-I manual §19.1).",
+            beside.len()
+        ),
+        participant_refs: vec![take.clone()],
+        source_refs: beside,
+        parent_now_ref: Some(
+            ResourceRef::parse(parent).map_err(|error| error.message().to_owned())?,
+        ),
+        workcell_ref: task.request.workcell_ref.clone(),
+        work_refs: vec![],
+    })
+}
+
 /// The level a take varies, as the body applies it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Level {
@@ -230,8 +320,8 @@ enum Level {
     /// The model is the configuration's model: Actuation sets it so.
     Model,
     Effort(String),
-    /// An autonomy word's rank among the executor's words.
-    Autonomy(usize),
+    /// Tool calls' word: the take's answer to the harness's requests.
+    ToolCalls(String),
     Inherit,
 }
 
@@ -248,18 +338,18 @@ fn level_of(level: &Value, model: &str) -> std::result::Result<Level, String> {
         "model" => Err(format!(
             "The take varies the model to {value}, but its configuration names {model}"
         )),
-        _ if value == "inherit" && matches!(variable, "effort" | "autonomy") => Ok(Level::Inherit),
+        _ if value == "inherit" && matches!(variable, "effort" | "tool_calls") => Ok(Level::Inherit),
         "effort" => Ok(Level::Effort(value.to_owned())),
-        "autonomy" => crate::encounter_task_executor::autonomy_word_rank(value)
-            .map(Level::Autonomy)
-            .ok_or_else(|| {
-                format!(
-                    "An autonomy level is one of inherit, {}; the take was given {value}",
-                    crate::encounter_task_executor::AUTONOMY_WORDS.join(", ")
-                )
-            }),
+        "tool_calls" if crate::encounter_task_executor::TOOL_CALLS.contains(&value) => {
+            Ok(Level::ToolCalls(value.to_owned()))
+        }
+        "tool_calls" => Err(format!(
+            "A Tool calls level is one of {}; the take was given {value}",
+            crate::encounter_task_executor::TOOL_CALLS.join(", ")
+        )),
+        "autonomy" => Err(crate::encounter_task_executor::AUTONOMY_RETIRED.to_owned()),
         "skillset" | "budget" => Err(format!(
-            "A take's body applies a model, an effort or an autonomy to the session's agent; a {variable} has no owner operation on a fresh resident yet, so this take cannot vary it"
+            "A take's body applies a model, an effort or Tool calls to the session's agent; a {variable} has no owner operation on a fresh resident yet, so this take cannot vary it"
         )),
         other => Err(format!("A take's body applies no {other} level")),
     }
@@ -283,6 +373,11 @@ pub struct TakeBody {
     preflighted: bool,
     opened: Option<Opened>,
     turns: u64,
+    /// The take's Tool calls, where it varies them: its answer to the
+    /// harness's requests on each turn.
+    tool_calls: Option<String>,
+    /// The take's own NOW, once Central has allocated it; closed at finalize.
+    now: Option<AllocatedCentralTask>,
 }
 
 #[cfg(unix)]
@@ -296,6 +391,8 @@ impl TakeBody {
             preflighted: false,
             opened: None,
             turns: 0,
+            tool_calls: None,
+            now: None,
         }
     }
 
@@ -393,6 +490,27 @@ impl TakeBody {
             )
         })?;
         let (space, session) = take_session(&self.own, trace);
+        // The take's NOW is composed before anything opens, and allocated once its
+        // resident is open and its level applied.
+        let takes = match configuration.get("takes") {
+            None | Some(Value::Null) => vec![],
+            Some(Value::Array(takes)) => takes
+                .iter()
+                .map(|take| take.as_str().map(str::to_owned))
+                .collect::<Option<Vec<_>>>()
+                .ok_or("The take's configuration names its takes as text")?,
+            Some(_) => return Err("The take's configuration names its takes as a list".into()),
+        };
+        let now_request = match crate::encounter_service::bound_task_now(&self.home, &self.own) {
+            Err(error) => {
+                return Err(format!(
+                    "The session's task could not be read for the take's NOW: {}",
+                    error.message()
+                ))
+            }
+            Ok(None) => None,
+            Ok(Some(task)) => Some(take_now_request(&task, trace, &takes, &session, &level)?),
+        };
         self.attach(&space, &session, trace).map_err(|error| {
             format!(
                 "The take's session could not be prepared: {}",
@@ -422,11 +540,35 @@ impl TakeBody {
             native_session_id: native.to_owned(),
             generation: generation.to_owned(),
         });
+        if let Level::ToolCalls(word) = &plan {
+            self.tool_calls = Some(word.clone());
+        }
         match self.apply(model, &plan) {
             Ok(applied) => {
+                let now = match &now_request {
+                    None => json!({"none": NO_TASK_NOW}),
+                    Some(request) => {
+                        match crate::encounter_service::allocate_central_now(request) {
+                            Ok(kept) => {
+                                let reading = json!({"now_ref": kept.allocation["now_ref"],
+                                "parent_now_ref": kept.allocation["record"]["parent_now_ref"],
+                                "task_ref": request.task_ref, "beside": request.source_refs});
+                                self.now = Some(kept);
+                                reading
+                            }
+                            Err(error) => {
+                                self.finalize();
+                                return Err(format!(
+                                    "Central did not allocate the take's NOW: {}",
+                                    central_words(&error)
+                                ));
+                            }
+                        }
+                    }
+                };
                 let mut ready = json!({"ready": true, "provider": provider, "model": model,
                     "agent": agent, "agent_session": session.as_str(), "native_session_id": native,
-                    "world": world, "applied": applied});
+                    "world": world, "applied": applied, "now": now});
                 if !level.is_null() {
                     ready["level"] = level;
                 }
@@ -502,47 +644,9 @@ impl TakeBody {
                 }
                 applied["reasoning_effort"] = json!(effort);
             }
-            Level::Autonomy(rank) => {
-                let read = self
-                    .owner
-                    .call(&EncounterRequest::ModeRead {
-                        agent_session: opened.session.clone(),
-                    })
-                    .map_err(|error| {
-                        format!(
-                            "The take's agent's modes could not be read: {}",
-                            error.message
-                        )
-                    })?;
-                let modes: Vec<&str> = read["mode_observation"]["available_modes"]
-                    .as_array()
-                    .into_iter()
-                    .flatten()
-                    .filter_map(|mode| mode["id"].as_str())
-                    .collect();
-                let index = crate::encounter_task_executor::proportional_index(
-                    *rank,
-                    crate::encounter_task_executor::AUTONOMY_WORDS.len(),
-                    modes.len(),
-                )
-                .ok_or(
-                    "The take's agent advertises no permission modes to place its autonomy on",
-                )?;
-                let mode = modes[index];
-                self.owner
-                    .call(&EncounterRequest::ModeSelect {
-                        agent_session: opened.session.clone(),
-                        provider_mode_id: mode.to_owned(),
-                        expected_native_session_id: Some(opened.native_session_id.clone()),
-                    })
-                    .map_err(|error| {
-                        format!(
-                            "The take's agent could not take the mode {mode}: {}",
-                            error.message
-                        )
-                    })?;
-                applied["mode"] = json!(mode);
-                applied["mode_placement"] = json!("the autonomy word's rank placed evenly on the modes the resident advertises (the task executor's placement)");
+            Level::ToolCalls(word) => {
+                // Given on each turn, as the harness asks (`take`).
+                applied["tool_calls"] = json!(word);
             }
         }
         Ok(applied)
@@ -559,9 +663,13 @@ impl TakeBody {
             .map_err(|(_, error)| {
                 format!("The take's turn could not be submitted: {}", error.message)
             })?;
-        let answer =
-            self.owner
-                .await_turn(&opened.session, baseline, self.turn_timeout, TAKE_TURN)?;
+        let answer = self.owner.await_turn_answering(
+            &opened.session,
+            baseline,
+            self.turn_timeout,
+            TAKE_TURN,
+            self.tool_calls.as_deref(),
+        )?;
         self.turns += 1;
         Ok(answer)
     }
@@ -592,22 +700,42 @@ impl TakeBody {
         Ok(json!({"output": answer.said, "usage": usage_of(&answer)}))
     }
 
-    /// Release the take's resident, once; its canonical history stays.
+    /// Release the take's resident, once; its canonical history stays. Then
+    /// close the take's NOW, which is the take's close.
     fn finalize(&mut self) -> Value {
-        let Some(opened) = self.opened.take() else {
-            return json!({"released": false, "turns": self.turns, "reason": "no resident was opened"});
+        let mut answer = match self.opened.take() {
+            None => {
+                json!({"released": false, "turns": self.turns, "reason": "no resident was opened"})
+            }
+            Some(opened) => {
+                let released = self.owner.call(&EncounterRequest::ReleaseNative {
+                    agent_session: opened.session.clone(),
+                    expected_native_session_id: opened.native_session_id.clone(),
+                    expected_generation: opened.generation.clone(),
+                });
+                match released {
+                    Ok(receipt) => json!({"released": true, "turns": self.turns,
+                        "agent_session": opened.session.as_str(), "release": receipt}),
+                    Err(error) => json!({"released": false, "turns": self.turns,
+                        "agent_session": opened.session.as_str(), "reason": error.message}),
+                }
+            }
         };
-        let released = self.owner.call(&EncounterRequest::ReleaseNative {
-            agent_session: opened.session.clone(),
-            expected_native_session_id: opened.native_session_id.clone(),
-            expected_generation: opened.generation.clone(),
-        });
-        match released {
-            Ok(receipt) => json!({"released": true, "turns": self.turns,
-                "agent_session": opened.session.as_str(), "release": receipt}),
-            Err(error) => json!({"released": false, "turns": self.turns,
-                "agent_session": opened.session.as_str(), "reason": error.message}),
+        if let Some(now) = self.now.take() {
+            let now_ref = now.allocation["now_ref"].clone();
+            answer["now"] = match crate::encounter_service::close_central_now(&now) {
+                Ok(Some(receipt)) => {
+                    json!({"now_ref": now_ref, "lifecycle": receipt["record"]["lifecycle"]})
+                }
+                Ok(None) => json!({"now_ref": now_ref, "lifecycle": "active",
+                    "reason": "Central had this take's NOW already, so the take did not close it"}),
+                // Closing a NOW is a granted act (`central.now.lifecycle`): a body
+                // that holds no grant leaves it active, in Central's words.
+                Err(error) => json!({"now_ref": now_ref, "lifecycle": "active",
+                    "reason": format!("Central did not close the take's NOW: {}", central_words(&error))}),
+            };
         }
+        answer
     }
 
     /// The take's SessionSpace and its session in it, prepared once.
@@ -778,6 +906,186 @@ mod tests {
         assert_eq!(agent_provider("pi", &Value::Null, |_| true), "pi");
     }
 
+    /// The session's prepared task as its preparation left it: its request and
+    /// the NOW Central allocated for it.
+    fn task_now() -> AllocatedCentralTask {
+        serde_json::from_value(json!({
+            "request": {"ctrl_bin": "/opt/central/ctrl", "central_root": "/home/me/Central", "project": "O-I",
+                "task_ref": "task:fixtures", "purpose": "Run the fixtures", "workcell_ref": "workcell:env-2"},
+            "allocation": {"now_ref": "central:now:project:o-i:0123"}}))
+        .unwrap()
+    }
+
+    #[test]
+    fn a_takes_now_hangs_from_its_tasks_and_names_the_takes_it_was_run_beside() {
+        let takes: Vec<String> = (0..3).map(|n| format!("takes:own:5:trial:{n}")).collect();
+        let take = ResourceRef::parse("agent-session/take-abc").unwrap();
+        let level = json!({"variable": "effort", "value": "high"});
+        let request =
+            take_now_request(&task_now(), "takes:own:5:trial:1", &takes, &take, &level).unwrap();
+        assert_eq!(
+            request.task_ref.as_str(),
+            "task:fixtures:take:takes:own:5:trial:1",
+            "the take's own task, under its task's"
+        );
+        assert_eq!(
+            request.parent_now_ref.as_ref().map(ResourceRef::as_str),
+            Some("central:now:project:o-i:0123"),
+            "a child of the task's NOW"
+        );
+        assert_eq!(
+            request
+                .source_refs
+                .iter()
+                .map(ResourceRef::as_str)
+                .collect::<Vec<_>>(),
+            [
+                "task:fixtures:take:takes:own:5:trial:0",
+                "task:fixtures:take:takes:own:5:trial:2"
+            ],
+            "the takes it was run beside, never itself"
+        );
+        assert_eq!(request.participant_refs, vec![take.clone()]);
+        assert_eq!(request.ctrl_bin, PathBuf::from("/opt/central/ctrl"));
+        assert_eq!(request.central_root, PathBuf::from("/home/me/Central"));
+        assert_eq!(request.project.as_deref(), Some("O-I"));
+        assert_eq!(
+            request.workcell_ref.as_ref().map(ResourceRef::as_str),
+            Some("workcell:env-2")
+        );
+        assert!(request.work_refs.is_empty());
+        assert!(
+            request.purpose.contains("effort high") && request.purpose.contains("2 other takes"),
+            "{}",
+            request.purpose
+        );
+        // A take its configuration does not place among the takes it names is refused.
+        let refused = take_now_request(&task_now(), "takes:own:6:trial:0", &takes, &take, &level)
+            .unwrap_err();
+        assert!(refused.contains("is not among the takes"), "{refused}");
+        // A take told no family is run beside none.
+        let lone =
+            take_now_request(&task_now(), "takes:own:5:trial:1", &[], &take, &Value::Null).unwrap();
+        assert!(lone.source_refs.is_empty());
+        // A task whose preparation names no NOW has none for a take's to hang from.
+        let mut unallocated = task_now();
+        unallocated.allocation = json!({});
+        assert!(
+            take_now_request(&unallocated, "takes:own:5:trial:1", &takes, &take, &level)
+                .unwrap_err()
+                .contains("names no NOW")
+        );
+    }
+
+    /// A controlled test credential, never a person's: Central's own tests
+    /// grant an agent `central.now.lifecycle` the same way.
+    const TAKE_TOKEN: &str = "take-body-controlled-test-token-0123456789";
+
+    /// A Central World on a temporary root, with the placement policy the
+    /// session's task is prepared under (aikit-adapters caw_native_placement.rs)
+    /// and an agent's grant to close a NOW.
+    fn central_world(root: &Path) -> CentralTaskRequest {
+        use sha2::Digest;
+        for path in [
+            "Control/user",
+            "Control/relations",
+            "Work/demo/src",
+            "Work/demo/ProjectCentral",
+        ] {
+            std::fs::create_dir_all(root.join(path)).unwrap();
+        }
+        let path = "Control/user/placement.json";
+        std::fs::write(root.join(path), json!({
+            "schema":"central.work-placement-policy/v1", "scope_ref":"control:root",
+            "writable":[{"path":"Work/demo", "class":"repository"}],
+            "protected":["Work/demo/ProjectCentral"],
+            "enforcement":"material-filesystem", "required_coverage":["file-content", "file-creation", "file-removal", "rename-link", "truncate", "descendant-processes"],
+            "lease_seconds":300
+        }).to_string()).unwrap();
+        let authority = "Control/user/authority.json";
+        std::fs::write(
+            root.join(authority),
+            json!({
+                "schema":"central.native-action-authority/v1", "scope_ref":"control:root",
+                "grants":[{"principal_ref":"agent:take-body", "actor_kind":"agent",
+                    "token_sha256":format!("{:x}", sha2::Sha256::digest(TAKE_TOKEN.as_bytes())),
+                    "scope_refs":["control:root"], "actions":["central.now.lifecycle"],
+                    "expires_at_unix_seconds":u64::MAX}]
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let relation = |path: &str, role: &str| {
+            json!({"ref":format!("central:source:control:root:{path}"),
+            "path":path, "roles":[role], "provenance":"human-adopted", "standing":"architecture-contract",
+            "treatment":"projectcentral-user", "recognition":"controlled-native-test-not-personal-adoption",
+            "recorded_at_unix_seconds":1})
+        };
+        std::fs::write(root.join("Control/relations/source-relations.json"), json!({
+            "schema":"central.control.ground-relations/v1", "project_id":"control:root",
+            "relations":[relation(path, "work-placement-policy"), relation(authority, "native-action-authority")]
+        }).to_string()).unwrap();
+        CentralTaskRequest {
+            ctrl_bin: PathBuf::from(
+                std::env::var("AIKIT_CAW_CTRL_BIN").expect("exact source-built ctrl required"),
+            ),
+            central_root: root.to_owned(),
+            project: None,
+            task_ref: ResourceRef::parse("task:repeat-own").unwrap(),
+            purpose: "The session's own task, which a Repeat takes".into(),
+            participant_refs: vec![],
+            source_refs: vec![],
+            parent_now_ref: None,
+            workcell_ref: None,
+            work_refs: vec![],
+        }
+    }
+
+    #[test]
+    #[ignore = "requires exact source-built Central; mandatory in CAW workflow"]
+    fn central_allocates_each_takes_now_under_its_tasks_and_closes_it_at_the_takes_end() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let task = crate::encounter_service::allocate_central_now(&central_world(&root)).unwrap();
+        let takes: Vec<String> = (0..2).map(|n| format!("takes:own:7:trial:{n}")).collect();
+        let level = json!({"variable": "tool_calls", "value": "session"});
+        let mut kept = vec![];
+        for trace in &takes {
+            let (_, take) = take_session(&session(), trace);
+            let request = take_now_request(&task, trace, &takes, &take, &level).unwrap();
+            let now = crate::encounter_service::allocate_central_now(&request).unwrap();
+            let record = &now.allocation["record"];
+            assert_eq!(record["parent_now_ref"], task.allocation["now_ref"]);
+            assert_eq!(record["horizon"], "child");
+            assert_eq!(record["source_refs"], json!(request.source_refs));
+            assert_eq!(record["participant_refs"], json!([take]));
+            kept.push(now);
+        }
+        assert_ne!(kept[0].allocation["now_ref"], kept[1].allocation["now_ref"]);
+        // Each names the other: a take's close is read against its sibling's.
+        assert_eq!(
+            kept[0].allocation["record"]["source_refs"],
+            json!([kept[1].request.task_ref])
+        );
+        assert_eq!(
+            kept[1].allocation["record"]["source_refs"],
+            json!([kept[0].request.task_ref])
+        );
+        // Closing is a granted act: a body that holds no grant is refused, in Central's words.
+        std::env::remove_var("CENTRAL_NATIVE_TOKEN");
+        let refused = crate::encounter_service::close_central_now(&kept[0]).unwrap_err();
+        assert!(
+            central_words(&refused).contains("missing bounded CENTRAL_NATIVE_TOKEN"),
+            "{refused:?}"
+        );
+        std::env::set_var("CENTRAL_NATIVE_TOKEN", TAKE_TOKEN);
+        let closed = crate::encounter_service::close_central_now(&kept[0]);
+        std::env::remove_var("CENTRAL_NATIVE_TOKEN");
+        let closed = closed.unwrap().expect("the take's own NOW, new, is closed");
+        assert_eq!(closed["record"]["lifecycle"], "closed");
+        assert_eq!(closed["record"]["now_ref"], kept[0].allocation["now_ref"]);
+    }
+
     #[test]
     fn a_take_lands_in_its_own_session_and_its_set_in_one_space() {
         let (space_a, take_a) = take_session(&session(), "takes:own:1:trial:0");
@@ -804,11 +1112,19 @@ mod tests {
             level_of(&level("effort", "inherit"), "m"),
             Ok(Level::Inherit)
         );
+        for word in ["ask", "session", "always"] {
+            assert_eq!(
+                level_of(&level("tool_calls", word), "m"),
+                Ok(Level::ToolCalls(word.into()))
+            );
+        }
         assert_eq!(
-            level_of(&level("autonomy", "auto"), "m"),
-            Ok(Level::Autonomy(2))
+            level_of(&level("tool_calls", "inherit"), "m"),
+            Ok(Level::Inherit)
         );
-        assert!(level_of(&level("autonomy", "reckless"), "m").is_err());
+        assert!(level_of(&level("tool_calls", "reckless"), "m").is_err());
+        let retired = level_of(&level("autonomy", "auto"), "m").unwrap_err();
+        assert!(retired.contains("Autonomy is retired"), "{retired}");
         for variable in ["skillset", "budget"] {
             let refused = level_of(&level(variable, "x"), "m").unwrap_err();
             assert!(

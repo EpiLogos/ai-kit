@@ -3,7 +3,7 @@
 //! the agent works in it (name, colour, activator, output style, Loop with its
 //! stop condition, its cap and the song its passes take again, Launch mode,
 //! Then, Quantize, what a Repeat varies,
-//! the Effort and Autonomy envelopes, and its source: the constellation it was
+//! the Effort and Tool calls envelopes, and its source: the constellation it was
 //! made of). The task record stays the
 //! admission's; these settings are the person's, kept under their own revision
 //! with every replaced reading in history. Task settings bind to the task they
@@ -23,7 +23,12 @@
 //! Hand off to and Then's handoff are retired: "To hand the work to
 //! another session, drag the task onto that session's track" — the drag sends
 //! the task to that session through its encounter's own Draft and Prompt.
-//! Settings stored in the earlier words read in these (`migrate`).
+//! The Agent's Autonomy is retired (O-I manual §19.1 Envelopes, §19.12
+//! Asks): a task's Control chooser holds the Agent's Effort and Scope's Tool
+//! calls, Inherit · Ask · Session · Always, the answer to the harness's
+//! request to use a tool, and Repeat varies Tool calls where it varied
+//! Autonomy. Settings stored in the earlier words read in these (`migrate`);
+//! an Autonomy stored before is read without it and named, never translated.
 use super::{error, read as read_task_record};
 use crate::encounter_service::EncounterService;
 use aikit_core::{ResourceRef, Result, SourceRevision};
@@ -55,7 +60,7 @@ const VARIABLES: &[&str] = &[
     "effort",
     "skillset",
     "budget",
-    "autonomy",
+    "tool_calls",
 ];
 const REPEAT_STOPS: &[&str] = &["turns", "time", "done", "pass"];
 const MAX_LEVELS: usize = 3;
@@ -65,7 +70,9 @@ const HANDOFF_RETIRED: &str = "Then's handoff and Hand off to are retired: to ha
 const QUANTIZES: &[&str] = &["global", "now", "next-tool", "next-turn"];
 const MODES: &[&str] = &["automation", "modulation"];
 const EFFORTS: &[&str] = &["inherit", "low", "medium", "high", "max"];
-const AUTONOMIES: &[&str] = &["inherit", "suggest", "review", "auto"];
+/// Scope's Tool calls for this task, and what Autonomy's words became: the
+/// task executor plays them (`encounter_task_executor.rs`).
+use crate::encounter_task_executor::{AUTONOMY_RETIRED, TOOL_CALLS};
 /// Modulation raises or lowers the session's own value by these steps.
 const STEPS: std::ops::RangeInclusive<i64> = -2..=2;
 
@@ -92,6 +99,10 @@ struct TaskSettings {
     /// first run started. Absent until a Repeat's takes start.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     takes: Option<TakesSet>,
+    /// What the stored set held in retired words, named with what took its
+    /// place (`migrate`). Never stored: the next write leaves them off.
+    #[serde(skip)]
+    retired: Vec<Value>,
 }
 
 /// One set of takes a Repeat runs (DLW.md, The Launch panel: "Once the first
@@ -222,7 +233,7 @@ fn read_record(home: &AikitHome, session: &ResourceRef) -> Result<Option<Setting
     }
     let mut record = record;
     if let Some(task) = record.task.as_mut() {
-        migrate(&mut task.set);
+        task.retired = migrate(&mut task.set);
     }
     Ok(Some(record))
 }
@@ -233,8 +244,11 @@ fn read_record(home: &AikitHome, session: &ResourceRef) -> Result<Option<Setting
 /// on. Then's `handoff` took the work off this track, so nothing followed on
 /// it: Stop. Hand off to is retired with it. The record on disk keeps its
 /// words until the next write publishes these, the replaced reading going to
-/// history as every write's does.
-fn migrate(set: &mut Map<String, Value>) {
+/// history as every write's does. Autonomy is retired, not translated: an
+/// autonomy word is no answer to a tool's request. Its envelope, and a Repeat
+/// that varied it with its levels, are read without it, and what they held is
+/// returned with what took its place, Scope's Tool calls.
+fn migrate(set: &mut Map<String, Value>) -> Vec<Value> {
     let (launch, looped) = match set.get("launch").and_then(Value::as_str) {
         Some("once") => ("trigger", false),
         Some("hold") => ("gate", true),
@@ -251,6 +265,21 @@ fn migrate(set: &mut Map<String, Value>) {
         set.insert("then".into(), json!("stop"));
     }
     set.remove("handoff_to");
+    let retired = |field: &str, held: Value| json!({"field": field, "held": held, "replaced_by": "tool_calls", "words": AUTONOMY_RETIRED});
+    let mut named = Vec::new();
+    if let Some(held) = set.remove("autonomy") {
+        named.push(retired("autonomy", held));
+    }
+    if set.get("repeat_variable").and_then(Value::as_str) == Some("autonomy") {
+        let mut held = Map::new();
+        for key in ["repeat_variable", "repeat_levels"] {
+            if let Some(value) = set.remove(key) {
+                held.insert(key.into(), value);
+            }
+        }
+        named.push(retired("repeat_variable", Value::Object(held)));
+    }
+    named
 }
 
 /// Publish by atomic replacement, keeping the replaced reading in history.
@@ -352,7 +381,7 @@ fn levels(value: &Value) -> Result<Value> {
 }
 
 /// Repeat's Levels are values of its Variable: where AIKit keeps the
-/// variable's words (Effort, Autonomy), each level is one of them. A
+/// variable's words (Effort, Tool calls), each level is one of them. A
 /// condition, a model, a skillset and a budget are their own owners' values,
 /// which the run that applies them judges; AIKit keeps no copy of them.
 fn check_repeat(set: &Map<String, Value>) -> Result<()> {
@@ -362,7 +391,7 @@ fn check_repeat(set: &Map<String, Value>) -> Result<()> {
         .unwrap_or("condition");
     let words = match variable {
         "effort" => EFFORTS,
-        "autonomy" => AUTONOMIES,
+        "tool_calls" => TOOL_CALLS,
         _ => return Ok(()),
     };
     let Some(levels) = set.get("repeat_levels").and_then(Value::as_array) else {
@@ -545,6 +574,10 @@ fn validate_task(changes: &Map<String, Value>) -> Result<Map<String, Value>> {
     for (key, value) in changes {
         let value = match (key.as_str(), value) {
             ("handoff_to", _) => return Err(error(HANDOFF_RETIRED)),
+            ("autonomy", _) => return Err(error(AUTONOMY_RETIRED)),
+            ("repeat_variable", value) if value.as_str() == Some("autonomy") => {
+                return Err(error(format!("Repeat no longer varies Autonomy. {AUTONOMY_RETIRED}")))
+            }
             (_, Value::Null) => Value::Null,
             ("name", value) => words("Name", value, 200)?,
             ("colour", value) => words("Colour", value, 64)?,
@@ -566,10 +599,10 @@ fn validate_task(changes: &Map<String, Value>) -> Result<Map<String, Value>> {
             ("envelope_linked", value) => flag("The envelope link", value)?,
             ("source", value) => constellation(value)?,
             // Checked against the merged mode once every change is in.
-            ("effort", value) | ("autonomy", value) => value.clone(),
+            ("effort", value) | ("tool_calls", value) => value.clone(),
             (other, _) => {
                 return Err(error(format!(
-                    "A task has no setting {other}; it takes name, colour, active, register, form, loop, loop_until, loop_cap, loop_song, launch, then, quantize, repeat_variable, repeat_levels, repeat_repeats, repeat_stop, envelope_mode, envelope_linked, source, effort and autonomy"
+                    "A task has no setting {other}; it takes name, colour, active, register, form, loop, loop_until, loop_cap, loop_song, launch, then, quantize, repeat_variable, repeat_levels, repeat_repeats, repeat_stop, envelope_mode, envelope_linked, source, effort and tool_calls"
                 )))
             }
         };
@@ -578,10 +611,22 @@ fn validate_task(changes: &Map<String, Value>) -> Result<Map<String, Value>> {
     Ok(kept)
 }
 
+/// Modulation raises or lowers the session's own value. The session's own
+/// Tool calls is the harness's answer, its Scope's (the gateway's approvals),
+/// which AIKit does not read, so under Modulation Tool calls has nothing to
+/// move and stays empty.
+const TOOL_CALLS_UNMODULATED: &str = "Modulation has no session value of Tool calls to move: the session's own Tool calls is its Scope's, the harness's answer, which AIKit does not read. Leave Tool calls empty under Modulation, or set it under Automation";
+
 fn check_envelopes(set: &mut Map<String, Value>) -> Result<()> {
     let modulation = set.get("envelope_mode").and_then(Value::as_str) == Some("modulation");
-    for (field, levels) in [("effort", EFFORTS), ("autonomy", AUTONOMIES)] {
+    for (field, levels) in [("effort", EFFORTS), ("tool_calls", TOOL_CALLS)] {
         if let Some(value) = set.get(field).cloned() {
+            if field == "tool_calls"
+                && modulation
+                && value.as_array().is_none_or(|points| !points.is_empty())
+            {
+                return Err(error(TOOL_CALLS_UNMODULATED));
+            }
             set.insert(field.into(), points(field, &value, modulation, levels)?);
         }
     }
@@ -679,6 +724,9 @@ fn with_take_run(
         .to_owned();
     reading["task"]["loop_pass"] =
         crate::encounter_task_executor::loop_pass(home, session, &task_ref);
+    // What Tool calls did at its last answer to the harness, or why the request waits for you.
+    reading["task"]["tool_calls_play"] =
+        crate::encounter_task_executor::tool_calls_play(home, session, &task_ref);
     reading
 }
 
@@ -728,7 +776,9 @@ fn reading(
             // The constellation the task was made of, until the person sets another.
             "source": value("source", bound.source.as_ref().map_or(Value::Null, |source| json!(source))),
             "effort": value("effort", json!([])),
-            "autonomy": value("autonomy", json!([])),
+            "tool_calls": value("tool_calls", json!([])),
+            // What the stored set held in retired words, each named with what took its place.
+            "retired": current.map(|task| task.retired.clone()).unwrap_or_default(),
             "set": set.keys().collect::<Vec<_>>(),
         })
     });
@@ -742,7 +792,7 @@ fn reading(
         "track": track,
         "task": task,
         "previous_task": previous,
-        "standing": "The person's settings for this session and its bound task: intent the owners of launch, model and delivery read. Colour null takes the session's colour; an empty envelope inherits the session's value; a null loop cap sets no cap; Repeat's levels stay empty until chosen, and its variable, levels, repeats and stop when do not change while its takes run (a change starts a new set once they end); the source is the constellation the task was made of until another is set, and null when it was made of none. A bound task's take_run is the run a Repeat's takes share in Actuation's words — the task and the session's own agent as an agent-jsonl body — or why there is none.",
+        "standing": "The person's settings for this session and its bound task: intent the owners of launch, model and delivery read. Colour null takes the session's colour; an empty envelope inherits the session's value (Tool calls the session's Scope); retired names what stored settings held in retired words and what took its place; a null loop cap sets no cap; Repeat's levels stay empty until chosen, and its variable, levels, repeats and stop when do not change while its takes run (a change starts a new set once they end); the source is the constellation the task was made of until another is set, and null when it was made of none. A bound task's take_run is the run a Repeat's takes share in Actuation's words — the task and the session's own agent as an agent-jsonl body — or why there is none.",
     })
 }
 
@@ -803,6 +853,7 @@ fn apply(
             task_ref,
             set,
             takes,
+            retired: Vec::new(),
         });
     }
     if let Some(act) = request.takes {
@@ -884,6 +935,7 @@ fn takes_act(
             task_ref: task_ref.clone(),
             set: Map::new(),
             takes: None,
+            retired: Vec::new(),
         });
     let running = task.takes.as_ref().filter(|takes| takes.ended.is_none());
     match act {
@@ -1077,6 +1129,12 @@ mod tests {
         assert_eq!(read["task"]["quantize"], "global");
         assert_eq!(read["task"]["envelope_mode"], "automation");
         assert_eq!(read["task"]["effort"], json!([]));
+        assert_eq!(read["task"]["tool_calls"], json!([]));
+        assert!(
+            read["task"].get("autonomy").is_none(),
+            "Autonomy is retired: Scope's Tool calls took its place"
+        );
+        assert_eq!(read["task"]["retired"], json!([]));
         assert_eq!(read["task"]["set"], json!([]));
         let untasked = reading(&session(), None, None);
         assert_eq!(untasked["task"], Value::Null);
@@ -1349,7 +1407,7 @@ mod tests {
             (json!({"loop_cap": 2.5}), "Loop's cap is a whole number from 1 to"),
             (
                 json!({"repeat_variable": "temperature"}),
-                "Repeat's variable takes one of condition, model, effort, skillset, budget, autonomy",
+                "Repeat's variable takes one of condition, model, effort, skillset, budget, tool_calls",
             ),
             (
                 json!({"repeat_repeats": 33}),
@@ -1401,7 +1459,7 @@ mod tests {
             &session(),
             None,
             Some(&task),
-            json!({"task": {"task_ref": "task:fixtures", "set": {"effort": [[0, "medium"], [28, "high"]], "autonomy": [[0, "review"]]}}}),
+            json!({"task": {"task_ref": "task:fixtures", "set": {"effort": [[0, "medium"], [28, "high"]], "tool_calls": [[0, "ask"], [60, "session"]]}}}),
             None,
         )
         .unwrap();
@@ -1409,6 +1467,10 @@ mod tests {
         assert_eq!(
             read["task"]["effort"],
             json!([[0.0, "medium"], [28.0, "high"]])
+        );
+        assert_eq!(
+            read["task"]["tool_calls"],
+            json!([[0.0, "ask"], [60.0, "session"]])
         );
         // Switching the mode alone would leave words where steps belong.
         let mixed = apply(
@@ -1427,13 +1489,29 @@ mod tests {
             &session(),
             Some(automation.clone()),
             Some(&task),
-            json!({"task": {"task_ref": "task:fixtures", "set": {"envelope_mode": "modulation", "effort": [[0, 0], [30, 1]], "autonomy": [[0, -1]]}}}),
+            json!({"task": {"task_ref": "task:fixtures", "set": {"envelope_mode": "modulation", "effort": [[0, 0], [30, 1]], "tool_calls": null}}}),
             Some(&automation.revision),
         )
         .unwrap();
         let read = reading(&session(), Some(&modulation), Some(&task));
         assert_eq!(read["task"]["envelope_mode"], "modulation");
         assert_eq!(read["task"]["effort"], json!([[0.0, 0], [30.0, 1]]));
+        assert_eq!(read["task"]["tool_calls"], json!([]));
+        // Modulation moves the session's own value, and the session's own Tool calls is the
+        // harness's answer (its Scope), which AIKit does not read: there is nothing to move.
+        let unmoved = apply(
+            &session(),
+            Some(modulation.clone()),
+            Some(&task),
+            json!({"task": {"task_ref": "task:fixtures", "set": {"tool_calls": [[0, 1]]}}}),
+            Some(&modulation.revision),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            unmoved.contains("Modulation has no session value of Tool calls to move"),
+            "{unmoved}"
+        );
         for bad in [
             json!([[0, 3]]),
             json!([[5, 0], [5, 1]]),
@@ -1687,6 +1765,79 @@ mod tests {
     }
 
     #[test]
+    fn autonomy_is_retired_naming_scopes_tool_calls_that_took_its_place() {
+        let task = bound("task:fixtures");
+        for set in [
+            json!({"autonomy": [[0, "review"]]}),
+            json!({"repeat_variable": "autonomy", "repeat_levels": ["auto"]}),
+        ] {
+            let refused = apply(
+                &session(),
+                None,
+                Some(&task),
+                json!({"task": {"task_ref": "task:fixtures", "set": set}}),
+                None,
+            )
+            .unwrap_err()
+            .to_string();
+            assert!(
+                refused.contains("Autonomy is retired")
+                    && refused
+                        .contains("Scope's Tool calls (tool_calls: inherit, ask, session, always)"),
+                "{refused}"
+            );
+        }
+        // Stored in the retired words: read without them, each named with what took its place,
+        // and never translated into Tool calls (an autonomy word is not an answer to a tool's
+        // request). The next write leaves them off the record.
+        let dir = tempfile::tempdir().unwrap();
+        let home = AikitHome::at(dir.path().canonicalize().unwrap().join("home"));
+        let record = json!({"schema": RECORD_SCHEMA, "agent_session": session().as_str(),
+            "revision": "session-settings/01OLD", "track": {},
+            "task": {"task_ref": "task:fixtures", "set": {"autonomy": [[0, "review"]],
+                     "repeat_variable": "autonomy", "repeat_levels": ["suggest", "auto"], "quantize": "now"}}});
+        let target = path(&home, &session());
+        fs::create_dir_all(target.parent().unwrap()).unwrap();
+        fs::write(&target, serde_json::to_vec(&record).unwrap()).unwrap();
+        let stored = read_record(&home, &session()).unwrap().unwrap();
+        let read = reading(&session(), Some(&stored), Some(&task));
+        assert!(read["task"].get("autonomy").is_none());
+        assert_eq!(read["task"]["tool_calls"], json!([]), "not translated");
+        assert_eq!(read["task"]["repeat_variable"], "condition");
+        assert_eq!(read["task"]["repeat_levels"], json!([]));
+        assert_eq!(read["task"]["quantize"], "now", "the rest stands");
+        assert_eq!(
+            read["task"]["retired"],
+            json!([
+                {"field": "autonomy", "held": [[0, "review"]], "replaced_by": "tool_calls",
+                 "words": AUTONOMY_RETIRED},
+                {"field": "repeat_variable", "held": {"repeat_variable": "autonomy", "repeat_levels": ["suggest", "auto"]},
+                 "replaced_by": "tool_calls", "words": AUTONOMY_RETIRED},
+            ])
+        );
+        let written = apply(
+            &session(),
+            Some(stored.clone()),
+            Some(&task),
+            json!({"task": {"task_ref": "task:fixtures", "set": {"tool_calls": [[0, "always"]]}}}),
+            Some(&stored.revision),
+        )
+        .unwrap();
+        publish(&home, &session(), &written).unwrap();
+        let file: Value = serde_json::from_slice(&fs::read(&target).unwrap()).unwrap();
+        assert_eq!(
+            file["task"]["set"],
+            json!({"quantize": "now", "tool_calls": [[0.0, "always"]]})
+        );
+        assert!(
+            reading(&session(), Some(&written), Some(&task))["task"]["retired"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
     fn settings_stored_in_the_old_words_read_in_the_manuals_and_a_write_publishes_them() {
         let dir = tempfile::tempdir().unwrap();
         let home = AikitHome::at(dir.path().canonicalize().unwrap().join("home"));
@@ -1771,21 +1922,21 @@ mod tests {
             &session(),
             None,
             Some(&task),
-            json!({"task": {"task_ref": "task:fixtures", "set": {"repeat_variable": "autonomy", "repeat_levels": ["opus"]}}}),
+            json!({"task": {"task_ref": "task:fixtures", "set": {"repeat_variable": "tool_calls", "repeat_levels": ["opus"]}}}),
             None,
         )
         .unwrap_err()
         .to_string();
         assert!(
-            wrong.contains("each of Repeat's levels is one of inherit, suggest, review, auto"),
+            wrong.contains("each of Repeat's levels is one of inherit, ask, session, always"),
             "{wrong}"
         );
-        // Switching the variable alone would leave Effort's words as Autonomy's levels.
+        // Switching the variable alone would leave Effort's words as Tool calls' levels.
         let moved = apply(
             &session(),
             Some(effort.clone()),
             Some(&task),
-            json!({"task": {"task_ref": "task:fixtures", "set": {"repeat_variable": "autonomy"}}}),
+            json!({"task": {"task_ref": "task:fixtures", "set": {"repeat_variable": "tool_calls"}}}),
             Some(&effort.revision),
         )
         .unwrap_err()
