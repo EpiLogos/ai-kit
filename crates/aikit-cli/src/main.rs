@@ -2230,6 +2230,43 @@ fn cmd_skill(cwd: &std::path::Path, command: SkillCmd) -> Result<Reply> {
             let data = aikit_cli::practice_capsule::export(&proven, &args.out)?;
             return Ok(reply(&service, data, vec![]));
         }
+        // Read-only by construction: no Service is opened, because opening the
+        // user scope creates its directory and a check must change nothing.
+        SkillSub::Reach => {
+            let home = AikitHome::discover()?;
+            let user_home = std::env::var_os("HOME")
+                .filter(|value| !value.is_empty())
+                .map(PathBuf::from)
+                .ok_or_else(|| {
+                    AikitError::new(
+                        "home.not_found",
+                        "cannot locate the harness roots: HOME is not set",
+                    )
+                })?;
+            let reach = aikit_cli::skill_reach::check(&home, &user_home);
+            let data = serde_json::to_value(&reach).map_err(|error| {
+                AikitError::new(
+                    "skill.reach_encode",
+                    format!("encode the delivery check: {error}"),
+                )
+            })?;
+            // As `harness-profile validate`: the verb did its job, the verdict is in the
+            // data, and the exit status lets a shell or CI gate on it.
+            return Ok(Reply::Data {
+                context: EnvelopeContext {
+                    context_id: Some(aikit_cli::app::USER_SCOPE_CONTEXT.to_string()),
+                    session_id: None,
+                    project_root: None,
+                },
+                data,
+                warnings: reach.lines,
+                exit_code: if reach.gaps == 0 {
+                    json::EXIT_OK
+                } else {
+                    json::EXIT_GENERIC
+                },
+            });
+        }
     };
     match overlay.command {
         SkillOverlaySub::Set(args) => {
