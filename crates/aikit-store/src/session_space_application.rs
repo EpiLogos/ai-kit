@@ -232,6 +232,49 @@ impl SessionSpaceApplicationStore {
         Ok(receipt)
     }
 
+    /// Drag out (O-I manual §19.15, the Agent rack's chain list): `agent_session`
+    /// leaves `from` for a space of its own, `into`, chain and all, in the same
+    /// Project. Each step is an ordinary stage and apply (aikit-core
+    /// `drag_out_intents`): the new space is made and the session attached
+    /// there first, and it is detached from `from` last, so it never stands in
+    /// no space; each space keeps its history. Answers the receipts in order.
+    pub fn drag_out(
+        &self,
+        from: &SessionSpaceRef,
+        agent_session: &aikit_core::resource::ResourceRef,
+        into: SessionSpaceRef,
+        label: Option<String>,
+    ) -> Result<Vec<SessionSpaceReceipt>> {
+        let source = self.load(from)?;
+        if self.state_file(&into).exists() {
+            return Err(AikitError::new(
+                "session_space.drag_out_into_standing",
+                format!(
+                    "{into} already stands: drag out seats {agent_session} in a space of its own; to join a standing space, attach it there"
+                ),
+            ));
+        }
+        let intents = aikit_core::session_space_application::drag_out_intents(
+            &source,
+            agent_session,
+            into.clone(),
+            label,
+        )?;
+        let mut receipts = Vec::new();
+        for (index, intent) in intents.into_iter().enumerate() {
+            let preview = self.stage((index > 0).then_some(&into), intent)?;
+            receipts.push(self.apply(&preview)?);
+        }
+        let detach = self.stage(
+            Some(from),
+            SessionSpaceMutation::DetachAgentSession {
+                agent_session: agent_session.clone(),
+            },
+        )?;
+        receipts.push(self.apply(&detach)?);
+        Ok(receipts)
+    }
+
     /// Stage restoration from one exact prior receipt through the same current
     /// basis/preview/apply authority. History never writes canonical state itself.
     pub fn stage_restore(
@@ -715,6 +758,64 @@ mod tests {
             .surfaces
             .contains_key(&ResourceRef::parse("surface/editor").unwrap()));
         assert_eq!(reopened.history(&id).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn drag_out_seats_the_session_in_a_space_of_its_own_and_both_spaces_keep_their_history() {
+        let (_dir, store) = store();
+        let crew = create(&store, "crew").space;
+        let (ada, cy) = (
+            ResourceRef::parse("agent-session/ada").unwrap(),
+            ResourceRef::parse("agent-session/cy").unwrap(),
+        );
+        for who in [&ada, &cy] {
+            let attach = store
+                .stage(
+                    Some(&crew),
+                    SessionSpaceMutation::AttachAgentSession {
+                        attachment: SessionSpaceAgentAttachmentIntent {
+                            agent_session: who.clone(),
+                            purpose: Some("a chain".into()),
+                            provenance: vec!["seated".into()],
+                        },
+                    },
+                )
+                .unwrap();
+            store.apply(&attach).unwrap();
+        }
+        let alone = SessionSpaceRef::parse("session-space/ada-alone").unwrap();
+        let receipts = store
+            .drag_out(&crew, &ada, alone.clone(), Some("ada alone".into()))
+            .unwrap();
+        assert_eq!(
+            receipts.len(),
+            3,
+            "create, attach, then detach from the crew last"
+        );
+        assert_eq!(receipts.last().unwrap().space, crew);
+        let out = store.load(&alone).unwrap();
+        assert!(out.agent_sessions.contains_key(&ada));
+        let left = store.load(&crew).unwrap();
+        assert!(!left.agent_sessions.contains_key(&ada) && left.agent_sessions.contains_key(&cy));
+        assert_eq!(store.history(&crew).unwrap().len(), 4);
+        assert_eq!(store.history(&alone).unwrap().len(), 2);
+        let standing = store.drag_out(&crew, &cy, crew.clone(), None).unwrap_err();
+        assert_eq!(standing.code(), "session_space.drag_out_into_standing");
+        let again = store
+            .drag_out(
+                &crew,
+                &ada,
+                SessionSpaceRef::parse("session-space/twice").unwrap(),
+                None,
+            )
+            .unwrap_err();
+        assert_eq!(again.code(), "session_space.drag_out_unattached");
+        assert!(
+            store
+                .load(&SessionSpaceRef::parse("session-space/twice").unwrap())
+                .is_err(),
+            "a refusal writes nothing"
+        );
     }
 
     #[test]

@@ -3538,7 +3538,7 @@ impl EncounterService {
                 // Solo: "only soloed sessions may run" (FACTORY_MIXER.solo's
                 // own words) gates every launch of this harness, a human's
                 // own Prompt included — never only the executor's own.
-                crate::encounter_task_executor::solo_gate(&self.home, &agent_session)?;
+                crate::encounter_task_executor::launch_gate(&self.home, &agent_session)?;
                 let resident = self.resident(&agent_session)?;
                 let _operation = resident.operations.lock().map_err(error)?;
                 let _agency_lock = self.lock_agency(&agent_session)?;

@@ -305,6 +305,24 @@ fn operations() -> Vec<StageSchemaOperation> {
             ],
         },
         StageSchemaOperation {
+            operation: "bench-agent-session",
+            intent: json!({
+                "operation": "bench-agent-session",
+                "agent_session": "agent-session/<id>",
+                "benched": true
+            }),
+            notes: vec![
+                (
+                    "agent_session",
+                    "required; a session this space holds (attach it first)",
+                ),
+                (
+                    "benched",
+                    "required; true benches it (it stays in the space and is given no work: no launch reaches it), false lifts the bench",
+                ),
+            ],
+        },
+        StageSchemaOperation {
             operation: "unbind-agent-set",
             intent: json!({"operation": "unbind-agent-set"}),
             notes: vec![("operation", "the space names no agent set afterwards")],

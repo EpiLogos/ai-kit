@@ -75,7 +75,10 @@
 //!    `track.solo` on, every launch this executor
 //!    would otherwise make (a loop's run, an Again) on a sibling that
 //!    is not itself soloed is refused; a human's own `Prompt` is gated the
-//!    same way, in `encounter_service.rs`.
+//!    same way, in `encounter_service.rs`. A benched session (its
+//!    SessionSpace's `benched`, O-I manual §19.15's Activator: "it stays in
+//!    the rack and is given no work") is refused first, by `launch_gate`,
+//!    the one gate both paths pass.
 //!
 //! Effort's envelope plays in the session's own abstract words
 //! (`inherit`/`low`/`medium`/`high`/`max`, `encounter_task_settings.rs`'s
@@ -667,6 +670,36 @@ pub fn solo_gate(home: &AikitHome, session: &ResourceRef) -> Result<()> {
     }
 }
 
+// --------------------------------------------------------------------------- Bench gate
+
+/// Why a launch on `session` is refused: the SessionSpace that holds it has it
+/// on the bench (O-I manual §19.15, the Agent rack's Activator: "it stays in
+/// the rack and is given no work"). `None` lets it proceed. Read fresh, as
+/// Solo is: a stale bench would give work to a benched session or withhold it
+/// from one whose bench was lifted.
+fn bench_refusal(home: &AikitHome, session: &ResourceRef) -> Result<Option<String>> {
+    let spaces = SessionSpaceApplicationStore::new(home.clone()).list()?;
+    Ok(spaces
+        .iter()
+        .find(|space| space.benched.contains(session))
+        .map(|space| {
+            format!(
+                "{session} is on the bench of {}: it stays in the space and is given no work until its bench is lifted",
+                space.id()
+            )
+        }))
+}
+
+/// Refuse a launch on `session` while it is benched, then while another
+/// session of its SessionSpace is soloed: every launch this executor makes and
+/// a human's own `Prompt` (`encounter_service.rs`) pass this one gate.
+pub fn launch_gate(home: &AikitHome, session: &ResourceRef) -> Result<()> {
+    if let Some(reason) = bench_refusal(home, session)? {
+        return Err(error(reason));
+    }
+    solo_gate(home, session)
+}
+
 // --------------------------------------------------------------------------- the worker
 
 /// Start the task executor's own worker: it wakes every `SWEEP_INTERVAL`,
@@ -1018,7 +1051,7 @@ fn settle_turn_end(
     let song = task.get("loop_song").filter(|song| song.is_object());
     let launched = match (after, song) {
         (AfterTurn::Rest, _) => false,
-        _ if solo_gate(home, session).is_err() => false,
+        _ if launch_gate(home, session).is_err() => false,
         // A song's loop: each pass is a take of the song, and the turn that follows names it.
         (AfterTurn::Loop, Some(song)) => match song_pass(name, song, verdicts) {
             SongPass::Take {
@@ -1651,6 +1684,45 @@ mod tests {
             .unwrap();
         owner.apply(&attach).unwrap();
         (dir, home, who)
+    }
+
+    #[test]
+    fn a_benched_session_is_given_no_work_and_its_bench_lifted_it_runs_again() {
+        use aikit_core::session_space::SessionSpaceRef;
+        use aikit_core::session_space_application::SessionSpaceMutation;
+        let (_dir, home, who) = attached("benched");
+        launch_gate(&home, &who).expect("an unbenched session runs");
+        let owner = SessionSpaceApplicationStore::new(home.clone());
+        let space = SessionSpaceRef::parse("session-space/benched").unwrap();
+        for benched in [true, false] {
+            let staged = owner
+                .stage(
+                    Some(&space),
+                    SessionSpaceMutation::BenchAgentSession {
+                        agent_session: who.clone(),
+                        benched,
+                    },
+                )
+                .unwrap();
+            owner.apply(&staged).unwrap();
+            let gated = launch_gate(&home, &who);
+            if benched {
+                let refused = gated.expect_err("a benched session is given no work");
+                assert!(
+                    refused
+                        .to_string()
+                        .contains("agent-session/benched is on the bench of session-space/benched"),
+                    "{refused}"
+                );
+            } else {
+                gated.expect("its bench lifted, it runs again");
+            }
+        }
+        assert_eq!(
+            owner.history(&space).unwrap().len(),
+            4,
+            "create, attach, bench, lift: each kept"
+        );
     }
 
     #[test]

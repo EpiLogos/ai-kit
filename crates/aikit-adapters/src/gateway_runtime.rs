@@ -26,7 +26,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use aikit_adapters::{
     ConnectorDescriptor, ConnectorHealth, ConnectorOperation, ConversationAddress, DeliveryReceipt,
     GatewayConnector, InboundEvent, InboundEventKind, MediaReference, OutboundOperation,
-    OutboundOperationKind, SenderIdentity, GATEWAY_CONNECTOR_SDK_VERSION,
+    OutboundOperationKind, SenderIdentity, SenderKind, GATEWAY_CONNECTOR_SDK_VERSION,
     GATEWAY_CONNECTOR_WIRE_VERSION,
 };
 use aikit_core::resource::ResourceRef;
@@ -119,17 +119,26 @@ pub enum GatewayIngressDecision {
     Deny,
 }
 
+/// Who may reach a binding's conversation: a sender's own id first
+/// (`sender_overrides`), then its kind (`kind_rules`: the rule for every agent,
+/// say, as O-I's Scope sets Calls to other agents, manual §19.12), then the
+/// one `default`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GatewayIngressPolicy {
     pub default: GatewayIngressDecision,
     #[serde(default)]
     pub sender_overrides: BTreeMap<String, GatewayIngressDecision>,
+    /// The rule for a sender kind, where one is set. Absent from a policy that
+    /// sets none, so a binding written before kind rules keeps its bytes.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub kind_rules: BTreeMap<SenderKind, GatewayIngressDecision>,
 }
 
 impl GatewayIngressPolicy {
     pub fn decision_for(&self, sender: &SenderIdentity) -> GatewayIngressDecision {
         self.sender_overrides
             .get(&sender.native_sender_id)
+            .or_else(|| self.kind_rules.get(&sender.kind))
             .copied()
             .unwrap_or(self.default)
     }
@@ -554,6 +563,9 @@ pub struct GatewayEcologySurface {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub surface_ref: Option<ResourceRef>,
     pub ingress_default: GatewayIngressDecision,
+    /// The binding's rules by sender kind, where any is set.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub ingress_kinds: BTreeMap<SenderKind, GatewayIngressDecision>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub forked_from: Option<GatewayForkOrigin>,
     pub context_revision: u64,
@@ -779,6 +791,27 @@ impl AgencyGateway {
         self.routes.insert(route, binding.binding_ref.clone());
         self.bindings.insert(binding.binding_ref.clone(), binding);
         Ok(())
+    }
+
+    /// Set or clear one sender kind's ingress rule on a binding; its route,
+    /// session and Stream stay as they are. Answers the policy as it now stands.
+    pub fn set_ingress_rule(
+        &mut self,
+        binding_ref: &ResourceRef,
+        kind: SenderKind,
+        decision: Option<GatewayIngressDecision>,
+    ) -> Result<GatewayIngressPolicy> {
+        let binding = self.bindings.get_mut(binding_ref).ok_or_else(|| {
+            AikitError::new(
+                "agency_gateway.unknown_binding",
+                format!("gateway binding {binding_ref} does not exist"),
+            )
+        })?;
+        match decision {
+            Some(decision) => binding.ingress.kind_rules.insert(kind, decision),
+            None => binding.ingress.kind_rules.remove(&kind),
+        };
+        Ok(binding.ingress.clone())
     }
 
     pub fn unbind(&mut self, binding_ref: &ResourceRef) -> Result<GatewayBinding> {
@@ -1287,6 +1320,7 @@ impl AgencyGateway {
                 address: binding.address.clone(),
                 surface_ref: binding.surface_ref.clone(),
                 ingress_default: binding.ingress.default,
+                ingress_kinds: binding.ingress.kind_rules.clone(),
                 forked_from: binding.forked_from.clone(),
                 context_revision: binding.context_revision,
             });
@@ -1587,6 +1621,15 @@ pub enum GatewayCommand {
         binding_ref: ResourceRef,
         operation: GatewayActuationControlOperation,
     },
+    /// Set (`decision`) or clear (`None`) the ingress rule for one sender kind
+    /// on one binding (O-I manual §19.12 Scope's Calls to other agents: the
+    /// rule for the kind `agent`). A sender's own override still decides first.
+    SetIngressRule {
+        binding_ref: ResourceRef,
+        kind: SenderKind,
+        #[serde(default)]
+        decision: Option<GatewayIngressDecision>,
+    },
     /// A canonical conversation-control operation (status, stop, new, sessions,
     /// restart, connector pause/resume). The kernel holds no turn sources: a
     /// running gateway service routes this to its conversation engine; offline
@@ -1794,6 +1837,12 @@ pub enum GatewayResponse {
     ControlIntent {
         intent: GatewayActuationControlIntent,
     },
+    /// A sender kind's ingress rule was set or cleared: the binding's policy
+    /// as it now stands.
+    IngressRuleSet {
+        binding_ref: ResourceRef,
+        ingress: GatewayIngressPolicy,
+    },
     /// A conversation-control operation's answer. The result document is the
     /// engine's own reading (status detail, session list, receipts); the
     /// heterogeneous shapes share one response kind.
@@ -1913,6 +1962,14 @@ pub fn execute_gateway_command(
             operation,
         } => Ok(GatewayResponse::ControlIntent {
             intent: gateway.control_intent(&binding_ref, operation)?,
+        }),
+        GatewayCommand::SetIngressRule {
+            binding_ref,
+            kind,
+            decision,
+        } => Ok(GatewayResponse::IngressRuleSet {
+            ingress: gateway.set_ingress_rule(&binding_ref, kind, decision)?,
+            binding_ref,
         }),
         GatewayCommand::Conversation {
             binding_ref,
@@ -2179,6 +2236,7 @@ mod tests {
             forked_from: None,
             context_revision: 1,
             ingress: GatewayIngressPolicy {
+                kind_rules: Default::default(),
                 default: GatewayIngressDecision::Allow,
                 sender_overrides: BTreeMap::new(),
             },
@@ -2287,6 +2345,106 @@ mod tests {
             GatewayIngressResult::Denied { .. }
         ));
         assert_eq!(gateway.status().stream_count, 0);
+    }
+
+    #[test]
+    fn a_sender_kind_rule_decides_after_the_senders_own_id_and_before_the_default() {
+        // O-I manual §19.12, Scope's Calls to other agents (Allow · Ask · Deny): one rule for every agent
+        // that calls, set and cleared on the binding through the gateway's own command.
+        let mut gateway = gateway();
+        gateway.register_connector(connector("telegram")).unwrap();
+        let mut bound = binding("telegram", "chat-42", "telegram");
+        bound
+            .ingress
+            .sender_overrides
+            .insert("trusted-agent".into(), GatewayIngressDecision::Allow);
+        gateway.bind(bound).unwrap();
+        let agent = |id: &str, sender: &str| {
+            let mut event = inbound("telegram", "chat-42", id, sender);
+            event.sender.kind = SenderKind::Agent;
+            event
+        };
+        let binding_ref = r("gateway-binding/telegram");
+        let set = execute_gateway_command(
+            &mut gateway,
+            GatewayCommand::SetIngressRule {
+                binding_ref: binding_ref.clone(),
+                kind: SenderKind::Agent,
+                decision: Some(GatewayIngressDecision::Pair),
+            },
+        )
+        .unwrap();
+        let GatewayResponse::IngressRuleSet { ingress, .. } = set else {
+            panic!("the rule is answered with the policy as it stands: {set:?}");
+        };
+        assert_eq!(
+            ingress.kind_rules.get(&SenderKind::Agent),
+            Some(&GatewayIngressDecision::Pair)
+        );
+        assert!(
+            matches!(
+                gateway.ingest(agent("1", "some-agent")).unwrap(),
+                GatewayIngressResult::PairingRequired { .. }
+            ),
+            "an agent waits for an answer"
+        );
+        assert!(
+            matches!(
+                gateway.ingest(agent("2", "trusted-agent")).unwrap(),
+                GatewayIngressResult::Appended { .. }
+            ),
+            "a sender's own override still decides first"
+        );
+        assert!(
+            matches!(
+                gateway
+                    .ingest(inbound("telegram", "chat-42", "3", "user-7"))
+                    .unwrap(),
+                GatewayIngressResult::Appended { .. }
+            ),
+            "a person falls to the default"
+        );
+        let ecology = gateway.ecology();
+        let surfaces: Vec<_> = ecology
+            .agencies
+            .iter()
+            .flat_map(|agency| agency.sessions.iter())
+            .flat_map(|session| session.surfaces.iter())
+            .collect();
+        assert_eq!(
+            surfaces[0].ingress_kinds.get(&SenderKind::Agent),
+            Some(&GatewayIngressDecision::Pair)
+        );
+
+        gateway
+            .set_ingress_rule(&binding_ref, SenderKind::Agent, None)
+            .unwrap();
+        assert!(
+            matches!(
+                gateway.ingest(agent("4", "some-agent")).unwrap(),
+                GatewayIngressResult::Appended { .. }
+            ),
+            "the rule cleared, an agent falls to the default"
+        );
+        let wire = serde_json::to_value(&gateway.bindings[&binding_ref].ingress).unwrap();
+        assert!(
+            wire.get("kind_rules").is_none(),
+            "no rule, no field: {wire}"
+        );
+        let unknown = gateway
+            .set_ingress_rule(
+                &r("gateway-binding/none"),
+                SenderKind::Agent,
+                Some(GatewayIngressDecision::Deny),
+            )
+            .unwrap_err();
+        assert_eq!(unknown.code(), "agency_gateway.unknown_binding");
+        assert!(!GatewayCommand::SetIngressRule {
+            binding_ref,
+            kind: SenderKind::Agent,
+            decision: None
+        }
+        .is_read_only());
     }
 
     #[test]

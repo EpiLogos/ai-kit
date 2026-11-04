@@ -194,6 +194,7 @@ pub fn takes_carrier(command: &GatewaySub) -> bool {
             | GatewaySub::Delegate(_)
             | GatewaySub::Forward(_)
             | GatewaySub::Agent(_)
+            | GatewaySub::Ingress(_)
             | GatewaySub::NativeOwner(_)
     )
 }
@@ -218,6 +219,7 @@ pub fn override_carriers(command: &mut crate::cli::GatewayCmd, carrier: GatewayQ
         G::Heard(a) => a.carrier = carrier,
         G::Delegate(a) => a.carrier = carrier,
         G::Agent(a) => a.carrier = carrier,
+        G::Ingress(a) => a.carrier = carrier,
         G::NativeOwner(a) => a.carrier = carrier,
         G::Handoff { .. }
         | G::Message { .. }
@@ -447,6 +449,45 @@ pub fn serve_coexistence(home: &AikitHome) -> Result<ServeCoexistence> {
     Ok(ServeCoexistence { gate, lines })
 }
 
+/// Resolve `aikit gateway ingress` into the gateway's own command: one sender
+/// kind's rule set, or cleared, on one binding.
+pub fn ingress_rule(
+    args: &crate::cli::GatewayIngressArgs,
+) -> Result<aikit_adapters::GatewayCommand> {
+    let binding_ref = ResourceRef::parse(&args.binding_ref).map_err(|error| {
+        AikitError::new(
+            "cli.gateway_binding_ref_invalid",
+            format!("parse binding ref {}: {error}", args.binding_ref),
+        )
+    })?;
+    let kind =
+        serde_json::from_value(serde_json::Value::String(args.kind.clone())).map_err(|_| {
+            AikitError::new(
+                "cli.gateway_sender_kind_unknown",
+                format!(
+                    "unknown sender kind {:?}; use human, agent, bot, system or unknown",
+                    args.kind
+                ),
+            )
+        })?;
+    let decision = match args.decision.as_str() {
+        "clear" => None,
+        word => Some(
+            serde_json::from_value(serde_json::Value::String(word.into())).map_err(|_| {
+                AikitError::new(
+                    "cli.gateway_ingress_decision_unknown",
+                    format!("unknown ingress decision {word:?}; use allow, pair, deny or clear"),
+                )
+            })?,
+        ),
+    };
+    Ok(aikit_adapters::GatewayCommand::SetIngressRule {
+        binding_ref,
+        kind,
+        decision,
+    })
+}
+
 /// Resolve `aikit gateway agent <op>` into the canonical operation the
 /// protocol carries. The names here mirror the connector-edge slash commands;
 /// both spellings resolve to one `GatewayConversationOperation`.
@@ -625,4 +666,91 @@ pub fn publish_process_record(
 pub fn read_process_record(home: &AikitHome) -> Option<GatewayProcessPosture> {
     let bytes = std::fs::read(process_record_path(home)).ok()?;
     serde_json::from_slice(&bytes).ok()
+}
+
+#[cfg(test)]
+mod ingress_rule_tests {
+    use super::ingress_rule;
+    use crate::cli::GatewayIngressArgs;
+    use aikit_adapters::{GatewayCommand, GatewayIngressDecision, SenderKind};
+    use clap::Parser;
+
+    #[derive(Parser)]
+    struct Probe {
+        #[command(flatten)]
+        args: GatewayIngressArgs,
+    }
+
+    fn parsed(argv: &[&str]) -> GatewayIngressArgs {
+        Probe::try_parse_from(std::iter::once("ingress").chain(argv.iter().copied()))
+            .unwrap()
+            .args
+    }
+
+    #[test]
+    fn an_ingress_rule_names_one_kind_and_its_decision_or_clears_it() {
+        let ruled = ingress_rule(&parsed(&[
+            "--binding",
+            "gateway-binding/telegram",
+            "--kind",
+            "agent",
+            "--decision",
+            "pair",
+        ]))
+        .unwrap();
+        match ruled {
+            GatewayCommand::SetIngressRule {
+                binding_ref,
+                kind,
+                decision,
+            } => {
+                assert_eq!(binding_ref.as_str(), "gateway-binding/telegram");
+                assert_eq!(kind, SenderKind::Agent);
+                assert_eq!(decision, Some(GatewayIngressDecision::Pair));
+            }
+            other => panic!("ingress parsed as {other:?}"),
+        }
+        let cleared = ingress_rule(&parsed(&[
+            "--binding",
+            "gateway-binding/telegram",
+            "--kind",
+            "agent",
+            "--decision",
+            "clear",
+        ]))
+        .unwrap();
+        assert!(matches!(
+            cleared,
+            GatewayCommand::SetIngressRule { decision: None, .. }
+        ));
+    }
+
+    #[test]
+    fn an_unknown_kind_or_decision_is_refused_in_words() {
+        let kind = ingress_rule(&parsed(&[
+            "--binding",
+            "gateway-binding/telegram",
+            "--kind",
+            "robot",
+            "--decision",
+            "allow",
+        ]))
+        .unwrap_err();
+        assert_eq!(kind.code(), "cli.gateway_sender_kind_unknown");
+        assert!(
+            kind.to_string()
+                .contains("use human, agent, bot, system or unknown"),
+            "{kind}"
+        );
+        let decision = ingress_rule(&parsed(&[
+            "--binding",
+            "gateway-binding/telegram",
+            "--kind",
+            "agent",
+            "--decision",
+            "ask",
+        ]))
+        .unwrap_err();
+        assert_eq!(decision.code(), "cli.gateway_ingress_decision_unknown");
+    }
 }

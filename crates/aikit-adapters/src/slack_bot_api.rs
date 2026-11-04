@@ -1412,6 +1412,7 @@ mod tests {
                 forked_from: None,
                 context_revision: 1,
                 ingress: GatewayIngressPolicy {
+                    kind_rules: Default::default(),
                     default: GatewayIngressDecision::Allow,
                     sender_overrides: BTreeMap::new(),
                 },

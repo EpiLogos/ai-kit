@@ -465,6 +465,21 @@ enum Command {
     },
     /// Show immutable SessionSpace application receipts.
     History { space: String },
+    /// Drag a session out of --space into a space of its own, --into, in the
+    /// same Project (O-I manual §19.15, the Agent rack's chain list): the new
+    /// space is made and the session attached there with its Project
+    /// contexts and its bench, then detached from --space last. Each step is
+    /// an ordinary stage and apply; answers the receipts in order.
+    DragOut {
+        #[arg(long)]
+        space: String,
+        #[arg(long)]
+        agent_session: String,
+        #[arg(long)]
+        into: String,
+        #[arg(long)]
+        label: Option<String>,
+    },
     /// Compare two receipt-backed semantic states.
     Compare {
         space: String,
@@ -1431,6 +1446,17 @@ fn run(cli: Cli) -> Result<()> {
             emit(&home.session_space_apply(&preview)?)
         }
         Command::History { space } => emit(&home.session_space_history(&space_ref(&space)?)?),
+        Command::DragOut {
+            space,
+            agent_session,
+            into,
+            label,
+        } => emit(&SessionSpaceApplicationStore::new(home.clone()).drag_out(
+            &space_ref(&space)?,
+            &ResourceRef::parse(agent_session)?,
+            space_ref(&into)?,
+            label,
+        )?),
         Command::Compare {
             space,
             from_sequence,
@@ -1788,6 +1814,52 @@ mod epi_prime_cli_tests {
                 "{omitted} must be required"
             );
         }
+    }
+
+    #[test]
+    fn drag_out_takes_the_space_the_session_and_the_space_of_its_own() {
+        let cli = Cli::try_parse_from([
+            "aikit-session-space",
+            "drag-out",
+            "--space",
+            "session-space/crew",
+            "--agent-session",
+            "agent-session/ada",
+            "--into",
+            "session-space/ada-alone",
+            "--label",
+            "ada alone",
+        ])
+        .unwrap();
+        match cli.command {
+            Command::DragOut {
+                space,
+                agent_session,
+                into,
+                label,
+            } => {
+                assert_eq!(
+                    (space.as_str(), agent_session.as_str(), into.as_str()),
+                    (
+                        "session-space/crew",
+                        "agent-session/ada",
+                        "session-space/ada-alone"
+                    )
+                );
+                assert_eq!(label.as_deref(), Some("ada alone"));
+            }
+            other => panic!("drag-out parsed as {other:?}"),
+        }
+        assert!(
+            Cli::try_parse_from([
+                "aikit-session-space",
+                "drag-out",
+                "--space",
+                "session-space/crew"
+            ])
+            .is_err(),
+            "the session and the space of its own are required"
+        );
     }
 
     #[test]

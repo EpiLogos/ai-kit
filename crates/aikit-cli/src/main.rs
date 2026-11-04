@@ -1975,6 +1975,26 @@ fn cmd_gateway_dispatch(command: GatewayCmd, cwd: &std::path::Path) -> Result<Re
                 exit_code: json::EXIT_OK,
             })
         }
+        GatewaySub::Ingress(a) => {
+            let command = aikit_cli::gateway_ops::ingress_rule(&a)?;
+            let target = aikit_cli::gateway_ops::carrier_target(&home, &a.carrier)?;
+            let response =
+                aikit_adapters::gateway_command(&target, command, None).map_err(|error| {
+                    aikit_cli::gateway_ops::unreachable_hint(&error).unwrap_or(error)
+                })?;
+            let data = serde_json::to_value(&response).map_err(|error| {
+                AikitError::new(
+                    "cli.gateway_response_encode",
+                    format!("encode gateway response: {error}"),
+                )
+            })?;
+            Ok(Reply::Data {
+                context: EnvelopeContext::default(),
+                data,
+                warnings: vec![],
+                exit_code: json::EXIT_OK,
+            })
+        }
         GatewaySub::Coexistence(a) => {
             match aikit_cli::gateway_ops::coexistence_command(&home, &a)? {
                 aikit_cli::gateway_ops::CoexistenceOutput::Text(text) => Ok(Reply::Text(text)),
@@ -2149,6 +2169,7 @@ fn cmd_gateway_dispatch(command: GatewayCmd, cwd: &std::path::Path) -> Result<Re
                 | GatewaySub::Remote(_)
                 | GatewaySub::Connector(_)
                 | GatewaySub::Agent(_)
+                | GatewaySub::Ingress(_)
                 | GatewaySub::NativeOwner(_)
                 | GatewaySub::Coexistence(_)
                 | GatewaySub::Hoist(_)
@@ -2182,6 +2203,7 @@ fn cmd_gateway_dispatch(command: GatewayCmd, cwd: &std::path::Path) -> Result<Re
                 | GatewaySub::Remote(_)
                 | GatewaySub::Connector(_)
                 | GatewaySub::Agent(_)
+                | GatewaySub::Ingress(_)
                 | GatewaySub::NativeOwner(_)
                 | GatewaySub::Coexistence(_)
                 | GatewaySub::Hoist(_)

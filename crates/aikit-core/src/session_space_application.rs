@@ -284,6 +284,11 @@ pub struct SessionSpaceAuthoredState {
     /// The Central agent set this space runs, where one is named (O-I #684).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_set: Option<SessionSpaceAgentSetBinding>,
+    /// The sessions of this space on the bench (O-I manual §19.15, the Agent
+    /// rack's Activator): each stays in the space and is given no work, so no
+    /// launch reaches it. Absent from a space that benches nothing.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub benched: BTreeSet<ResourceRef>,
 }
 
 impl SessionSpaceAuthoredState {
@@ -300,6 +305,7 @@ impl SessionSpaceAuthoredState {
             native_references: BTreeMap::new(),
             focus: None,
             agent_set: None,
+            benched: BTreeSet::new(),
         }
     }
 
@@ -347,6 +353,13 @@ impl SessionSpaceAuthoredState {
                     format!("Project {project} has Context evidence but is not a member"),
                 ));
             }
+        }
+        if let Some(session) = self
+            .benched
+            .iter()
+            .find(|session| !self.agent_sessions.contains_key(*session))
+        {
+            return Err(bench_unattached(session, self.id()));
         }
         for (binding_ref, binding) in &self.working_surfaces {
             if binding_ref != &binding.binding {
@@ -450,6 +463,12 @@ pub enum SessionSpaceMutation {
     },
     DetachAgentSession {
         agent_session: ResourceRef,
+    },
+    /// Bench a session this space holds (`benched: true`), or lift its bench:
+    /// a benched session stays in the space and is given no work.
+    BenchAgentSession {
+        agent_session: ResourceRef,
+        benched: bool,
     },
     AttachSurface {
         attachment: SessionSpaceSurfaceAttachmentIntent,
@@ -626,6 +645,7 @@ fn apply_intent(
         }
         SessionSpaceMutation::DetachAgentSession { agent_session } => {
             state.agent_sessions.remove(agent_session);
+            state.benched.remove(agent_session);
             if state
                 .focus
                 .as_ref()
@@ -637,6 +657,24 @@ fn apply_intent(
                 "agent-session",
                 agent_session.as_str(),
                 "attachment-intent-removed",
+            ));
+        }
+        SessionSpaceMutation::BenchAgentSession {
+            agent_session,
+            benched,
+        } => {
+            if !state.agent_sessions.contains_key(agent_session) {
+                return Err(bench_unattached(agent_session, state.id()));
+            }
+            if *benched {
+                state.benched.insert(agent_session.clone());
+            } else {
+                state.benched.remove(agent_session);
+            }
+            changed.push(change(
+                "agent-session",
+                agent_session.as_str(),
+                if *benched { "benched" } else { "bench-lifted" },
             ));
         }
         SessionSpaceMutation::AttachSurface { attachment } => {
@@ -749,6 +787,106 @@ fn apply_intent(
         }
     }
     Ok(())
+}
+
+/// What Drag out stages for the space a session goes to (O-I manual §19.15,
+/// the Agent rack's chain list: "Drag a chain out of the list onto an empty
+/// track and it works there alone, chain and all"): the new space, the same
+/// Project memberships on the same ContextResolution evidence, the session's
+/// own attachment (and its bench, where it is benched), in apply order. The
+/// owner applies these to `into` first and detaches the session from `from`
+/// last, so the session never stands in no space of its Project. Refused in
+/// words: a session `from` does not hold, the only session of `from` (it
+/// already works there alone), the same space, a working surface that binds it
+/// in `from`, and a membership `from` holds without its Context evidence.
+pub fn drag_out_intents(
+    from: &SessionSpaceAuthoredState,
+    agent_session: &ResourceRef,
+    into: SessionSpaceRef,
+    label: Option<String>,
+) -> Result<Vec<SessionSpaceMutation>> {
+    let refused = |code: &'static str, message: String| Err(AikitError::new(code, message));
+    let Some(attachment) = from.agent_sessions.get(agent_session) else {
+        return refused(
+            "session_space.drag_out_unattached",
+            format!(
+                "{agent_session} is not a session of {}, so there is nothing of it to drag out",
+                from.id()
+            ),
+        );
+    };
+    if &into == from.id() {
+        return refused(
+            "session_space.drag_out_same_space",
+            format!("{agent_session} is dragged out of {into} into a space of its own, not into the same one"),
+        );
+    }
+    if from.agent_sessions.len() == 1 {
+        return refused(
+            "session_space.drag_out_alone",
+            format!(
+                "{agent_session} is the only session of {}: it already works there alone",
+                from.id()
+            ),
+        );
+    }
+    if let Some(binding) = from
+        .working_surfaces
+        .values()
+        .find(|binding| &binding.agent_session == agent_session)
+    {
+        return refused(
+            "session_space.drag_out_working_surface",
+            format!(
+                "{agent_session} works in the surface {} of {}; unbind that working surface before dragging the session out",
+                binding.binding,
+                from.id()
+            ),
+        );
+    }
+    let mut intents = vec![SessionSpaceMutation::Create { id: into, label }];
+    for member in &from.definition.projects {
+        let project = ProjectRef::parse(member.as_str())?;
+        let Some(context) = from.project_contexts.get(&project) else {
+            return refused(
+                "session_space.drag_out_membership_without_context",
+                format!(
+                    "{} is a member of Project {project} without its Context evidence, so a space of its own cannot hold that Project for {agent_session}",
+                    from.id()
+                ),
+            );
+        };
+        intents.push(SessionSpaceMutation::BindProjectContext {
+            binding: Box::new(SessionSpaceProjectContextBinding::new(
+                project,
+                context.clone(),
+            )?),
+        });
+    }
+    let mut carried = attachment.clone();
+    carried
+        .provenance
+        .push(format!("dragged out of {}", from.id()));
+    intents.push(SessionSpaceMutation::AttachAgentSession {
+        attachment: carried,
+    });
+    if from.benched.contains(agent_session) {
+        intents.push(SessionSpaceMutation::BenchAgentSession {
+            agent_session: agent_session.clone(),
+            benched: true,
+        });
+    }
+    Ok(intents)
+}
+
+/// A bench names only a session the space holds.
+fn bench_unattached(session: &ResourceRef, space: &SessionSpaceRef) -> AikitError {
+    AikitError::new(
+        "session_space.bench_unattached",
+        format!(
+            "{session} is not a session of {space}, so it cannot be benched there; attach it first"
+        ),
+    )
 }
 
 fn change(relation: &str, subject: impl Into<String>, value: &str) -> SessionSpaceChange {
@@ -1022,6 +1160,126 @@ mod tests {
             basis,
             provenance: vec![origin.into()],
         }
+    }
+
+    /// A space of `project` holding `sessions`, applied mutation by mutation.
+    fn rack(name: &str, sessions: &[&str]) -> SessionSpaceAuthoredState {
+        let id = SessionSpaceRef::parse(&format!("session-space/{name}")).unwrap();
+        let mut state = stage_session_space(
+            None,
+            SessionSpaceMutation::Create {
+                id,
+                label: Some(name.into()),
+            },
+        )
+        .unwrap()
+        .proposed;
+        let binding =
+            SessionSpaceProjectContextBinding::new(project("o-i"), evidence("o-i", "rack", "h1"))
+                .unwrap();
+        state = stage_session_space(
+            Some(&state),
+            SessionSpaceMutation::BindProjectContext {
+                binding: Box::new(binding),
+            },
+        )
+        .unwrap()
+        .proposed;
+        for session in sessions {
+            let attachment = SessionSpaceAgentAttachmentIntent {
+                agent_session: ResourceRef::parse(&format!("agent-session/{session}")).unwrap(),
+                purpose: Some(format!("{session}'s chain")),
+                provenance: vec!["seated".into()],
+            };
+            state = stage_session_space(
+                Some(&state),
+                SessionSpaceMutation::AttachAgentSession { attachment },
+            )
+            .unwrap()
+            .proposed;
+        }
+        state
+    }
+
+    #[test]
+    fn drag_out_seats_the_session_alone_in_a_space_of_its_own_in_the_same_project() {
+        // O-I manual §19.15: "Drag a chain out of the list onto an empty track and it works there alone, chain and all."
+        let from = rack("crew", &["ada", "cy"]);
+        let ada = ResourceRef::parse("agent-session/ada").unwrap();
+        let from = stage_session_space(
+            Some(&from),
+            SessionSpaceMutation::BenchAgentSession {
+                agent_session: ada.clone(),
+                benched: true,
+            },
+        )
+        .unwrap()
+        .proposed;
+        let into = SessionSpaceRef::parse("session-space/ada-alone").unwrap();
+        let intents =
+            drag_out_intents(&from, &ada, into.clone(), Some("ada alone".into())).unwrap();
+        let mut state: Option<SessionSpaceAuthoredState> = None;
+        for intent in intents {
+            state = Some(
+                stage_session_space(state.as_ref(), intent)
+                    .unwrap()
+                    .proposed,
+            );
+        }
+        let alone = state.unwrap();
+        assert_eq!(alone.id(), &into);
+        assert_eq!(alone.label.as_deref(), Some("ada alone"));
+        assert_eq!(
+            alone.agent_sessions.keys().collect::<Vec<_>>(),
+            vec![&ada],
+            "it works there alone"
+        );
+        assert_eq!(
+            alone.agent_sessions[&ada].purpose.as_deref(),
+            Some("ada's chain"),
+            "chain and all"
+        );
+        assert!(alone.agent_sessions[&ada]
+            .provenance
+            .iter()
+            .any(|p| p == "dragged out of session-space/crew"));
+        assert!(
+            alone.benched.contains(&ada),
+            "a benched chain stays benched"
+        );
+        assert_eq!(
+            alone.project_contexts, from.project_contexts,
+            "the same Project, on the same evidence"
+        );
+        assert_eq!(alone.definition.projects, from.definition.projects);
+    }
+
+    #[test]
+    fn drag_out_refuses_in_words_what_it_cannot_carry() {
+        let from = rack("crew", &["ada", "cy"]);
+        let into = || SessionSpaceRef::parse("session-space/out").unwrap();
+        let nobody = ResourceRef::parse("agent-session/nobody").unwrap();
+        let refused = drag_out_intents(&from, &nobody, into(), None).unwrap_err();
+        assert_eq!(refused.code(), "session_space.drag_out_unattached");
+        assert!(
+            refused
+                .to_string()
+                .contains("agent-session/nobody is not a session of session-space/crew"),
+            "{refused}"
+        );
+        let lone = rack("lone", &["ada"]);
+        let ada = ResourceRef::parse("agent-session/ada").unwrap();
+        let refused = drag_out_intents(&lone, &ada, into(), None).unwrap_err();
+        assert_eq!(refused.code(), "session_space.drag_out_alone");
+        let same = drag_out_intents(&from, &ada, from.id().clone(), None).unwrap_err();
+        assert_eq!(same.code(), "session_space.drag_out_same_space");
+        let mut bare = from.clone();
+        bare.project_contexts.clear();
+        let refused = drag_out_intents(&bare, &ada, into(), None).unwrap_err();
+        assert_eq!(
+            refused.code(),
+            "session_space.drag_out_membership_without_context"
+        );
     }
 
     #[test]
