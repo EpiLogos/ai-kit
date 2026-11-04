@@ -2902,6 +2902,43 @@ fn cmd_source(cwd: &std::path::Path, command: SourceCmd) -> Result<Reply> {
                 warnings,
             ))
         }
+        SourceSub::Refine(refine) => match refine.command {
+            SourceRefineSub::Propose(args) => {
+                let text = match args.why.strip_prefix('@') {
+                    Some(path) => std::fs::read_to_string(path).map_err(|error| {
+                        AikitError::new("refinement.why", format!("could not read {path}: {error}"))
+                    })?,
+                    None => args.why.clone(),
+                };
+                let why: Vec<skill_sources::RefinementReason> = serde_json::from_str(&text)
+                    .map_err(|error| {
+                        AikitError::new(
+                            "refinement.why",
+                            format!("--why is a JSON list of {{\"task_ref\",\"reason\"}}: {error}"),
+                        )
+                    })?;
+                let proposal =
+                    skill_sources::propose_revision(home, &args.member, &args.from, why)?;
+                Ok(source_reply(jval!(proposal), vec![]))
+            }
+            SourceRefineSub::List(_) => {
+                let proposals = skill_sources::refinements(home)?;
+                Ok(source_reply(jval!({ "proposals": proposals }), vec![]))
+            }
+            SourceRefineSub::Accept(args) => {
+                let accepted = skill_sources::accept_revision(home, &args.member)?;
+                // The member's next revision is a new catalogue, as a promotion is.
+                let mut warnings = Vec::new();
+                let user_scope = refresh_user_scope(home, &mut warnings);
+                let mut data = jval!(accepted);
+                data["user_scope"] = user_scope;
+                Ok(source_reply(data, warnings))
+            }
+            SourceRefineSub::Discard(args) => {
+                let discarded = skill_sources::discard_revision(home, &args.member)?;
+                Ok(source_reply(jval!(discarded), vec![]))
+            }
+        },
         SourceSub::Remove(args) => {
             let removed = skill_sources::remove(home, &args.id, args.force)?;
             Ok(source_reply(

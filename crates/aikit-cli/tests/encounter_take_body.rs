@@ -47,7 +47,15 @@ for line in sys.stdin:
     elif method == "session/new":
         native = "take-native-%d" % (len(sessions) + 1)
         sessions[native] = {"cwd": params.get("cwd"), "model": "test/a", "effort": "medium", "mode": "ask"}
-        note({"new": native, "cwd": params.get("cwd")})
+        # The skills the harness finds in its project tree at session start (pi reads `.pi/skills`).
+        found = {}
+        root = os.path.join(params.get("cwd") or "", ".pi", "skills")
+        if os.path.isdir(root):
+            for name in sorted(os.listdir(root)):
+                rules = os.path.join(root, name, "references", "rules.md")
+                if os.path.isfile(rules):
+                    found[name] = open(rules).read().strip()
+        note({"new": native, "cwd": params.get("cwd"), "skills": found})
         result(ident, {"sessionId": native, "configOptions": config(sessions[native]), "modes": modes(sessions[native])})
     elif method == "session/set_config_option":
         s = sessions[params["sessionId"]]
@@ -119,6 +127,13 @@ impl Drop for Rig {
 
 impl Rig {
     fn new() -> Rig {
+        Rig::launched_as(None)
+    }
+
+    /// The peer launched as the harness named `program` (a wrapper of that
+    /// name), so AIKit reads the provider's harness from its program as it
+    /// does for a real one: `pi` reads its skills from `.pi/skills`.
+    fn launched_as(program: Option<&str>) -> Rig {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().canonicalize().unwrap();
         let home = AikitHome::at(root.join("aikit"));
@@ -126,18 +141,45 @@ impl Rig {
         let script = root.join("peer.py");
         std::fs::write(&script, PEER).unwrap();
         let log = root.join("peer.log");
+        let argv = match program {
+            None => vec![
+                "python3".into(),
+                "-u".into(),
+                script.display().to_string(),
+                log.display().to_string(),
+            ],
+            Some(program) => {
+                let python = String::from_utf8(
+                    Command::new("sh")
+                        .args(["-c", "command -v python3"])
+                        .output()
+                        .unwrap()
+                        .stdout,
+                )
+                .unwrap();
+                let wrapper = root.join("bin").join(program);
+                std::fs::create_dir_all(wrapper.parent().unwrap()).unwrap();
+                std::fs::write(
+                    &wrapper,
+                    format!(
+                        "#!/bin/sh\nexec {} -u {} \"$@\"\n",
+                        python.trim(),
+                        script.display()
+                    ),
+                )
+                .unwrap();
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o755)).unwrap();
+                vec![wrapper.display().to_string(), log.display().to_string()]
+            }
+        };
         EncounterService::configure(
             &home,
             EncounterProvider {
                 protocol: Default::default(),
                 id: "take-peer".into(),
                 label: "Controlled protocol peer (not a model)".into(),
-                argv: vec![
-                    "python3".into(),
-                    "-u".into(),
-                    script.display().to_string(),
-                    log.display().to_string(),
-                ],
+                argv,
                 body_ref: None,
                 body_revision: None,
                 from_profile: None,
@@ -557,12 +599,14 @@ fn a_take_body_refuses_in_words_what_is_not_its_sessions_agent_to_run() {
     );
     body.exits();
 
+    // A set is carried into the World where its harness reads skills; the peer's
+    // harness (a bare python3) is none AIKit knows, so it carries no set.
     let mut body = rig.body(&own, &rig.socket);
     let skillset = json!({"variable": "skillset", "value": "careful"});
     refused(
         &mut body,
         preflight(&own, &world, "takes:own:3:trial:0", "test/a", skillset),
-        "a skillset has no owner operation on a fresh resident yet",
+        "names no harness whose skill tree AIKit knows",
     );
     body.exits();
 
@@ -596,4 +640,142 @@ fn a_take_body_refuses_in_words_what_is_not_its_sessions_agent_to_run() {
         .filter(|row| row.get("new").is_some())
         .count();
     assert_eq!(opened, 1);
+}
+
+/// A Skillset level (O-I manual §19.1: "a level is a set of skills, or that set
+/// with one proposed revision of a skill in it. The revision is in effect for
+/// that take only … each take's return shows which revision it worked under"):
+/// the body carries the set into the take's World where the harness reads
+/// skills, the proposed revision in place of the member's revision in use, and
+/// answers what it read back from the World; the proposal keeps the take.
+#[test]
+fn a_skillset_take_carries_its_set_into_its_world_with_the_proposed_revision_for_that_take_only() {
+    let rig = Rig::launched_as(Some("pi"));
+    let own = rig.own_session("own", true);
+    let skill = |dir: &Path, name: &str, marker: &str| {
+        std::fs::create_dir_all(dir.join("references")).unwrap();
+        std::fs::write(
+            dir.join("SKILL.md"),
+            format!("---\nname: {name}\ndescription: A member of the set a take carries.\n---\n\n{marker}\n"),
+        )
+        .unwrap();
+        std::fs::write(dir.join("references/rules.md"), format!("{marker}\n")).unwrap();
+    };
+    let source = rig.root().join("practice");
+    skill(&source.join("alpha"), "alpha", "alpha-one");
+    skill(&source.join("beta"), "beta", "beta-one");
+    aikit_cli::skill_sources::add_directory(&rig.home, "practice", &source, false).unwrap();
+    aikit_cli::skill_sources::sync(&rig.home, "practice").unwrap();
+    aikit_cli::skill_sources::promote(&rig.home, "practice", false, &[]).unwrap();
+    let alpha = aikit_core::CapsuleId::parse("skill/practice/alpha").unwrap();
+    let beta = aikit_core::CapsuleId::parse("skill/practice/beta").unwrap();
+    aikit_store::skillsets::create(&rig.home, "docs", &[alpha, beta], &[]).unwrap();
+    let draft = rig.root().join("drafts/alpha");
+    skill(&draft, "alpha", "alpha-two");
+    let proposal = aikit_cli::skill_sources::propose_revision(
+        &rig.home,
+        "skill/practice/alpha",
+        &draft,
+        vec![aikit_cli::skill_sources::RefinementReason {
+            task_ref: "task:plan".into(),
+            reason: "Not met: the plan cites the repository's own gates".into(),
+        }],
+    )
+    .unwrap();
+    let family = json!(["takes:own:5:trial:0", "takes:own:5:trial:1"]);
+    let take = |trace: &str, value: &str| {
+        let world = rig.world(trace.rsplit(':').next().unwrap());
+        let mut body = rig.body(&own, &rig.socket);
+        let mut command = preflight(
+            &own,
+            &world,
+            trace,
+            "test/a",
+            json!({"variable": "skillset", "value": value}),
+        );
+        command["configuration"]["takes"] = family.clone();
+        let reply = body.ask(command);
+        assert_eq!(reply["success"], true, "{reply}");
+        assert_eq!(body.ask(json!({"type": "finalize"}))["success"], true);
+        body.exits();
+        (world, reply["data"]["applied"].clone())
+    };
+
+    let (revised_world, revised) = take("takes:own:5:trial:0", "docs+skill/practice/alpha");
+    assert_eq!(revised["set"], "docs");
+    assert_eq!(
+        revised["root"], ".pi/skills",
+        "where pi reads its project's skills"
+    );
+    assert_eq!(revised["proposed"]["member"], "skill/practice/alpha");
+    assert_eq!(
+        revised["proposed"]["revision"],
+        json!(proposal.proposed.revision)
+    );
+    let members = revised["members"].as_array().unwrap();
+    assert_eq!(members.len(), 2, "{revised}");
+    let row = |id: &str| members.iter().find(|row| row["id"] == id).unwrap().clone();
+    assert_eq!(
+        row("skill/practice/alpha")["revision"],
+        json!(proposal.proposed.revision)
+    );
+    assert_eq!(row("skill/practice/alpha")["proposed"], true);
+    assert_eq!(row("skill/practice/beta")["proposed"], false);
+    assert_eq!(
+        std::fs::read_to_string(revised_world.join(".pi/skills/alpha/references/rules.md"))
+            .unwrap(),
+        "alpha-two\n",
+        "the proposed revision stands in this take's World"
+    );
+    let (in_use_world, in_use) = take("takes:own:5:trial:1", "docs");
+    assert_eq!(in_use["proposed"], Value::Null);
+    assert_eq!(
+        std::fs::read_to_string(in_use_world.join(".pi/skills/alpha/references/rules.md")).unwrap(),
+        "alpha-one\n",
+        "the take beside it carries the revision in use"
+    );
+    // The harness found them there at session start.
+    let opened: Vec<Value> = rig
+        .peer_log()
+        .into_iter()
+        .filter(|row| row.get("new").is_some())
+        .collect();
+    assert_eq!(opened[1]["skills"]["alpha"], "alpha-two");
+    assert_eq!(opened[2]["skills"]["alpha"], "alpha-one");
+    // Nothing in use changed, and the proposal keeps the take that ran under it, beside its family.
+    let listed = aikit_cli::skill_sources::refinements(&rig.home).unwrap();
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0].tests.len(), 1, "{:?}", listed[0].tests);
+    assert_eq!(listed[0].tests[0].trace, "takes:own:5:trial:0");
+    assert_eq!(
+        listed[0].tests[0].beside,
+        vec!["takes:own:5:trial:1".to_owned()]
+    );
+    assert_eq!(listed[0].in_use.revision, proposal.in_use.revision);
+
+    // A level names a set AIKit holds, and a member with a proposal standing.
+    let refused = |value: &str, words: &str| {
+        let world = rig.world("refused");
+        let mut body = rig.body(&own, &rig.socket);
+        let reply = body.ask(preflight(
+            &own,
+            &world,
+            "takes:own:6:trial:0",
+            "test/a",
+            json!({"variable": "skillset", "value": value}),
+        ));
+        assert_eq!(reply["success"], false, "{reply}");
+        let said = reply["data"]["error"].as_str().unwrap();
+        assert!(said.contains(words), "{said}");
+        body.exits();
+    };
+    refused("nowhere", "AIKit holds no set nowhere");
+    refused(
+        "docs+skill/practice/beta",
+        "no proposed revision of skill/practice/beta stands",
+    );
+    refused(
+        "docs+skill/other/gamma",
+        "skill/other/gamma is not a member of docs",
+    );
 }

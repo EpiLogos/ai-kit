@@ -1205,6 +1205,59 @@ impl EncounterService {
             model,
         }))
     }
+    /// Where the harness an encounter provider launches reads its project's
+    /// skills: its profile's slug and the managed skill tree's prefix (`pi`
+    /// reads `.pi/skills`). A provider made from a profile names it; any other
+    /// is read from the program it launches, as AIKit reads a harness from
+    /// its argv. A harness AIKit has no managed skill tree for answers in
+    /// words why a set cannot be carried to it.
+    pub(crate) fn provider_skill_root(
+        home: &AikitHome,
+        provider: &str,
+    ) -> std::result::Result<(String, String), String> {
+        let rows = Self::new(home.clone())
+            .and_then(|service| service.providers())
+            .map_err(|error| {
+                format!(
+                    "The encounter providers could not be read: {}",
+                    error.message()
+                )
+            })?;
+        let row = rows
+            .iter()
+            .find(|row| row.id == provider)
+            .ok_or_else(|| format!("AIKit keeps no encounter provider {provider}"))?;
+        let profile = match row.from_profile.as_deref() {
+            Some(slug) => aikit_adapters::profiles::for_slug(slug),
+            None => row
+                .argv
+                .first()
+                .and_then(|program| aikit_adapters::profiles::for_argv_program(program)),
+        };
+        let program = row.argv.first().map(String::as_str).unwrap_or("nothing");
+        let Some(profile) = profile else {
+            return Err(format!(
+                "The encounter provider {provider} launches {program}, which names no harness whose skill tree AIKit knows: a set is carried where its harness reads its project's skills, and AIKit has no profile for this one"
+            ));
+        };
+        match &profile.skills {
+            Some(skills)
+                if skills.posture == aikit_core::harness_profile::LayerPosture::Managed =>
+            {
+                match skills.prefix.as_deref().filter(|prefix| !prefix.is_empty()) {
+                    Some(prefix) => Ok((profile.slug.clone(), prefix.to_owned())),
+                    None => Err(format!(
+                        "{} names no harness whose skill tree AIKit knows: its profile manages skills but names no project prefix to carry a set into",
+                        profile.slug
+                    )),
+                }
+            }
+            _ => Err(format!(
+                "{} names no harness whose skill tree AIKit knows: AIKit does not manage its project's skills, so a set cannot be carried into a take's World for it",
+                profile.slug
+            )),
+        }
+    }
     pub(crate) fn providers(&self) -> Result<Vec<EncounterProvider>> {
         let root = self.home.state().join("encounter-providers");
         if !root.exists() {

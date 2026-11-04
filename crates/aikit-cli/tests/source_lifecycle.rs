@@ -838,3 +838,220 @@ fn rejected_git_diagnostics_are_source_relative_and_snapshot_identity_is_stable(
     }
     assert_eq!(data(&first)["skills"], 1);
 }
+
+/// A proposed revision of one member (O-I manual §19.7, Refining a skill; O-I
+/// #795 "Skillset in effect"): kept with the member's source as a snapshot of
+/// its own, beside the revision in use, until the person accepts it as the
+/// member's next revision — which Roll back takes back — or discards it.
+#[test]
+fn a_proposed_revision_of_one_member_waits_beside_the_one_in_use_until_accepted_or_discarded() {
+    let temp = tempfile::tempdir().unwrap();
+    let home = temp.path().join("aikit-home");
+    let source = temp.path().join("practice");
+    let cwd = temp.path().join("project");
+    fs::create_dir_all(&cwd).unwrap();
+    skill(&source.join("alpha"), "alpha", "alpha-one");
+    skill(&source.join("beta"), "beta", "beta-one");
+    aikit(
+        &home,
+        &cwd,
+        &[
+            "source",
+            "add-directory",
+            "practice",
+            source.to_str().unwrap(),
+        ],
+    );
+    aikit(&home, &cwd, &["source", "sync", "practice"]);
+    let promoted = aikit(&home, &cwd, &["source", "promote", "practice"]);
+    let in_use = data(&promoted)["active_snapshot"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let payload = |member: &str| {
+        let shown = aikit(&home, &cwd, &["source", "show", "practice"]);
+        PathBuf::from(data(&shown)["active_registry"].as_str().unwrap()).join(format!(
+            "capsules/skill/practice/{member}/payload/references/rules.md"
+        ))
+    };
+
+    let revised = temp.path().join("drafts/alpha");
+    skill(&revised, "alpha", "alpha-two");
+    let why = r#"[{"task_ref":"task:plan","reason":"Not met: the plan cites the repository's own gates"}]"#;
+    let proposed = aikit(
+        &home,
+        &cwd,
+        &[
+            "source",
+            "refine",
+            "propose",
+            "skill/practice/alpha",
+            "--from",
+            revised.to_str().unwrap(),
+            "--why",
+            why,
+        ],
+    );
+    let proposal = data(&proposed);
+    assert_eq!(proposal["member"], "skill/practice/alpha");
+    assert_eq!(proposal["source"], "practice");
+    assert_eq!(
+        proposal["owner"], "aikit",
+        "a directory source's revisions are AIKit's to keep"
+    );
+    assert_eq!(proposal["in_use"]["snapshot"], in_use.as_str());
+    assert_ne!(
+        proposal["proposed"]["revision"],
+        proposal["in_use"]["revision"]
+    );
+    assert_eq!(proposal["why"][0]["task_ref"], "task:plan");
+    assert_eq!(proposal["stale"], false);
+    assert_eq!(
+        fs::read_to_string(payload("alpha")).unwrap(),
+        "rules:alpha-one\n",
+        "nothing in use changes while a revision is proposed"
+    );
+    // The proposed revision is retained and readable by its revision, as any kept revision is.
+    let revision = proposal["proposed"]["revision"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let read = aikit(
+        &home,
+        &cwd,
+        &[
+            "praxis",
+            "read",
+            "skill/practice/alpha",
+            "--revision",
+            &revision,
+        ],
+    );
+    assert!(data(&read)["files"].to_string().contains("rules:alpha-two"));
+    let listed = aikit(&home, &cwd, &["source", "refine", "list"]);
+    assert_eq!(data(&listed)["proposals"].as_array().unwrap().len(), 1);
+
+    // One revision to one member waits at a time; it is a member's, and it changes something.
+    let refused = |args: &[&str]| {
+        aikit_failure(&home, &cwd, args)["error"]["code"]
+            .as_str()
+            .unwrap()
+            .to_owned()
+    };
+    let again = |member: &str, from: &Path| {
+        refused(&[
+            "source",
+            "refine",
+            "propose",
+            member,
+            "--from",
+            from.to_str().unwrap(),
+            "--why",
+            why,
+        ])
+    };
+    assert_eq!(
+        again("skill/practice/alpha", &revised),
+        "refinement.already_proposed"
+    );
+    assert_eq!(
+        again("skill/practice/gamma", &revised),
+        "refinement.not_a_member"
+    );
+    let same = temp.path().join("drafts/beta");
+    skill(&same, "beta", "beta-one");
+    assert_eq!(again("skill/practice/beta", &same), "refinement.unchanged");
+    let renamed = temp.path().join("drafts/renamed");
+    skill(&renamed, "delta", "beta-two");
+    assert_eq!(again("skill/practice/beta", &renamed), "refinement.renamed");
+
+    // Accept keeps it as the member's next revision; the other members stand as they were.
+    let accepted = aikit(
+        &home,
+        &cwd,
+        &["source", "refine", "accept", "skill/practice/alpha"],
+    );
+    assert_eq!(data(&accepted)["member"], "skill/practice/alpha");
+    assert_eq!(data(&accepted)["rollback_to"], in_use.as_str());
+    assert_eq!(
+        fs::read_to_string(payload("alpha")).unwrap(),
+        "rules:alpha-two\n"
+    );
+    assert_eq!(
+        fs::read_to_string(payload("beta")).unwrap(),
+        "rules:beta-one\n"
+    );
+    let listed = aikit(&home, &cwd, &["source", "refine", "list"]);
+    assert!(data(&listed)["proposals"].as_array().unwrap().is_empty());
+    // History takes it back.
+    aikit(&home, &cwd, &["source", "rollback", "practice"]);
+    assert_eq!(
+        fs::read_to_string(payload("alpha")).unwrap(),
+        "rules:alpha-one\n"
+    );
+
+    // Discard drops it; the revision in use stays.
+    let beta = temp.path().join("drafts/beta-two");
+    skill(&beta, "beta", "beta-two");
+    let kept = aikit(
+        &home,
+        &cwd,
+        &[
+            "source",
+            "refine",
+            "propose",
+            "skill/practice/beta",
+            "--from",
+            beta.to_str().unwrap(),
+            "--why",
+            why,
+        ],
+    );
+    let dropped_snapshot = data(&kept)["proposed"]["snapshot"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let discarded = aikit(
+        &home,
+        &cwd,
+        &["source", "refine", "discard", "skill/practice/beta"],
+    );
+    assert_eq!(data(&discarded)["discarded"], "skill/practice/beta");
+    assert_eq!(
+        fs::read_to_string(payload("beta")).unwrap(),
+        "rules:beta-one\n"
+    );
+    assert!(!home
+        .join("sources/practice/snapshots")
+        .join(&dropped_snapshot)
+        .exists());
+    assert_eq!(
+        refused(&["source", "refine", "accept", "skill/practice/beta"]),
+        "refinement.none"
+    );
+
+    // A proposal drafted on a revision that is no longer in use is stale, and is not accepted.
+    aikit(
+        &home,
+        &cwd,
+        &[
+            "source",
+            "refine",
+            "propose",
+            "skill/practice/alpha",
+            "--from",
+            revised.to_str().unwrap(),
+            "--why",
+            why,
+        ],
+    );
+    skill(&source.join("beta"), "beta", "beta-three");
+    aikit(&home, &cwd, &["source", "sync", "practice"]);
+    aikit(&home, &cwd, &["source", "promote", "practice"]);
+    let listed = aikit(&home, &cwd, &["source", "refine", "list"]);
+    assert_eq!(data(&listed)["proposals"][0]["stale"], true);
+    assert_eq!(
+        refused(&["source", "refine", "accept", "skill/practice/alpha"]),
+        "refinement.stale"
+    );
+}
