@@ -108,6 +108,23 @@
 //! it cannot make a harness ask what its own Scope already lets through.
 //! The Agent's Autonomy, which this executor once placed on the resident's
 //! permission modes, is retired (`encounter_task_settings.rs`).
+//!
+//! Asks (O-I manual §19.12, Scope's Wait and On no answer; §19.20, the
+//! decision helper) are the session's, not its task's, so every resident
+//! session's pending requests are settled each sweep (`settle_asks`), task or
+//! none. Where the session's SessionSpace names a decision helper, each
+//! request goes to it first, once: the elected decision provider (`aikit
+//! decide`) picks one of the allow-once options the harness offers, or none,
+//! and the engine checks the pick before it is sent (a wider allow stays Tool
+//! calls' and yours, and Deny is always yours). What the helper does not
+//! answer waits for you, as before, and counts its Wait from when it was first
+//! seen pending: at the Wait, On no answer Deny sends the harness's own
+//! deny, and Hold leaves the request standing, marked past its Wait. Both are
+//! the person's own prior choice. A harness with a timeout of its own may
+//! decide first: Hermes denies an unanswered request after its own
+//! `approvals.timeout` (300 s unless its config sets more), which AIKit
+//! neither sets per session nor reads, so for Hermes the person's Wait holds
+//! only where that timeout is set at or beyond it.
 use crate::encounter_service::{EncounterRequest, EncounterService};
 use aikit_core::{AikitError, ResourceRef, Result};
 use aikit_store::{AikitHome, SessionSpaceApplicationStore};
@@ -282,6 +299,11 @@ fn modulation_step_at(points: &[Value], seconds: f64) -> i64 {
 /// agent's tool calls wait for you. Inherit takes the session's own, its
 /// Scope's.
 pub(crate) const TOOL_CALLS: &[&str] = &["inherit", "ask", "session", "always"];
+/// Scope's Wait (O-I manual §19.12): 15 min to 24 h, 4 h unless set; and On
+/// no answer, Hold unless set. Kept in the session's settings, played here.
+pub(crate) const WAIT_SECONDS: std::ops::RangeInclusive<u64> = 900..=86_400;
+pub(crate) const WAIT_DEFAULT: u64 = 4 * 3600;
+pub(crate) const NO_ANSWERS: &[&str] = &["hold", "deny"];
 /// What Autonomy's words became (§19.1 Envelopes, §19.12 Asks): the Agent's
 /// Autonomy is retired, and Scope's Tool calls carries what it set.
 pub(crate) const AUTONOMY_RETIRED: &str = "Autonomy is retired: Scope's Tool calls (tool_calls: inherit, ask, session, always) took its place, the answer to the harness's request to use a tool";
@@ -697,7 +719,432 @@ pub fn launch_gate(home: &AikitHome, session: &ResourceRef) -> Result<()> {
     if let Some(reason) = bench_refusal(home, session)? {
         return Err(error(reason));
     }
+    if let Some(space) = SessionSpaceApplicationStore::new(home.clone())
+        .list()?
+        .into_iter()
+        .find(|space| {
+            space
+                .decision_helper
+                .as_ref()
+                .is_some_and(|helper| &helper.agent_session == session)
+        })
+    {
+        return Err(error(format!(
+            "{session} is the decision helper of {}: it answers the asks of the space's agents and is given no work of its own",
+            space.id()
+        )));
+    }
     solo_gate(home, session)
+}
+
+// ------------------------------------------------------------------ Asks: the helper, then the Wait
+
+/// The decision helper that answers `session`'s asks first: the helper its
+/// SessionSpace names (O-I manual §19.20, "one helper answers every agent of
+/// the rack"), unless `session` is that helper. `None` where its space names
+/// none, so every ask goes to the person, as before.
+pub(crate) fn decision_helper_of(
+    home: &AikitHome,
+    session: &ResourceRef,
+) -> Result<Option<ResourceRef>> {
+    let spaces = SessionSpaceApplicationStore::new(home.clone()).list()?;
+    Ok(spaces
+        .iter()
+        .find(|space| space.agent_sessions.contains_key(session))
+        .and_then(|space| space.decision_helper.as_ref())
+        .map(|helper| helper.agent_session.clone())
+        .filter(|helper| helper != session))
+}
+
+const ASKS_SCHEMA: &str = "aikit.encounter-asks/v1";
+
+/// What the helper picked for one request: an option of the harness's, or
+/// none (`Ok(None)`), or why it gave no answer (`Err`).
+pub(crate) type HelperPick = std::result::Result<Option<String>, String>;
+
+/// The executor's record of one session's pending requests (Scope's Asks,
+/// O-I manual §19.12): when each was first seen pending, which are past
+/// their Wait and held, and what the decision helper did with each request
+/// put to it. Only what the executor saw and did; never person-authored.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub(crate) struct AsksState {
+    schema: String,
+    agent_session: ResourceRef,
+    #[serde(default)]
+    pub(crate) seen: std::collections::BTreeMap<String, u128>,
+    #[serde(default)]
+    pub(crate) held: std::collections::BTreeMap<String, u128>,
+    #[serde(default)]
+    pub(crate) helper: std::collections::BTreeMap<String, Value>,
+    /// The Wait's last act: the request it denied or held, or why it held one.
+    #[serde(default)]
+    pub(crate) last: Option<Value>,
+}
+
+impl AsksState {
+    pub(crate) fn new(session: &ResourceRef) -> Self {
+        Self {
+            schema: ASKS_SCHEMA.into(),
+            agent_session: session.clone(),
+            seen: Default::default(),
+            held: Default::default(),
+            helper: Default::default(),
+            last: None,
+        }
+    }
+}
+
+/// One act the asks sweep makes on the session's encounter.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum AsksAct {
+    /// The decision helper's checked pick, sent as the harness's own option.
+    Helper {
+        request_id: String,
+        option_id: String,
+    },
+    /// On no answer Deny, at the Wait: the harness's own deny.
+    Deny {
+        request_id: String,
+        option_id: String,
+    },
+    /// On no answer Hold, at the Wait: the request stands, marked past it.
+    Held { request_id: String },
+}
+
+/// The harness's own deny for a request: its reject-once option, else any
+/// reject it offers. Never an allow.
+fn no_answer_deny(choices: &[Value]) -> Option<String> {
+    let kind =
+        |choice: &&Value, want: &str| choice["kind"].as_str().is_some_and(|kind| kind == want);
+    choices
+        .iter()
+        .find(|choice| kind(choice, "reject_once"))
+        .or_else(|| {
+            choices.iter().find(|choice| {
+                choice["kind"]
+                    .as_str()
+                    .is_some_and(|kind| kind.starts_with("reject"))
+            })
+        })
+        .and_then(|choice| choice["option_id"].as_str())
+        .map(str::to_owned)
+}
+
+/// The engine's check of the helper's pick before anything uses it (O-I
+/// manual §19.20): the helper settles one request at a time, so its pick must
+/// be an allow-once the harness offers for it. A wider allow stays Tool
+/// calls' and yours, and a Deny you always give yourself.
+fn helper_pick_checked(choices: &[Value], pick: &str) -> std::result::Result<String, String> {
+    choices
+        .iter()
+        .find(|choice| choice["option_id"].as_str() == Some(pick))
+        .filter(|choice| choice["kind"].as_str() == Some("allow_once"))
+        .map(|_| pick.to_owned())
+        .ok_or_else(|| {
+            format!(
+                "The decision helper picked {pick}, and the engine refused it: the helper allows once, and a wider allow or a deny is yours; the request waits for you"
+            )
+        })
+}
+
+/// One sweep of a session's pending requests: each not yet put to the
+/// decision helper goes to it first, once; what it does not answer counts
+/// its Wait from when it was first seen, and at the Wait On no answer plays:
+/// Deny sends the harness's own deny, Hold marks it past its Wait and leaves
+/// it standing for you. Both are the person's own prior choice (§19.12), so
+/// the executor deciding nothing of its own. Requests no longer pending are
+/// forgotten.
+pub(crate) fn asks_step(
+    state: &mut AsksState,
+    pending: &[Value],
+    wait_seconds: u64,
+    no_answer: &str,
+    now_ms: u128,
+    helper: Option<&dyn Fn(&Value) -> HelperPick>,
+) -> Vec<AsksAct> {
+    let ids: Vec<String> = pending
+        .iter()
+        .filter_map(|request| request["native_request_id"].as_str().map(str::to_owned))
+        .collect();
+    state.seen.retain(|id, _| ids.contains(id));
+    state.held.retain(|id, _| ids.contains(id));
+    state.helper.retain(|id, _| ids.contains(id));
+    let mut acts = Vec::new();
+    let empty = Vec::new();
+    for request in pending {
+        let Some(id) = request["native_request_id"].as_str() else {
+            continue;
+        };
+        let choices = request["choices"].as_array().unwrap_or(&empty);
+        if let (Some(ask), false) = (helper, state.helper.contains_key(id)) {
+            let outcome = match ask(request) {
+                Ok(Some(pick)) => match helper_pick_checked(choices, &pick) {
+                    Ok(option_id) => {
+                        acts.push(AsksAct::Helper {
+                            request_id: id.to_owned(),
+                            option_id: option_id.clone(),
+                        });
+                        serde_json::json!({"answered": option_id})
+                    }
+                    Err(refused) => serde_json::json!({"picked": pick, "refused": refused}),
+                },
+                Ok(None) => {
+                    serde_json::json!({"passed": "The decision helper picked none: the request waits for you"})
+                }
+                Err(reason) => {
+                    serde_json::json!({"passed": format!("The decision helper gave no answer: {reason}; the request waits for you")})
+                }
+            };
+            let answered = outcome.get("answered").is_some();
+            state.helper.insert(id.to_owned(), outcome);
+            if answered {
+                continue;
+            }
+        }
+        let first = *state.seen.entry(id.to_owned()).or_insert(now_ms);
+        if now_ms.saturating_sub(first) < u128::from(wait_seconds) * 1000
+            || state.held.contains_key(id)
+        {
+            continue;
+        }
+        match (no_answer, no_answer_deny(choices)) {
+            ("deny", Some(option_id)) => {
+                state.last = Some(
+                    serde_json::json!({"denied": id, "option_id": option_id, "wait": wait_seconds}),
+                );
+                acts.push(AsksAct::Deny {
+                    request_id: id.to_owned(),
+                    option_id,
+                });
+            }
+            (word, _) => {
+                let reason = if word == "deny" {
+                    "On no answer is Deny, and the harness offers no deny for this request, so it is held past its Wait for you"
+                } else {
+                    "On no answer is Hold: the request stands past its Wait for you"
+                };
+                state.held.insert(id.to_owned(), now_ms);
+                state.last =
+                    Some(serde_json::json!({"held": id, "wait": wait_seconds, "reason": reason}));
+                acts.push(AsksAct::Held {
+                    request_id: id.to_owned(),
+                });
+            }
+        }
+    }
+    acts
+}
+
+fn asks_path(home: &AikitHome, session: &ResourceRef) -> PathBuf {
+    home.state()
+        .join("encounter-tasks")
+        .join("executor")
+        .join(format!(
+            "asks-{}.json",
+            blake3::hash(session.as_str().as_bytes()).to_hex()
+        ))
+}
+
+fn read_asks(home: &AikitHome, session: &ResourceRef) -> Option<AsksState> {
+    let path = asks_path(home, session);
+    let bytes = fs::read(&path)
+        .ok()
+        .filter(|bytes| bytes.len() <= 1024 * 1024)?;
+    serde_json::from_slice::<AsksState>(&bytes)
+        .ok()
+        .filter(|state| state.schema == ASKS_SCHEMA && &state.agent_session == session)
+}
+
+fn publish_asks(home: &AikitHome, session: &ResourceRef, state: &AsksState) -> Result<()> {
+    let target = asks_path(home, session);
+    let parent = target.parent().expect("asks state parent");
+    fs::create_dir_all(parent).map_err(error)?;
+    let mut staged = tempfile::NamedTempFile::new_in(parent).map_err(error)?;
+    staged
+        .write_all(&serde_json::to_vec_pretty(state).map_err(error)?)
+        .map_err(error)?;
+    staged.persist(&target).map_err(error)?;
+    Ok(())
+}
+
+/// What the asks sweep did for a session, as its settings reading discloses
+/// it: the requests held past their Wait (with when), what the decision
+/// helper did with each request put to it, and the Wait's last act.
+pub(crate) fn asks_reading(home: &AikitHome, session: &ResourceRef) -> Value {
+    let state = read_asks(home, session).unwrap_or_else(|| AsksState::new(session));
+    serde_json::json!({
+        "held": state.held.iter().map(|(id, at)| serde_json::json!({"request": id, "past_wait_at_unix_ms": at})).collect::<Vec<_>>(),
+        "helper": state.helper,
+        "last": state.last,
+    })
+}
+
+/// The decision provider AIKit elected (`aikit decide`), asked on the
+/// helper's behalf: one Choice among the allow-once options the request
+/// offers and "none". The ask is kept against the session that asked, as
+/// `decide invoke` keeps it, so its thread's Ask row shows it.
+fn elected_helper_pick(
+    home: &AikitHome,
+    asker: &ResourceRef,
+    helper: &ResourceRef,
+    request: &Value,
+) -> HelperPick {
+    use aikit_core::jev::{JevRequest, Question};
+    let file = crate::local_services_election::resolve_file(
+        home,
+        crate::local_services_election::Election::Decision,
+        None,
+    )
+    .map_err(|e| e.message().to_owned())?;
+    let config: crate::decide::DecisionProviderConfig = serde_json::from_slice(
+        &fs::read(&file)
+            .map_err(|e| format!("the decision provider election is unreadable: {e}"))?,
+    )
+    .map_err(|e| format!("the decision provider election is unreadable: {e}"))?;
+    let model = match config.mode {
+        crate::decide::DecisionProviderMode::None => {
+            return Err("no decision provider is elected".into())
+        }
+        crate::decide::DecisionProviderMode::Hosted => config
+            .jev_limits
+            .as_ref()
+            .map(|l| l.tariff.model_version.clone())
+            .unwrap_or_default(),
+        _ => config
+            .limits()
+            .map_err(|e| e.message().to_owned())?
+            .model
+            .clone(),
+    };
+    let empty = Vec::new();
+    let mut criteria = std::collections::BTreeMap::new();
+    for choice in request["choices"].as_array().unwrap_or(&empty) {
+        if let (Some(option), Some("allow_once")) =
+            (choice["option_id"].as_str(), choice["kind"].as_str())
+        {
+            criteria.insert(
+                option.to_owned(),
+                serde_json::json!(choice["label"].as_str().unwrap_or(option)),
+            );
+        }
+    }
+    if criteria.is_empty() {
+        return Err("the request offers no allow-once for the helper to pick".into());
+    }
+    criteria.insert(
+        "none".into(),
+        serde_json::json!("Leave the request for the person"),
+    );
+    let mut questions = std::collections::BTreeMap::new();
+    questions.insert(
+        "tool-call".to_string(),
+        Question::Choice {
+            instructions: serde_json::json!({"question": "An agent asks to use a tool. Allow it once, or leave it for the person.",
+                "asked_by": asker.as_str(), "answered_by": helper.as_str()}),
+            criteria,
+        },
+    );
+    let ask = JevRequest {
+        model,
+        state: serde_json::json!({"request": request}),
+        questions,
+    };
+    let invocation_ref =
+        crate::jev_now::minted_invocation_ref(&ask).map_err(|e| e.message().to_owned())?;
+    let mut no_revalidate = || -> Result<()> { Ok(()) };
+    let receipt = crate::decide::invoke_selected(
+        &config,
+        &ask,
+        invocation_ref.clone(),
+        None,
+        false,
+        &mut no_revalidate,
+    );
+    let session_id = aikit_core::SessionId::of_agent_session(asker);
+    let _ = crate::decide::keep_ask(
+        home,
+        &session_id,
+        Some(asker),
+        &ask,
+        &invocation_ref,
+        receipt.as_ref(),
+    );
+    let receipt = receipt.map_err(|e| e.message().to_owned())?;
+    let answer = receipt.answer().ok_or_else(|| {
+        receipt
+            .failure_message()
+            .unwrap_or_else(|| "the provider returned no answer".into())
+    })?;
+    match answer.answers.get("tool-call") {
+        Some(aikit_core::jev::Answer::Choice { choice, .. }) if choice != "none" => {
+            Ok(Some(choice.clone()))
+        }
+        Some(aikit_core::jev::Answer::Choice { .. }) => Ok(None),
+        _ => Err("the provider answered another kind of question".into()),
+    }
+}
+
+/// Settle one session's asks: the helper first, then the Wait, each act
+/// through the encounter's own `Permission`, as a person's answer is.
+fn settle_asks(service: &EncounterService, home: &AikitHome, session: &ResourceRef) -> Result<()> {
+    let Ok(identity) = service.apply(EncounterRequest::Status {
+        agent_session: session.clone(),
+    }) else {
+        return Ok(());
+    };
+    let empty = Vec::new();
+    let pending = identity["permissions"].as_array().unwrap_or(&empty);
+    let mut state = read_asks(home, session).unwrap_or_else(|| AsksState::new(session));
+    if pending.is_empty() && state.seen.is_empty() && state.helper.is_empty() {
+        return Ok(());
+    }
+    let reading = EncounterService::read_session_settings(home, session)?;
+    let wait = reading["track"]["wait"].as_u64().unwrap_or(WAIT_DEFAULT);
+    let no_answer = reading["track"]["no_answer"]
+        .as_str()
+        .unwrap_or("hold")
+        .to_owned();
+    let helper = decision_helper_of(home, session)?;
+    let ask = |request: &Value| -> HelperPick {
+        match &helper {
+            Some(helper) => elected_helper_pick(home, session, helper, request),
+            None => Ok(None),
+        }
+    };
+    let acts = asks_step(
+        &mut state,
+        pending,
+        wait,
+        &no_answer,
+        now_unix_ms(),
+        helper
+            .as_ref()
+            .map(|_| &ask as &dyn Fn(&Value) -> HelperPick),
+    );
+    for act in acts {
+        let (request_id, option_id) = match act {
+            AsksAct::Helper {
+                request_id,
+                option_id,
+            }
+            | AsksAct::Deny {
+                request_id,
+                option_id,
+            } => (request_id, option_id),
+            AsksAct::Held { .. } => continue,
+        };
+        if let Err(refused) = service.apply(EncounterRequest::Permission {
+            agent_session: session.clone(),
+            request_id: request_id.clone(),
+            decision: aikit_adapters::interactive_connection::PermissionDecision::Selected {
+                option_id,
+            },
+        }) {
+            state.last = Some(serde_json::json!({"waiting": request_id,
+                "reason": format!("The encounter refused the answer: {}", refused.message())}));
+        }
+    }
+    publish_asks(home, session, &state)
 }
 
 // --------------------------------------------------------------------------- the worker
@@ -737,6 +1184,8 @@ fn sweep(service: &EncounterService, home: &AikitHome, verdicts: &dyn LoopVerdic
     for session in sessions {
         // Idempotent and self-contained: a failure here (not resident, no
         // task bound, a refused native call) is simply retried next sweep.
+        // Asks are the session's, not its task's: a chat with no task waits too.
+        let _ = settle_asks(service, home, &session);
         let _ = settle_session(service, home, &session, verdicts);
     }
 }
@@ -1202,6 +1651,246 @@ mod tests {
             {"option_id": "always-session-deny", "label": "Deny for session", "kind": "reject_always"},
         ]);
         assert!(tool_calls_answer(denies.as_array().unwrap(), "session").is_err());
+    }
+
+    /// A pending request as the encounter's Status names it (Hermes' own answers, acp_adapter/permissions.py).
+    fn pending(id: &str) -> Value {
+        json!({"native_request_id": id, "choices": [
+            {"option_id": "allow_once", "label": "Allow once", "kind": "allow_once"},
+            {"option_id": "allow_always", "label": "Allow always", "kind": "allow_always"},
+            {"option_id": "deny", "label": "Deny", "kind": "reject_once"},
+        ]})
+    }
+
+    fn asks(session: &ResourceRef) -> AsksState {
+        AsksState::new(session)
+    }
+
+    const NO_HELPER: Option<&dyn Fn(&Value) -> HelperPick> = None;
+
+    #[test]
+    fn at_its_wait_a_request_nobody_answered_is_denied_or_held_as_the_person_chose() {
+        // O-I manual §19.12 Asks: Wait "How long a request waits before it counts as unanswered"; On no answer "Hold · Deny".
+        let who = session("wait");
+        let start = 1_000_000u128;
+        let wait = 900u64;
+        let mut state = asks(&who);
+        assert!(asks_step(&mut state, &[pending("r1")], wait, "deny", start, NO_HELPER).is_empty());
+        let before = start + u128::from(wait) * 1000 - 1;
+        assert!(
+            asks_step(
+                &mut state,
+                &[pending("r1")],
+                wait,
+                "deny",
+                before,
+                NO_HELPER
+            )
+            .is_empty(),
+            "it waits its whole Wait"
+        );
+        let at = start + u128::from(wait) * 1000;
+        assert_eq!(
+            asks_step(&mut state, &[pending("r1")], wait, "deny", at, NO_HELPER),
+            vec![AsksAct::Deny {
+                request_id: "r1".into(),
+                option_id: "deny".into()
+            }],
+            "Deny sends the harness's own deny, never an allow"
+        );
+        let mut held = asks(&who);
+        asks_step(&mut held, &[pending("r2")], wait, "hold", start, NO_HELPER);
+        assert_eq!(
+            asks_step(&mut held, &[pending("r2")], wait, "hold", at, NO_HELPER),
+            vec![AsksAct::Held {
+                request_id: "r2".into()
+            }],
+            "Hold leaves the request standing, marked past its Wait"
+        );
+        assert!(held.held.contains_key("r2"));
+        assert!(
+            asks_step(
+                &mut held,
+                &[pending("r2")],
+                wait,
+                "hold",
+                at + 5000,
+                NO_HELPER
+            )
+            .is_empty(),
+            "marked once"
+        );
+        // A request answered elsewhere is forgotten.
+        asks_step(&mut held, &[], wait, "hold", at + 6000, NO_HELPER);
+        assert!(held.seen.is_empty() && held.held.is_empty());
+        // A harness that offers no deny: the request is held, and says why.
+        let mut bare = asks(&who);
+        let allow_only = json!({"native_request_id": "r3", "choices": [{"option_id": "ok", "label": "Allow", "kind": "allow_once"}]});
+        asks_step(
+            &mut bare,
+            std::slice::from_ref(&allow_only),
+            wait,
+            "deny",
+            start,
+            NO_HELPER,
+        );
+        assert_eq!(
+            asks_step(&mut bare, &[allow_only], wait, "deny", at, NO_HELPER),
+            vec![AsksAct::Held {
+                request_id: "r3".into()
+            }]
+        );
+        assert!(bare.last.as_ref().unwrap()["reason"]
+            .as_str()
+            .unwrap()
+            .contains("offers no deny"));
+    }
+
+    #[test]
+    fn the_decision_helper_is_asked_first_and_what_it_does_not_answer_waits_for_you() {
+        // O-I manual §19.20: "the helper picks among the labels the owner allows or picks none, and the engine checks the
+        // pick before anything uses it". The helper settles one request at a time: it may allow once; widening and Deny are yours.
+        let who = session("helped");
+        let wait = 900u64;
+        let asked = std::cell::Cell::new(0);
+        let once = |_: &Value| {
+            asked.set(asked.get() + 1);
+            Ok(Some("allow_once".to_string()))
+        };
+        let mut state = asks(&who);
+        assert_eq!(
+            asks_step(
+                &mut state,
+                &[pending("r1")],
+                wait,
+                "hold",
+                0,
+                Some(&once as &dyn Fn(&Value) -> HelperPick)
+            ),
+            vec![AsksAct::Helper {
+                request_id: "r1".into(),
+                option_id: "allow_once".into()
+            }]
+        );
+        let wider = |_: &Value| {
+            asked.set(asked.get() + 1);
+            Ok(Some("allow_always".to_string()))
+        };
+        let mut state = asks(&who);
+        assert!(asks_step(
+            &mut state,
+            &[pending("r2")],
+            wait,
+            "hold",
+            0,
+            Some(&wider as &dyn Fn(&Value) -> HelperPick)
+        )
+        .is_empty());
+        assert!(
+            state.helper["r2"]["refused"]
+                .as_str()
+                .unwrap()
+                .contains("allows once"),
+            "{:?}",
+            state.helper
+        );
+        let deny = |_: &Value| Ok(Some("deny".to_string()));
+        let mut state = asks(&who);
+        assert!(
+            asks_step(
+                &mut state,
+                &[pending("r3")],
+                wait,
+                "hold",
+                0,
+                Some(&deny as &dyn Fn(&Value) -> HelperPick)
+            )
+            .is_empty(),
+            "the helper never gives a deny"
+        );
+        let abstains = |_: &Value| {
+            asked.set(asked.get() + 1);
+            Ok(None)
+        };
+        let mut state = asks(&who);
+        let before = asked.get();
+        assert!(asks_step(
+            &mut state,
+            &[pending("r4")],
+            wait,
+            "hold",
+            0,
+            Some(&abstains as &dyn Fn(&Value) -> HelperPick)
+        )
+        .is_empty());
+        assert!(asks_step(
+            &mut state,
+            &[pending("r4")],
+            wait,
+            "hold",
+            1000,
+            Some(&abstains as &dyn Fn(&Value) -> HelperPick)
+        )
+        .is_empty());
+        assert_eq!(
+            asked.get(),
+            before + 1,
+            "each request is put to the helper once"
+        );
+        assert_eq!(
+            state.helper["r4"]["passed"],
+            "The decision helper picked none: the request waits for you"
+        );
+        // What it did not answer still counts its Wait.
+        assert_eq!(
+            asks_step(
+                &mut state,
+                &[pending("r4")],
+                wait,
+                "deny",
+                900_000,
+                Some(&abstains as &dyn Fn(&Value) -> HelperPick)
+            ),
+            vec![AsksAct::Deny {
+                request_id: "r4".into(),
+                option_id: "deny".into()
+            }]
+        );
+    }
+
+    #[test]
+    fn the_decision_helper_of_a_space_is_given_no_work_of_its_own() {
+        use aikit_core::session_space::SessionSpaceRef;
+        use aikit_core::session_space_application::{
+            SessionSpaceDecisionHelperBinding, SessionSpaceMutation,
+        };
+        let (_dir, home, who) = attached("settle");
+        let owner = SessionSpaceApplicationStore::new(home.clone());
+        let space = SessionSpaceRef::parse("session-space/settle").unwrap();
+        let staged = owner
+            .stage(
+                Some(&space),
+                SessionSpaceMutation::BindDecisionHelper {
+                    binding: SessionSpaceDecisionHelperBinding {
+                        agent_session: who.clone(),
+                        provenance: vec![],
+                    },
+                },
+            )
+            .unwrap();
+        owner.apply(&staged).unwrap();
+        let refused = launch_gate(&home, &who).expect_err("a helper is given no work");
+        assert!(
+            refused
+                .to_string()
+                .contains("agent-session/settle is the decision helper of session-space/settle"),
+            "{refused}"
+        );
+        assert_eq!(
+            decision_helper_of(&home, &who).unwrap(),
+            None,
+            "a helper asks no helper"
+        );
     }
 
     #[test]

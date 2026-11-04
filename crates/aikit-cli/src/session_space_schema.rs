@@ -323,6 +323,31 @@ fn operations() -> Vec<StageSchemaOperation> {
             ],
         },
         StageSchemaOperation {
+            operation: "bind-decision-helper",
+            intent: json!({
+                "operation": "bind-decision-helper",
+                "binding": {
+                    "agent_session": "agent-session/<id>",
+                    "provenance": []
+                }
+            }),
+            notes: vec![
+                (
+                    "binding.agent_session",
+                    "required; a session this space holds (attach it first): it answers the asks of every agent of the space first, and what it does not answer goes on to the person",
+                ),
+                ("binding.provenance", "optional; defaults to empty"),
+            ],
+        },
+        StageSchemaOperation {
+            operation: "unbind-decision-helper",
+            intent: json!({"operation": "unbind-decision-helper"}),
+            notes: vec![(
+                "operation",
+                "the space names no decision helper afterwards; its session stays in the space",
+            )],
+        },
+        StageSchemaOperation {
             operation: "unbind-agent-set",
             intent: json!({"operation": "unbind-agent-set"}),
             notes: vec![("operation", "the space names no agent set afterwards")],
