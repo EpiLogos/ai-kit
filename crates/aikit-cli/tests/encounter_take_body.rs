@@ -683,6 +683,18 @@ fn a_skillset_take_carries_its_set_into_its_world_with_the_proposed_revision_for
     )
     .unwrap();
     let family = json!(["takes:own:5:trial:0", "takes:own:5:trial:1"]);
+    // What Actuation read each take to have answered to the task's Success
+    // conditions, handed to the body when it finalizes (research execution.rs).
+    let answered = |trace: &str| {
+        if trace.ends_with(":0") {
+            json!([{"condition": "The plan cites the repository's own gates", "answer": "met",
+                "evidence": [{"file": "plan.md", "digest": "d-plan"}], "why": "plan.md names them"}])
+        } else {
+            json!([{"condition": "The plan cites the repository's own gates", "answer": "not met",
+                "evidence": [{"test": {"answer": "not met", "code": 1}}],
+                "why": "Held to the task's own test, which answered not met"}])
+        }
+    };
     let take = |trace: &str, value: &str| {
         let world = rig.world(trace.rsplit(':').next().unwrap());
         let mut body = rig.body(&own, &rig.socket);
@@ -696,7 +708,8 @@ fn a_skillset_take_carries_its_set_into_its_world_with_the_proposed_revision_for
         command["configuration"]["takes"] = family.clone();
         let reply = body.ask(command);
         assert_eq!(reply["success"], true, "{reply}");
-        assert_eq!(body.ask(json!({"type": "finalize"}))["success"], true);
+        let finalize = json!({"type": "finalize", "inspection": {"answers": answered(trace)}});
+        assert_eq!(body.ask(finalize)["success"], true);
         body.exits();
         (world, reply["data"]["applied"].clone())
     };
@@ -752,6 +765,28 @@ fn a_skillset_take_carries_its_set_into_its_world_with_the_proposed_revision_for
         vec!["takes:own:5:trial:1".to_owned()]
     );
     assert_eq!(listed[0].in_use.revision, proposal.in_use.revision);
+    // Each take's answers to the task's Success conditions are kept with the
+    // Test, the take under the proposed revision's and the take beside it's
+    // (§19.7 Result: "What each take answered to the task's Success conditions").
+    let answers = &listed[0].tests[0].answers;
+    assert_eq!(answers.len(), 2, "{answers:?}");
+    let revised_answer = &answers["takes:own:5:trial:0"][0];
+    assert_eq!(
+        revised_answer.condition,
+        "The plan cites the repository's own gates"
+    );
+    assert_eq!(revised_answer.answer, "met");
+    assert_eq!(
+        revised_answer.evidence,
+        vec!["file plan.md (d-plan)".to_owned()]
+    );
+    assert_eq!(revised_answer.why.as_deref(), Some("plan.md names them"));
+    let in_use_answer = &answers["takes:own:5:trial:1"][0];
+    assert_eq!(in_use_answer.answer, "not met");
+    assert_eq!(
+        in_use_answer.evidence,
+        vec!["the task's own test: not met (exit 1)".to_owned()]
+    );
 
     // A level names a set AIKit holds, and a member with a proposal standing.
     let refused = |value: &str, words: &str| {
