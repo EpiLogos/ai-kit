@@ -115,7 +115,10 @@ dispatch = { native-provider-binding = { provider-ref = "provider:anthropic", se
 env-var = [{ provider-ref = "provider:anthropic", env-var = "ANTHROPIC_API_KEY" }]
 # Login commands pass 2026-09-23: claude's login is the in-TUI /login flow
 # (the cards verify no one-shot login command), so this fact stays note-only.
-own-login = [{ provider-ref = "provider:anthropic", note = "claude login keeps OAuth material in its own credential store (~/.claude/.credentials.json); the API key delivers only when credential:anthropic is bound" }]
+# Logged-in check observed 2026-11-04 on Claude Code 2.1.314's own surface:
+# `claude auth status` prints a JSON object (`--json`, its default) whose
+# `loggedIn` is a boolean; nothing else it prints is read.
+own-login = [{ provider-ref = "provider:anthropic", note = "claude login keeps OAuth material in its own credential store (~/.claude/.credentials.json); the API key delivers only when credential:anthropic is bound", status = { argv = ["claude", "auth", "status", "--json"], json-true = "loggedIn" } }]
 
 [sessions]
 posture = "observed"
@@ -193,7 +196,10 @@ dispatch = { native-provider-binding = { provider-ref = "provider:openai", selec
 env-var = [{ provider-ref = "provider:openai", env-var = "OPENAI_API_KEY" }]
 # Login command verified 2026-09-22 against the connection truth cards [VL]:
 # `codex login` runs the ChatGPT OAuth browser flow and writes ~/.codex/auth.json.
-own-login = [{ provider-ref = "provider:openai", note = "codex login runs the ChatGPT OAuth browser flow and writes its own auth store (~/.codex/auth.json); the API key delivers only when credential:openai is bound", login = { argv = ["codex", "login"] } }]
+# Logged-in check observed on codex-cli 0.155.1: `codex login status` answers
+# "Logged in using ChatGPT" on one stream (stderr), exit 0 — the answer the
+# ChatGPT own-login gate (harness_auth.rs codex_chatgpt_login_ready) accepts.
+own-login = [{ provider-ref = "provider:openai", note = "codex login runs the ChatGPT OAuth browser flow and writes its own auth store (~/.codex/auth.json); the API key delivers only when credential:openai is bound", login = { argv = ["codex", "login"] }, status = { argv = ["codex", "login", "status"], says = "Logged in using ChatGPT" } }]
 
 [sessions]
 posture = "observed"
@@ -1680,6 +1686,77 @@ mod tests {
                 assert!(
                     fact.login.is_none(),
                     "{slug}: no runnable login is verified, so none may be declared"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_native_login_check_is_declared_exactly_where_the_harness_answers_one() {
+        // 2026-11-04 (O-I #758 Sign in's read-back), from the installed command
+        // surfaces: codex-cli 0.155.1 `codex login status` answers "Logged in
+        // using ChatGPT" on one stream (the answer codex_chatgpt_login_ready
+        // already accepts); Claude Code 2.1.314 `claude auth status` prints a
+        // JSON object whose `loggedIn` is a boolean (`--json` is its default).
+        // Every other harness declares none: opencode's `auth list` is a
+        // listing, not a check, and the rest show no status command.
+        // (slug, the check's argv, its exact answer, its JSON field)
+        type Declared<'a> = (&'a str, &'a [&'a str], Option<&'a str>, Option<&'a str>);
+        let expected: &[Declared] = &[
+            (
+                "codex",
+                &["codex", "login", "status"],
+                Some("Logged in using ChatGPT"),
+                None,
+            ),
+            (
+                "claude-code",
+                &["claude", "auth", "status", "--json"],
+                None,
+                Some("loggedIn"),
+            ),
+        ];
+        for (slug, argv, says, json_true) in expected {
+            let profile = for_slug(slug).unwrap_or_else(|| panic!("{slug} must resolve"));
+            let checks: Vec<_> = profile
+                .models
+                .as_ref()
+                .and_then(|models| models.key_delivery.as_ref())
+                .map(|delivery| {
+                    delivery
+                        .own_login
+                        .iter()
+                        .filter_map(|fact| fact.status.as_ref())
+                        .collect()
+                })
+                .unwrap_or_default();
+            assert_eq!(
+                checks.len(),
+                1,
+                "{slug}: exactly one native check is declared"
+            );
+            assert_eq!(checks[0].argv, *argv, "{slug}: the declared check argv");
+            assert_eq!(checks[0].says.as_deref(), *says, "{slug}: the exact answer");
+            assert_eq!(
+                checks[0].json_true.as_deref(),
+                *json_true,
+                "{slug}: the JSON field"
+            );
+        }
+        for (slug, profile) in all() {
+            if expected.iter().any(|(s, ..)| *s == slug) {
+                continue;
+            }
+            for fact in profile
+                .models
+                .as_ref()
+                .and_then(|models| models.key_delivery.as_ref())
+                .map(|delivery| delivery.own_login.as_slice())
+                .unwrap_or_default()
+            {
+                assert!(
+                    fact.status.is_none(),
+                    "{slug}: no native check is observed, so none may be declared"
                 );
             }
         }

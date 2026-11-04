@@ -7,7 +7,7 @@ $FIXTURE_WORLD. It speaks exactly the CLI shapes the pinned contract
 (O-I docs/contracts/WORLD-INHABITATION-V1.md) and the owners' in-flight
 implementations publish:
 
-  ctrl --json [--root R] action run central.position.list|central.position.read|central.world.here|agent-profile.list JSON
+  ctrl --json [--root R] action run central.position.list|central.position.read|central.world.here|agent-profile.list|central.receiving.submit JSON
   actuation occupancy list|read|verify|claim|release ... --json
   factory development current-work|custody assign ... --json
 
@@ -129,6 +129,13 @@ def ctrl(args):
               "data": {"fact": "No Position definition exists at %s." % payload["position_ref"],
                        "consequence": "Nothing was read.",
                        "action": "ctrl --json action run central.position.list '{}'"}}, 2)
+    if action == "central.receiving.submit":
+        # What a Position asks the person: kept as the input arrived, answered as Central's receipt of a pending request.
+        received = world.setdefault("received", [])
+        received.append(payload)
+        save(world)
+        emit({"ok": True, "action": action, "data": {
+            "return_ref": "central:return:fixture:%d" % len(received), "record": {"status": "pending"}}})
     if action == "central.world.here":
         emit({"ok": True, "action": action, "data": {
             "schema": "central.world-here/v1",

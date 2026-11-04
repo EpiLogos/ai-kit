@@ -33,9 +33,9 @@
 use std::process::Command;
 
 use aikit_adapters::profiles;
-use aikit_adapters::runner::CommandRunner;
+use aikit_adapters::runner::{CommandRunner, Output};
 use aikit_core::credential::CredentialRef;
-use aikit_core::harness_profile::HarnessProfile;
+use aikit_core::harness_profile::{HarnessProfile, ModelLoginStatus};
 use aikit_core::{AikitError, Result};
 use aikit_store::{AikitHome, CredentialBindingStore};
 use serde::{Deserialize, Serialize};
@@ -59,6 +59,10 @@ pub struct OwnLoginOption {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub argv: Option<Vec<String>>,
     pub note: String,
+    /// The harness's declared native logged-in check, as the argv that asks
+    /// it — named here, run only by `--check`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<Vec<String>>,
 }
 
 /// The harness's auth options as a settings face renders them: env-var names
@@ -73,6 +77,97 @@ pub struct AuthFace {
     pub own_login: Vec<OwnLoginOption>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub note: Option<String>,
+}
+
+/// One native logged-in check's answer (`aikit harness auth <harness>
+/// --check`): the provider, the declared argv that asked, and whether the
+/// harness says it is signed in; `signed_in` is absent when no answer came,
+/// with why in `unread`. Only the declared answer is read: nothing else the
+/// harness prints (an account, an email, a masked key) is carried.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LoginCheck {
+    pub provider_ref: String,
+    pub argv: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signed_in: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unread: Option<String>,
+}
+
+/// The harness's native logged-in checks, one per own-login fact that
+/// declares one. Empty when the harness has none: whether a key is present
+/// then stays with the credential store's leg.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LoginChecks {
+    pub slug: String,
+    pub checks: Vec<LoginCheck>,
+}
+
+/// Run each declared native logged-in check of the harness through the
+/// runner (a bounded probe runner from the CLI) and read its declared answer.
+pub fn check_logins(runner: &dyn CommandRunner, harness: &str) -> Result<LoginChecks> {
+    let profile = profile_for(harness)?;
+    let checks = profile
+        .models
+        .as_ref()
+        .and_then(|models| models.key_delivery.as_ref())
+        .map(|delivery| {
+            delivery
+                .own_login
+                .iter()
+                .filter_map(|fact| {
+                    let status = fact.status.as_ref()?;
+                    let (signed_in, unread) = match runner.run(&status.argv) {
+                        Ok(output) => match signed_in_by(status, &output) {
+                            Ok(answer) => (Some(answer), None),
+                            Err(why) => (None, Some(why)),
+                        },
+                        Err(error) => (
+                            None,
+                            Some(format!(
+                                "{} did not answer: {}",
+                                status.argv.join(" "),
+                                error.message()
+                            )),
+                        ),
+                    };
+                    Some(LoginCheck {
+                        provider_ref: fact.provider_ref.clone(),
+                        argv: status.argv.clone(),
+                        signed_in,
+                        unread,
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    Ok(LoginChecks {
+        slug: profile.slug.clone(),
+        checks,
+    })
+}
+
+/// Whether the harness's answer says signed in, read by the declared answer
+/// form alone: `says`, exit 0 and the exact line on one stream with the other
+/// empty (anything else is not signed in); `json-true`, the field of the JSON
+/// object on stdout, true or false — an answer that carries no such boolean is
+/// no answer, said by why.
+fn signed_in_by(status: &ModelLoginStatus, output: &Output) -> std::result::Result<bool, String> {
+    if let Some(says) = status.says.as_deref() {
+        let (stdout, stderr) = (output.stdout.trim(), output.stderr.trim());
+        return Ok(output.status == 0
+            && ((stdout == says && stderr.is_empty()) || (stderr == says && stdout.is_empty())));
+    }
+    let field = status.json_true.as_deref().unwrap_or_default();
+    serde_json::from_str::<serde_json::Value>(output.stdout.trim())
+        .ok()
+        .and_then(|answer| answer.get(field).and_then(serde_json::Value::as_bool))
+        .ok_or_else(|| {
+            format!(
+                "{} answered no `{field}` that is true or false",
+                status.argv.join(" ")
+            )
+        })
 }
 
 /// A composed login: everything decided, nothing spawned yet. Mirrors the
@@ -137,6 +232,7 @@ pub fn auth_face(harness: &str) -> Result<AuthFace> {
                 runnable: fact.login.is_some(),
                 argv: fact.login.as_ref().map(|login| login.argv.clone()),
                 note: fact.note.clone(),
+                status: fact.status.as_ref().map(|status| status.argv.clone()),
             })
             .collect(),
         note: delivery.note.clone(),
@@ -178,9 +274,10 @@ pub(crate) fn codex_chatgpt_login_ready(
                     })
             })
         });
-    if declared.is_none() {
+    // The declared native check: `codex login status` and its one answer.
+    let Some(status) = declared.and_then(|fact| fact.status.as_ref()) else {
         return Ok(false);
-    }
+    };
     let credential_ref = CredentialRef::new("credential:openai")?;
     if let Some(binding) = CredentialBindingStore::new(home).load(&credential_ref)? {
         if binding.revoked
@@ -202,20 +299,16 @@ pub(crate) fn codex_chatgpt_login_ready(
         }
         return Ok(false);
     }
-    let argv = [
-        harness_program.to_owned(),
-        "login".to_owned(),
-        "status".to_owned(),
-    ];
+    // The declared check on the resolved binary: the program this launch
+    // runs, then the harness's own words. Codex 0.155.1 reports its status on
+    // stderr; the declared answer is accepted from one stream only, so
+    // warnings or another login mode are not affirmative subscription
+    // evidence.
+    let argv: Vec<String> = std::iter::once(harness_program.to_owned())
+        .chain(status.argv.iter().skip(1).cloned())
+        .collect();
     let output = runner.run(&argv)?;
-    let stdout = output.stdout.trim();
-    let stderr = output.stderr.trim();
-    // Codex 0.155.1 reports this status on stderr. Accept the exact native
-    // answer from one stream only; warnings or an unknown login mode are not
-    // affirmative subscription evidence.
-    Ok(output.status == 0
-        && ((stdout == "Logged in using ChatGPT" && stderr.is_empty())
-            || (stderr == "Logged in using ChatGPT" && stdout.is_empty())))
+    Ok(signed_in_by(status, &output).unwrap_or(false))
 }
 
 /// Compose the login plan for one harness: the one runnable own-login entry
@@ -335,6 +428,203 @@ mod tests {
         let json = serde_json::to_value(&face).unwrap();
         assert_eq!(json["own_login"][0]["argv"][0], "codex");
         assert_eq!(json["env_var"][0]["env_var"], "OPENAI_API_KEY");
+    }
+
+    #[test]
+    fn describe_names_each_declared_native_check_without_running_it() {
+        let codex = auth_face("codex").unwrap();
+        assert_eq!(
+            codex.own_login[0].status.as_deref(),
+            Some(
+                [
+                    "codex".to_string(),
+                    "login".to_string(),
+                    "status".to_string()
+                ]
+                .as_slice()
+            )
+        );
+        let json = serde_json::to_value(&codex).unwrap();
+        assert_eq!(json["own_login"][0]["status"][2], "status");
+        let claude = auth_face("claude").unwrap();
+        assert_eq!(
+            claude.own_login[0]
+                .status
+                .as_deref()
+                .map(|argv| argv.join(" ")),
+            Some("claude auth status --json".to_string())
+        );
+        let opencode = auth_face("opencode").unwrap();
+        assert!(opencode
+            .own_login
+            .iter()
+            .all(|login| login.status.is_none()));
+        assert!(
+            serde_json::to_value(&opencode).unwrap()["own_login"][0]
+                .get("status")
+                .is_none(),
+            "no check declared, none rendered"
+        );
+    }
+
+    /// One scripted answer per argv, the way the real binary answers.
+    struct Answers(
+        Vec<(&'static str, Result<aikit_adapters::runner::Output>)>,
+        std::sync::Mutex<Vec<String>>,
+    );
+    impl Answers {
+        fn new(answers: Vec<(&'static str, Result<aikit_adapters::runner::Output>)>) -> Self {
+            Self(answers, std::sync::Mutex::new(Vec::new()))
+        }
+        fn asked(&self) -> Vec<String> {
+            self.1.lock().unwrap().clone()
+        }
+    }
+    impl CommandRunner for Answers {
+        fn run(&self, argv: &[String]) -> Result<aikit_adapters::runner::Output> {
+            let line = argv.join(" ");
+            self.1.lock().unwrap().push(line.clone());
+            self.0
+                .iter()
+                .find(|(asked, _)| *asked == line)
+                .map(|(_, answer)| answer.clone())
+                .unwrap_or_else(|| Err(AikitError::new("test.unscripted", line)))
+        }
+    }
+    fn said(status: i32, stdout: &str, stderr: &str) -> Result<aikit_adapters::runner::Output> {
+        Ok(aikit_adapters::runner::Output {
+            status,
+            stdout: stdout.to_string(),
+            stderr: stderr.to_string(),
+        })
+    }
+
+    #[test]
+    fn codex_is_signed_in_only_on_its_exact_answer() {
+        let check = |answer| {
+            let runner = Answers::new(vec![("codex login status", answer)]);
+            let checks = check_logins(&runner, "codex").unwrap();
+            assert_eq!(runner.asked(), vec!["codex login status".to_string()]);
+            assert_eq!(checks.slug, "codex");
+            assert_eq!(checks.checks.len(), 1);
+            assert_eq!(checks.checks[0].provider_ref, "provider:openai");
+            assert_eq!(checks.checks[0].argv.join(" "), "codex login status");
+            checks.checks[0].clone()
+        };
+        // codex-cli 0.155.1 answers on stderr.
+        assert_eq!(
+            check(said(0, "", "Logged in using ChatGPT\n")).signed_in,
+            Some(true)
+        );
+        assert_eq!(
+            check(said(0, "Logged in using ChatGPT\n", "")).signed_in,
+            Some(true)
+        );
+        assert_eq!(check(said(1, "", "Not logged in")).signed_in, Some(false));
+        // Another login mode is not the declared answer, and its words (a
+        // masked key) are not carried.
+        let api_key = check(said(0, "", "Logged in using an API key - sk-proj-***abcd"));
+        assert_eq!(api_key.signed_in, Some(false));
+        assert!(!serde_json::to_string(&api_key).unwrap().contains("sk-proj"));
+        // A warning beside the answer is not the answer.
+        assert_eq!(
+            check(said(0, "Logged in using ChatGPT", "WARNING: x")).signed_in,
+            Some(false)
+        );
+        // No answer at all is unread, never "not signed in".
+        let unread = check(Err(AikitError::new(
+            "mux.command_timeout",
+            "codex took too long",
+        )));
+        assert_eq!(unread.signed_in, None);
+        assert!(
+            unread
+                .unread
+                .as_deref()
+                .unwrap()
+                .contains("codex took too long"),
+            "{unread:?}"
+        );
+    }
+
+    #[test]
+    fn claude_is_read_by_its_json_logged_in_field_alone() {
+        let check = |answer| {
+            let runner = Answers::new(vec![("claude auth status --json", answer)]);
+            let checks = check_logins(&runner, "claude").unwrap();
+            assert_eq!(checks.slug, "claude-code");
+            assert_eq!(checks.checks.len(), 1);
+            assert_eq!(checks.checks[0].provider_ref, "provider:anthropic");
+            checks.checks[0].clone()
+        };
+        let signed_in = check(said(
+            0,
+            r#"{"loggedIn": true, "authMethod": "claude.ai", "email": "person@example.com"}"#,
+            "",
+        ));
+        assert_eq!(signed_in.signed_in, Some(true));
+        assert!(
+            !serde_json::to_string(&signed_in)
+                .unwrap()
+                .contains("example.com"),
+            "nothing but the declared field is carried"
+        );
+        assert_eq!(
+            check(said(1, r#"{"loggedIn": false}"#, "")).signed_in,
+            Some(false)
+        );
+        let garbled = check(said(0, "Not JSON", ""));
+        assert_eq!(garbled.signed_in, None);
+        assert!(
+            garbled.unread.as_deref().unwrap().contains("loggedIn"),
+            "{garbled:?}"
+        );
+        assert_eq!(check(said(0, r#"{"loggedIn": "yes"}"#, "")).signed_in, None);
+    }
+
+    #[test]
+    fn a_harness_without_a_native_check_runs_nothing() {
+        let runner = Answers::new(Vec::new());
+        let checks = check_logins(&runner, "opencode").unwrap();
+        assert_eq!(checks.slug, "opencode");
+        assert!(checks.checks.is_empty());
+        assert!(
+            runner.asked().is_empty(),
+            "nothing is spawned for a harness with no check"
+        );
+        let json = serde_json::to_value(&checks).unwrap();
+        assert_eq!(json["checks"], serde_json::json!([]));
+        assert_eq!(
+            check_logins(&runner, "definitely-not-a-harness")
+                .unwrap_err()
+                .code(),
+            "harness_auth.unknown_harness"
+        );
+    }
+
+    #[test]
+    fn the_codex_subscription_gate_reads_the_declared_check_on_the_resolved_binary() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = AikitHome::at(temp.path().join("aikit"));
+        let runner = Answers::new(vec![(
+            "/opt/tools/codex login status",
+            said(0, "", "Logged in using ChatGPT"),
+        )]);
+        assert!(
+            codex_chatgpt_login_ready(&runner, &home, "/opt/tools/codex", "provider:openai")
+                .unwrap()
+        );
+        assert_eq!(
+            runner.asked(),
+            vec!["/opt/tools/codex login status".to_string()]
+        );
+        let not = Answers::new(vec![(
+            "/opt/tools/codex login status",
+            said(1, "", "Not logged in"),
+        )]);
+        assert!(
+            !codex_chatgpt_login_ready(&not, &home, "/opt/tools/codex", "provider:openai").unwrap()
+        );
     }
 
     #[test]

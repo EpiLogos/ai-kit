@@ -1769,6 +1769,7 @@ fn cmd_gateway_dispatch(command: GatewayCmd, cwd: &std::path::Path) -> Result<Re
             )?)
         }
         GatewaySub::Send(a) => {
+            let a = *a;
             let (owners, gateway, cwd) = contact_seams(&home, &a.carrier)?;
             let body = match (a.body, a.body_file) {
                 (Some(body), _) => body,
@@ -1782,6 +1783,28 @@ fn cmd_gateway_dispatch(command: GatewayCmd, cwd: &std::path::Path) -> Result<Re
                     ))
                 }
             };
+            let owner = aikit_cli::gateway_contact::owner_address::OwnerAsk {
+                subject: a.subject,
+                propose: a.propose,
+                proposed_owner: a.proposed_owner,
+                options: a.options,
+                now_ref: a.now_ref,
+                evidence_refs: a.evidence_refs,
+            };
+            // What is asked of the person rides only a send to the person.
+            if !aikit_cli::gateway_contact::owner_address::is_owner_address(&a.to)
+                && owner.is_asked()
+            {
+                return Err(aikit_cli::gateway_contact::three_part(
+                    "gateway.owner_ask_not_owner",
+                    format!(
+                        "--propose, --for, --subject, --option, --now-ref and --evidence ask the person, and {} is not the owner.",
+                        a.to
+                    ),
+                    "Nothing was sent; no Communique was recorded.",
+                    "Send to @owner to ask the person, or drop those flags to send to a Position.",
+                ));
+            }
             gateway_data(aikit_cli::gateway_contact::send(
                 &home,
                 &owners,
@@ -1797,15 +1820,7 @@ fn cmd_gateway_dispatch(command: GatewayCmd, cwd: &std::path::Path) -> Result<Re
                     require_workcell: a.require_workcell.as_deref(),
                     handling: aikit_adapters::CommuniqueHandling::parse(&a.handling)
                         .unwrap_or_default(),
-                    // No owner ask rides a plain send on this command surface.
-                    owner: aikit_cli::gateway_contact::owner_address::OwnerAsk {
-                        subject: None,
-                        propose: false,
-                        proposed_owner: None,
-                        options: Vec::new(),
-                        now_ref: None,
-                        evidence_refs: Vec::new(),
-                    },
+                    owner,
                 },
             )?)
         }
@@ -8031,6 +8046,55 @@ fn cmd_harness(cwd: &std::path::Path, c: HarnessCmd, json_mode: bool) -> Result<
 /// renders next to the API-key input. Otherwise run the declared one-shot
 /// login interactively: the child owns this terminal and its own environment.
 fn cmd_harness_auth(args: HarnessAuthArgs, json_mode: bool) -> Result<Reply> {
+    if args.check {
+        let checks = aikit_cli::harness_auth::check_logins(
+            &aikit_adapters::runner::SystemRunner::probe(),
+            &args.harness,
+        )?;
+        if json_mode {
+            let data = serde_json::to_value(&checks).map_err(|error| {
+                AikitError::new(
+                    "cli.harness_auth_encode_failed",
+                    format!("could not encode the login checks: {error}"),
+                )
+            })?;
+            return Ok(Reply::Data {
+                context: EnvelopeContext::default(),
+                data,
+                warnings: vec![],
+                exit_code: json::EXIT_OK,
+            });
+        }
+        let lines: Vec<String> = if checks.checks.is_empty() {
+            vec![format!(
+                "{}: no native logged-in check is declared",
+                checks.slug
+            )]
+        } else {
+            checks
+                .checks
+                .iter()
+                .map(|check| match (check.signed_in, check.unread.as_deref()) {
+                    (Some(true), _) => format!(
+                        "{}: signed in ({})",
+                        check.provider_ref,
+                        check.argv.join(" ")
+                    ),
+                    (Some(false), _) => format!(
+                        "{}: not signed in ({})",
+                        check.provider_ref,
+                        check.argv.join(" ")
+                    ),
+                    (None, why) => format!(
+                        "{}: unread — {}",
+                        check.provider_ref,
+                        why.unwrap_or("no answer")
+                    ),
+                })
+                .collect()
+        };
+        return Ok(Reply::Text(lines.join("\n")));
+    }
     if json_mode {
         let face = aikit_cli::harness_auth::auth_face(&args.harness)?;
         let data = serde_json::to_value(&face).map_err(|error| {

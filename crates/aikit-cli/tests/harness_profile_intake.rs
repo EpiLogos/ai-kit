@@ -143,3 +143,61 @@ fn a_grammar_violation_refuses_with_the_layer_named() {
         "the diagnostic names the layer: {message}"
     );
 }
+
+/// `aikit harness auth <harness> --check --json` (O-I #758, Sign in's
+/// read-back): the harness's declared native logged-in check runs through the
+/// real binary and only its declared answer comes back. A fake `codex` on
+/// PATH answers the way codex-cli 0.155.1 does (on stderr); describe mode
+/// still names the check without running it.
+#[cfg(unix)]
+#[test]
+fn harness_auth_check_runs_the_declared_native_check_and_describe_does_not() {
+    use std::os::unix::fs::PermissionsExt;
+    let temp = tempfile::tempdir().unwrap();
+    let bin = temp.path().join("bin");
+    fs::create_dir_all(&bin).unwrap();
+    let asked = temp.path().join("asked");
+    let codex = bin.join("codex");
+    fs::write(
+        &codex,
+        format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> {}\nif [ \"$*\" = \"login status\" ]; then echo 'Logged in using ChatGPT' >&2; exit 0; fi\nexit 9\n",
+            asked.display()
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&codex, fs::Permissions::from_mode(0o755)).unwrap();
+    let path = format!("{}:/usr/bin:/bin", bin.display());
+    let aikit = |args: &[&str]| {
+        let output = Command::new(cargo_bin("aikit"))
+            .args(args)
+            .arg("--json")
+            .env("AIKIT_HOME", temp.path().join("aikit"))
+            .env("HOME", temp.path())
+            .env("PATH", &path)
+            .current_dir(temp.path())
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let value: Value = serde_json::from_str(stdout.trim())
+            .unwrap_or_else(|error| panic!("invalid JSON ({error}): {stdout:?}"));
+        (output, value)
+    };
+
+    let (output, described) = aikit(&["harness", "auth", "codex"]);
+    assert!(output.status.success(), "{described}");
+    assert_eq!(described["data"]["own_login"][0]["status"][1], "login");
+    assert!(!asked.exists(), "describe runs nothing");
+
+    let (output, checked) = aikit(&["harness", "auth", "codex", "--check"]);
+    assert!(output.status.success(), "{checked}");
+    assert_eq!(checked["data"]["slug"], "codex");
+    let check = &checked["data"]["checks"][0];
+    assert_eq!(check["provider_ref"], "provider:openai");
+    assert_eq!(check["signed_in"], true);
+    assert_eq!(fs::read_to_string(&asked).unwrap(), "login status\n");
+
+    let (output, none) = aikit(&["harness", "auth", "opencode", "--check"]);
+    assert!(output.status.success(), "{none}");
+    assert_eq!(none["data"]["checks"], serde_json::json!([]));
+}

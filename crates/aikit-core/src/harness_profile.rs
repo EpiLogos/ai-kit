@@ -289,6 +289,28 @@ pub struct ModelOwnLogin {
     /// a note-only fact, which is honest, not incomplete.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub login: Option<ModelLoginCommand>,
+    /// The harness's own logged-in check, when its command surface has one:
+    /// the argv that asks its login store and the answer that says this
+    /// provider is signed in. Absent means AIKit knows no native check for
+    /// it; whether a key is present stays with the credential store.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<ModelLoginStatus>,
+}
+
+/// A declared native logged-in check. The argv follows the login command's
+/// shape law (it names the harness binary, then the harness's own words
+/// verbatim); exactly one answer form says signed in: `says`, the exact
+/// one-line answer on one stream with the other empty and exit 0, or
+/// `json-true`, the field of the JSON object on stdout that is `true`. Any
+/// other answer is not signed in, and no other part of the answer is read.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case", deny_unknown_fields)]
+pub struct ModelLoginStatus {
+    pub argv: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub says: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub json_true: Option<String>,
 }
 
 /// The declared one-shot login command of an own-login fact. The argv follows
@@ -799,27 +821,64 @@ fn validate_login_argv(
     provider_ref: &str,
     login: &ModelLoginCommand,
 ) -> Result<(), HarnessProfileError> {
-    if login.argv.is_empty() || login.argv[0].trim().is_empty() {
+    validate_declared_argv(provider_ref, &login.argv, "login.argv")
+}
+
+/// The same shape law for a declared argv of an own-login fact (`field`
+/// names which: the login command or the logged-in check).
+fn validate_declared_argv(
+    provider_ref: &str,
+    argv: &[String],
+    field: &'static str,
+) -> Result<(), HarnessProfileError> {
+    if argv.is_empty() || argv[0].trim().is_empty() {
         return Err(HarnessProfileError::new(
             "harness_profile.invalid_login_argv",
             format!(
-                "the own-login declaration for {provider_ref} declares no binary; its first \
-                 element must name the harness binary (an absolute path or a PATH name)"
+                "the own-login declaration for {provider_ref} declares no binary in {field}; \
+                 its first element must name the harness binary (an absolute path or a PATH name)"
             ),
         )
         .with("provider-ref", provider_ref.to_string())
-        .with("field", "login.argv"));
+        .with("field", field));
     }
-    if let Some(position) = login.argv.iter().position(|part| part.trim().is_empty()) {
+    if let Some(position) = argv.iter().position(|part| part.trim().is_empty()) {
         return Err(HarnessProfileError::new(
             "harness_profile.invalid_login_argv",
             format!(
                 "the own-login declaration for {provider_ref} has an empty argument at offset \
-                 {position}; carry the harness's flags verbatim, never as blank padding"
+                 {position} of {field}; carry the harness's flags verbatim, never as blank padding"
             ),
         )
         .with("provider-ref", provider_ref.to_string())
-        .with("field", "login.argv"));
+        .with("field", field));
+    }
+    Ok(())
+}
+
+/// A declared native logged-in check: its argv follows the login command's
+/// shape law, and it names exactly one answer that says signed in, never a
+/// blank one — a check that could answer two ways, or none, is no check.
+fn validate_login_status(
+    provider_ref: &str,
+    status: &ModelLoginStatus,
+) -> Result<(), HarnessProfileError> {
+    validate_declared_argv(provider_ref, &status.argv, "status.argv")?;
+    let answers: Vec<&str> = [status.says.as_deref(), status.json_true.as_deref()]
+        .into_iter()
+        .flatten()
+        .collect();
+    if answers.len() != 1 || answers[0].trim().is_empty() {
+        return Err(HarnessProfileError::new(
+            "harness_profile.invalid_login_status",
+            format!(
+                "the own-login status check for {provider_ref} must name exactly one answer \
+                 that says signed in: `says` (the exact one-line answer) or `json-true` (the \
+                 JSON field that is true)"
+            ),
+        )
+        .with("provider-ref", provider_ref.to_string())
+        .with("field", "status"));
     }
     Ok(())
 }
@@ -932,6 +991,9 @@ fn validate_key_delivery(delivery: &ModelKeyDeliveryLayer) -> Result<(), Harness
         }
         if let Some(login) = &fact.login {
             validate_login_argv(&fact.provider_ref, login)?;
+        }
+        if let Some(status) = &fact.status {
+            validate_login_status(&fact.provider_ref, status)?;
         }
     }
     if delivery.env_var.is_empty()
@@ -1239,6 +1301,7 @@ mcp-servers = false
                     provider_ref: "provider:anthropic".to_string(),
                     note: "claude login stores its own credential".to_string(),
                     login: None,
+                    status: None,
                 }],
                 note: None,
             }),
@@ -1470,6 +1533,104 @@ mcp-servers = false
             error.to_string().contains("offset 1"),
             "the refusal names the offending offset: {error}"
         );
+    }
+
+    #[test]
+    fn a_declared_login_status_validates_and_round_trips_kebab_case() {
+        for answer in [
+            ModelLoginStatus {
+                argv: vec!["codex".into(), "login".into(), "status".into()],
+                says: Some("Logged in using ChatGPT".into()),
+                json_true: None,
+            },
+            ModelLoginStatus {
+                argv: vec!["claude".into(), "auth".into(), "status".into()],
+                says: None,
+                json_true: Some("loggedIn".into()),
+            },
+        ] {
+            let mut profile = claude_shaped_profile();
+            profile
+                .models
+                .as_mut()
+                .unwrap()
+                .key_delivery
+                .as_mut()
+                .unwrap()
+                .own_login[0]
+                .status = Some(answer.clone());
+            profile
+                .validate()
+                .expect("a well-shaped login status satisfies posture truth");
+            let text = toml::to_string_pretty(&profile).expect("serialises");
+            assert!(
+                text.contains("own-login.status"),
+                "the status renders under its kebab name: {text}"
+            );
+            let reparsed: HarnessProfile = toml::from_str(&text).expect("reparses");
+            assert_eq!(reparsed, profile);
+        }
+        // The inline spelling the embedded profiles use.
+        let fact: ModelOwnLogin = toml::from_str(
+            r#"provider-ref = "provider:anthropic"
+note = "n"
+status = { argv = ["claude", "auth", "status"], json-true = "loggedIn" }"#,
+        )
+        .expect("the inline kebab spelling parses");
+        assert_eq!(fact.status.unwrap().json_true.as_deref(), Some("loggedIn"));
+    }
+
+    #[test]
+    fn a_login_status_names_exactly_one_answer_and_a_binary() {
+        let refused = |status: ModelLoginStatus| {
+            let mut profile = claude_shaped_profile();
+            profile
+                .models
+                .as_mut()
+                .unwrap()
+                .key_delivery
+                .as_mut()
+                .unwrap()
+                .own_login[0]
+                .status = Some(status);
+            profile.validate().unwrap_err()
+        };
+        let argv = || {
+            vec![
+                "claude".to_string(),
+                "auth".to_string(),
+                "status".to_string(),
+            ]
+        };
+        let neither = refused(ModelLoginStatus {
+            argv: argv(),
+            says: None,
+            json_true: None,
+        });
+        assert_eq!(neither.code, "harness_profile.invalid_login_status");
+        assert!(
+            neither.to_string().contains("provider:anthropic"),
+            "{neither}"
+        );
+        let both = refused(ModelLoginStatus {
+            argv: argv(),
+            says: Some("Logged in".into()),
+            json_true: Some("loggedIn".into()),
+        });
+        assert_eq!(both.code, "harness_profile.invalid_login_status");
+        let blank = refused(ModelLoginStatus {
+            argv: argv(),
+            says: Some("  ".into()),
+            json_true: None,
+        });
+        assert_eq!(blank.code, "harness_profile.invalid_login_status");
+        let no_binary = refused(ModelLoginStatus {
+            argv: vec![" ".into()],
+            says: Some("Logged in".into()),
+            json_true: None,
+        });
+        assert_eq!(no_binary.code, "harness_profile.invalid_login_argv");
+        assert!(no_binary.to_string().contains("status.argv"), "{no_binary}");
     }
 
     #[test]
