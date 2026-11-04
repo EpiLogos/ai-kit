@@ -2938,6 +2938,15 @@ fn cmd_source(cwd: &std::path::Path, command: SourceCmd) -> Result<Reply> {
                 let discarded = skill_sources::discard_revision(home, &args.member)?;
                 Ok(source_reply(jval!(discarded), vec![]))
             }
+            SourceRefineSub::Follow(args) => {
+                let followed = skill_sources::follow_revision(home, &args.member)?;
+                // The promoted snapshot is a new catalogue, as a promotion is.
+                let mut warnings = Vec::new();
+                let user_scope = refresh_user_scope(home, &mut warnings);
+                let mut data = jval!(followed);
+                data["user_scope"] = user_scope;
+                Ok(source_reply(data, warnings))
+            }
         },
         SourceSub::Remove(args) => {
             let removed = skill_sources::remove(home, &args.id, args.force)?;

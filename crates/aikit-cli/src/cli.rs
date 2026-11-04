@@ -875,6 +875,7 @@ fn source_route(command: &SourceSub) -> &'static str {
             SourceRefineSub::List(_) => "cmd_source_refine_list",
             SourceRefineSub::Accept(_) => "cmd_source_refine_accept",
             SourceRefineSub::Discard(_) => "cmd_source_refine_discard",
+            SourceRefineSub::Follow(_) => "cmd_source_refine_follow",
         },
     }
 }
@@ -3236,6 +3237,10 @@ pub enum SourceRefineSub {
     Accept(SourceRefineMemberArgs),
     /// Drop the proposal; the revision in use stays.
     Discard(SourceRefineMemberArgs),
+    /// After the person's Accept in Central wrote a revision Accept handed
+    /// there: sync the member's source from Central and promote it, with a
+    /// receipt.
+    Follow(SourceRefineMemberArgs),
 }
 
 #[derive(Debug, Args)]

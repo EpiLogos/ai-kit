@@ -673,6 +673,11 @@ fn write_new_spec(home: &AikitHome, spec: SourceSpec) -> Result<SourceSpec> {
 }
 
 pub fn sync(home: &AikitHome, id: &str) -> Result<SnapshotRecord> {
+    sync_with(home, id, &aikit_adapters::central_file_map::executable())
+}
+
+/// Sync, asking a Central-backed source's tree of the `ctrl` at `ctrl`.
+pub(crate) fn sync_with(home: &AikitHome, id: &str, ctrl: &Path) -> Result<SnapshotRecord> {
     let spec = load_spec(home, id)?;
     let source_dir_path = source_dir(home, id);
     let staging = source_dir_path.join(format!(".staging-{}", ulid::Ulid::generate()));
@@ -681,7 +686,7 @@ pub fn sync(home: &AikitHome, id: &str) -> Result<SnapshotRecord> {
     let built = if matches!(spec.kind, SourceKind::Capsule { .. }) {
         build_capsule_snapshot(home, &spec, &staging)
     } else {
-        let prepared = prepare_source(&spec, &staging);
+        let prepared = prepare_source(&spec, &staging, ctrl);
         let (scan_root, git_commit) = match prepared {
             Ok(value) => value,
             Err(error) => {
@@ -698,7 +703,7 @@ pub fn sync(home: &AikitHome, id: &str) -> Result<SnapshotRecord> {
             return Err(error);
         }
     };
-    validate_owner_snapshot(&spec, &record)?;
+    validate_owner_snapshot_with(&spec, &record, ctrl)?;
     let checkout = staging.join("checkout");
     if checkout.exists() {
         fs::remove_dir_all(&checkout)
@@ -720,10 +725,14 @@ pub fn sync(home: &AikitHome, id: &str) -> Result<SnapshotRecord> {
     Ok(record)
 }
 
-fn prepare_source(spec: &SourceSpec, staging: &Path) -> Result<(PathBuf, Option<String>)> {
+fn prepare_source(
+    spec: &SourceSpec,
+    staging: &Path,
+    ctrl: &Path,
+) -> Result<(PathBuf, Option<String>)> {
     match &spec.kind {
         SourceKind::Directory { path, .. } => Ok((path.clone(), None)),
-        SourceKind::Central { .. } => prepare_central_source(spec, staging),
+        SourceKind::Central { .. } => prepare_central_source(spec, staging, ctrl),
         SourceKind::Capsule { .. } => unreachable!("capsule sources build from their archive"),
         SourceKind::Git {
             repository,
@@ -1016,6 +1025,24 @@ pub fn promote(
     trust_all: bool,
     trust_skills: &[String],
 ) -> Result<(SnapshotRecord, usize)> {
+    promote_with(
+        home,
+        id,
+        trust_all,
+        trust_skills,
+        &aikit_adapters::central_file_map::executable(),
+    )
+}
+
+/// Promote, holding a Central-backed source's candidate to the tree the
+/// `ctrl` at `ctrl` answers.
+pub(crate) fn promote_with(
+    home: &AikitHome,
+    id: &str,
+    trust_all: bool,
+    trust_skills: &[String],
+    ctrl: &Path,
+) -> Result<(SnapshotRecord, usize)> {
     // Registering and promoting an existing local directory is the user's
     // acceptance of that source. Downloaded Git snapshots retain explicit trust.
     // An adopted capsule follows the directory path: the visitor registered
@@ -1035,7 +1062,7 @@ pub fn promote(
         )
     })?;
     let record = load_snapshot(home, id, &digest)?;
-    validate_owner_snapshot(&load_spec(home, id)?, &record)?;
+    validate_owner_snapshot_with(&load_spec(home, id)?, &record, ctrl)?;
     refuse_active_identity_collision(
         home,
         id,
@@ -1251,10 +1278,36 @@ pub enum Accepted {
     Handed(HandedRevision),
 }
 
+/// What Follow did once the person's Accept in Central wrote a revision AIKit
+/// handed there: the member's source synced Central's tree and promoted it,
+/// through AIKit's own sync and promote, so the member in use is the revision
+/// the person accepted. The receipt names it, the snapshot Roll back returns
+/// to, and every other member Central's tree had moved, which came with it.
+#[derive(Debug, Clone, Serialize)]
+pub struct FollowedRevision {
+    pub followed: String,
+    pub source: String,
+    /// Where the revision waited in Central, and the digest the person accepted.
+    pub revision_ref: String,
+    pub accepted_digest: String,
+    /// The member's revision in use now, and the snapshot that holds it.
+    pub revision: String,
+    pub active_snapshot: String,
+    /// Central's tree revision the snapshot stands on.
+    pub owner_revision: Option<String>,
+    /// The snapshot in use before: Roll back returns to it.
+    pub rollback_to: Option<String>,
+    /// Other members whose files Central's tree had changed since the snapshot
+    /// in use: a Central-backed source stands on one tree, so they came along.
+    pub also_moved: Vec<String>,
+}
+
 /// Central's act that keeps a proposed revision of one of its skills, the
 /// reading it answers, and the person's act there that writes it.
 const CENTRAL_REVISION_PROPOSE: &str = "control.skills.revision.propose";
 const CENTRAL_REVISION_ACCEPT: &str = "control.skills.revision.accept";
+/// Central's reading of one skill: its body in use and the revision that waits.
+const CENTRAL_REVISION_READ: &str = "control.skills.revision.read";
 const CENTRAL_REVISION_READING: &str = "central.skill-revision-reading/v1";
 /// The Control scope AIKit hands a revision in: the person's own skills,
 /// which Central addresses by name alone. A machine's or a project's skill
@@ -1797,7 +1850,7 @@ fn hand_to_central(
     if let Some(handed) = &proposal.handed {
         return Err(refinement_error(
             "refinement.handed",
-            format!("the revision of `{member}` waits in Central already ({}): it is the person's to accept there ({}), and Central writes it then; sync `{source}` after", handed.revision_ref, handed.accept_action),
+            format!("the revision of `{member}` waits in Central already ({}): it is the person's to accept there ({}), and Central writes it then; Follow picks it up (`aikit source refine follow {member}`)", handed.revision_ref, handed.accept_action),
         ));
     }
     let active = state.active_snapshot.clone().unwrap_or_default();
@@ -1945,6 +1998,218 @@ fn hand_to_central(
         source: source.to_owned(),
         handed,
     })
+}
+
+/// Follow: after the person's Accept in Central wrote the revision AIKit
+/// handed there, the member's source picks it up — synced from Central's tree
+/// and promoted — and the proposal is answered. Central is asked first: a
+/// revision that still waits there, or that Central does not hold in use, is
+/// refused in words before anything syncs; a tree whose SKILL.md is not the
+/// accepted one is left as the source's candidate and nothing is promoted.
+pub fn follow_revision(home: &AikitHome, member: &str) -> Result<FollowedRevision> {
+    follow_revision_with(
+        home,
+        member,
+        &aikit_adapters::central_file_map::executable(),
+    )
+}
+
+/// Follow, asking Central through the `ctrl` at `ctrl`.
+pub(crate) fn follow_revision_with(
+    home: &AikitHome,
+    member: &str,
+    ctrl: &Path,
+) -> Result<FollowedRevision> {
+    use aikit_adapters::runner::CommandRunner;
+    use sha2::{Digest, Sha256};
+    let (source, spec, state) = member_source(home, member)?;
+    let proposal = state
+        .proposals
+        .iter()
+        .find(|proposal| proposal.member == member)
+        .cloned()
+        .ok_or_else(|| no_proposal(member))?;
+    let SourceKind::Central { central_root, .. } = &spec.kind else {
+        return Err(refinement_error(
+            "refinement.not_handed",
+            format!("AIKit keeps the source of `{member}` itself: its Accept keeps the revision here (`aikit source refine accept {member}`), and nothing waits in Central to follow"),
+        ));
+    };
+    let Some(handed) = proposal.handed.clone() else {
+        return Err(refinement_error(
+            "refinement.not_handed",
+            format!("the revision of `{member}` has not been handed to Central: its Accept hands it there (`aikit source refine accept {member}`), and the person's Accept in Central writes it"),
+        ));
+    };
+    let root = std::env::var_os("CENTRAL_ROOT")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| central_root.clone());
+    let input = serde_json::json!({"scope": handed.scope, "name": handed.name});
+    let argv = vec![
+        ctrl.to_string_lossy().into_owned(),
+        "--json".into(),
+        "--root".into(),
+        root.to_string_lossy().into_owned(),
+        "action".into(),
+        "run".into(),
+        CENTRAL_REVISION_READ.into(),
+        input.to_string(),
+    ];
+    let output = aikit_adapters::runner::SystemRunner::probe()
+        .run(&argv)
+        .map_err(|error| {
+            refinement_error(
+                "refinement.central_unavailable",
+                format!("Central could not be asked whether it wrote the revision of `{member}` ({CENTRAL_REVISION_READ}): {}", error.message()),
+            )
+        })?;
+    let envelope: serde_json::Value =
+        serde_json::from_str(&output.stdout).unwrap_or(serde_json::Value::Null);
+    if envelope["ok"] != true {
+        let words = envelope["error"]["message"]
+            .as_str()
+            .map(str::to_owned)
+            .unwrap_or_else(|| output.stderr.trim().to_owned());
+        return Err(refinement_error(
+            "refinement.central_refused",
+            format!(
+                "Central did not read the skill of `{member}` ({CENTRAL_REVISION_READ}): {words}"
+            ),
+        )
+        .with(
+            "native_error_code",
+            envelope["error"]["code"].as_str().unwrap_or_default(),
+        ));
+    }
+    let data = &envelope["data"];
+    if data["schema"] != CENTRAL_REVISION_READING {
+        return Err(refinement_error(
+            "refinement.central_invalid",
+            format!("Central answered {CENTRAL_REVISION_READ} for `{member}` with something other than its revision reading"),
+        ));
+    }
+    if data["proposal"]["proposed_digest"].as_str() == Some(handed.proposed_digest.as_str()) {
+        return Err(refinement_error(
+            "refinement.central_waiting",
+            format!("the revision of `{member}` waits in Central ({}) for the person's Accept there ({}): Central has written nothing to follow yet", handed.revision_ref, handed.accept_action),
+        ));
+    }
+    if data["in_use"]["digest"].as_str() != Some(handed.proposed_digest.as_str()) {
+        return Err(refinement_error(
+            "refinement.central_not_accepted",
+            format!("Central's {} in use is not the revision AIKit handed it ({}): it was discarded there, or the skill changed since. Discard it here (`aikit source refine discard {member}`)", handed.name, handed.revision_ref),
+        ));
+    }
+    let before = state.active_snapshot.clone();
+    let record = sync_with(home, &source, ctrl)?;
+    let body_path = snapshot_dir(home, &source, &record.digest)
+        .join("registry/capsules")
+        .join(member)
+        .join("payload/SKILL.md");
+    let synced = fs::read(&body_path)
+        .map(|body| format!("sha256:{:x}", Sha256::digest(&body)))
+        .unwrap_or_default();
+    if synced != handed.proposed_digest {
+        return Err(refinement_error(
+            "refinement.follow_mismatch",
+            format!("Central's skill tree moved again after it wrote the revision of `{member}`: the snapshot synced from it (`{}`) holds a SKILL.md that is not the one accepted ({}), so nothing was promoted, and it stands as the candidate of `{source}`", record.digest, handed.proposed_digest),
+        ));
+    }
+    let (promoted, _) = promote_with(home, &source, false, &[], ctrl)?;
+    let mut state = load_state(home, &source)?;
+    state.proposals.retain(|kept| kept.member != member);
+    write_toml_atomic(&source_dir(home, &source).join(STATE_FILE), &state)?;
+    let named = state
+        .active_snapshot
+        .iter()
+        .chain(state.candidate_snapshot.iter())
+        .chain(state.history.iter())
+        .chain(state.proposals.iter().map(|other| &other.snapshot))
+        .any(|digest| digest == &proposal.snapshot);
+    if !named {
+        let dir = snapshot_dir(home, &source, &proposal.snapshot);
+        if dir.exists() {
+            fs::remove_dir_all(&dir).map_err(|error| io("refinement.write_failed", &dir, error))?;
+        }
+    }
+    let loaded = load_registry(
+        &snapshot_dir(home, &source, &promoted.digest).join("registry"),
+        RegistrySource::new(source.clone()),
+    )?;
+    let revision = loaded
+        .catalog
+        .capsules()
+        .into_iter()
+        .find(|capsule| capsule.id.to_string() == member)
+        .and_then(|capsule| capsule.revision.clone())
+        .map(|revision| revision.to_string())
+        .ok_or_else(|| {
+            refinement_error(
+                "refinement.not_a_member",
+                format!("the snapshot promoted holds no revision of `{member}`"),
+            )
+        })?;
+    let also_moved = moved_members(home, &source, before.as_deref(), &promoted, member)?;
+    Ok(FollowedRevision {
+        followed: member.to_owned(),
+        source,
+        revision_ref: handed.revision_ref,
+        accepted_digest: handed.proposed_digest,
+        revision,
+        active_snapshot: promoted.digest.clone(),
+        owner_revision: promoted.owner_revision.clone(),
+        rollback_to: before.filter(|digest| digest != &promoted.digest),
+        also_moved,
+    })
+}
+
+/// The members other than `member` whose files differ between the snapshot
+/// in use before and `after`, or stand in only one of them.
+fn moved_members(
+    home: &AikitHome,
+    source: &str,
+    before: Option<&str>,
+    after: &SnapshotRecord,
+    member: &str,
+) -> Result<Vec<String>> {
+    // A member's files in one snapshot, by one digest over each file's path,
+    // mode and bytes; none where the snapshot does not hold it.
+    let files = |snapshot: &str, id: &str| -> Result<Option<String>> {
+        let payload = snapshot_dir(home, source, snapshot)
+            .join("registry/capsules")
+            .join(id)
+            .join("payload");
+        if !payload.is_dir() {
+            return Ok(None);
+        }
+        let mut hasher = blake3::Hasher::new();
+        for (relative, mode, bytes) in tree_files(&payload)? {
+            hash_field(&mut hasher, &relative);
+            hasher.update(&mode.to_le_bytes());
+            hasher.update(&(bytes.len() as u64).to_le_bytes());
+            hasher.update(&bytes);
+        }
+        Ok(Some(hasher.finalize().to_hex().to_string()))
+    };
+    let before_record = match before {
+        Some(digest) => Some(load_snapshot(home, source, digest)?),
+        None => None,
+    };
+    let mut ids: BTreeSet<String> = after.skills.iter().map(|skill| skill.id.clone()).collect();
+    if let Some(record) = &before_record {
+        ids.extend(record.skills.iter().map(|skill| skill.id.clone()));
+    }
+    let mut moved = Vec::new();
+    for id in ids.into_iter().filter(|id| id != member) {
+        let was = match before {
+            Some(digest) => files(digest, &id)?,
+            None => None,
+        };
+        if was != files(&after.digest, &id)? {
+            moved.push(id);
+        }
+    }
+    Ok(moved)
 }
 
 /// Discard: drop the proposal; the revision in use stays. Its snapshot goes
@@ -2397,6 +2662,11 @@ pub fn bind_central(
     Ok(spec)
 }
 fn central_bundle(spec: &SourceSpec) -> Result<serde_json::Value> {
+    central_bundle_at(spec, &aikit_adapters::central_file_map::executable())
+}
+
+/// Central's skill tree for a Central-backed source, from the `ctrl` at `ctrl`.
+fn central_bundle_at(spec: &SourceSpec, ctrl: &Path) -> Result<serde_json::Value> {
     let SourceKind::Central {
         central_root,
         source_ref,
@@ -2414,7 +2684,7 @@ fn central_bundle(spec: &SourceSpec) -> Result<serde_json::Value> {
         // Reading the owner's skill tree is a probe: bounded, so a hanging
         // `ctrl` is a source error within the budget, never a stalled read.
         &aikit_adapters::runner::SystemRunner::probe(),
-        &aikit_adapters::central_file_map::executable(),
+        ctrl,
         &root,
         "skill-tree",
         &serde_json::json!({"scope":"root","federated":true,"source_ref":source_ref}),
@@ -2427,9 +2697,13 @@ fn central_bundle(spec: &SourceSpec) -> Result<serde_json::Value> {
     }
     Ok(value)
 }
-fn prepare_central_source(spec: &SourceSpec, staging: &Path) -> Result<(PathBuf, Option<String>)> {
+fn prepare_central_source(
+    spec: &SourceSpec,
+    staging: &Path,
+    ctrl: &Path,
+) -> Result<(PathBuf, Option<String>)> {
     use base64::Engine;
-    let bundle = central_bundle(spec)?;
+    let bundle = central_bundle_at(spec, ctrl)?;
     let root = staging.join("checkout");
     fs::create_dir_all(&root).map_err(|e| io("source.snapshot_failed", &root, e))?;
     let files = bundle["files"]
@@ -2503,8 +2777,20 @@ fn prepare_central_source(spec: &SourceSpec, staging: &Path) -> Result<(PathBuf,
     Ok((root, None))
 }
 fn validate_owner_snapshot(spec: &SourceSpec, snapshot: &SnapshotRecord) -> Result<()> {
+    validate_owner_snapshot_with(
+        spec,
+        snapshot,
+        &aikit_adapters::central_file_map::executable(),
+    )
+}
+
+fn validate_owner_snapshot_with(
+    spec: &SourceSpec,
+    snapshot: &SnapshotRecord,
+    ctrl: &Path,
+) -> Result<()> {
     if matches!(&spec.kind, SourceKind::Central { .. }) {
-        let bundle = central_bundle(spec)?;
+        let bundle = central_bundle_at(spec, ctrl)?;
         if bundle["tree_revision"].as_str() != snapshot.owner_revision.as_deref() {
             return Err(AikitError::new("source.central_revision_changed","Central source or standing changed; sync and promote a new owner-backed snapshot before projection"));
         }
@@ -2640,16 +2926,19 @@ mod tests {
     }
 
     /// A `ctrl` that keeps each call's arguments and answers `reply` (FAKE:
-    /// Central's envelope for `control.skills.revision.propose`).
+    /// Central's envelope for `control.skills.revision.propose`), or an
+    /// action's own reply where one is written beside it.
     #[cfg(unix)]
     fn fake_ctrl(dir: &Path, reply: &serde_json::Value) -> PathBuf {
         use std::os::unix::fs::PermissionsExt;
         fs::create_dir_all(dir).unwrap();
         fs::write(dir.join("reply.json"), reply.to_string()).unwrap();
         let ctrl = dir.join("ctrl");
+        // An action with a reply of its own (`<action>.json`) answers it;
+        // every other call answers `reply.json`.
         fs::write(
             &ctrl,
-            "#!/bin/sh\ndir=$(dirname \"$0\")\nfor a in \"$@\"; do printf '%s\\n' \"$a\" >> \"$dir/calls.txt\"; done\nprintf '%s\\n' '---' >> \"$dir/calls.txt\"\ncat \"$dir/reply.json\"\n",
+            "#!/bin/sh\ndir=$(dirname \"$0\")\nfor a in \"$@\"; do printf '%s\\n' \"$a\" >> \"$dir/calls.txt\"; done\nprintf '%s\\n' '---' >> \"$dir/calls.txt\"\nif [ -f \"$dir/$6.json\" ]; then cat \"$dir/$6.json\"; else cat \"$dir/reply.json\"; fi\n",
         )
         .unwrap();
         fs::set_permissions(&ctrl, fs::Permissions::from_mode(0o755)).unwrap();
@@ -2843,5 +3132,248 @@ mod tests {
         let state = load_state(&home, "practice").unwrap();
         assert_eq!(state.proposals.len(), 1);
         assert!(state.proposals[0].handed.is_none());
+    }
+
+    const ALPHA_ONE: &str =
+        "---\nname: alpha\ndescription: A member under refinement.\n---\n\nalpha-one\n";
+    const ALPHA_TWO: &str =
+        "---\nname: alpha\ndescription: A member under refinement.\n---\n\nalpha-two\n";
+
+    fn sha(text: &str) -> String {
+        use sha2::{Digest, Sha256};
+        format!("sha256:{:x}", Sha256::digest(text.as_bytes()))
+    }
+
+    /// Central's skill tree as `central.file-map.skill-tree` answers it
+    /// (FAKE): each file's bytes with Central's content revision, under one
+    /// tree revision.
+    fn central_tree(dir: &Path, tree_revision: &str, files: &[(&str, &str)]) {
+        use base64::Engine;
+        let files: Vec<serde_json::Value> = files
+            .iter()
+            .map(|(path, text)| {
+                let bytes = text.as_bytes();
+                let mut hash = 0xcbf29ce484222325u64;
+                for byte in bytes {
+                    hash ^= u64::from(*byte);
+                    hash = hash.wrapping_mul(0x100000001b3);
+                }
+                serde_json::json!({"path": path, "mode": 0o644,
+                    "content_base64": base64::engine::general_purpose::STANDARD.encode(bytes),
+                    "revision": format!("central.content-fnv1a64/v1:{}:{hash:016x}", bytes.len())})
+            })
+            .collect();
+        fs::write(
+            dir.join("central.file-map.skill-tree.json"),
+            serde_json::json!({"ok": true, "data": {"schema": "central.file-map/v1", "operation": "skill-tree",
+                "result": {"source_ref": "skills", "tree_revision": tree_revision, "world_ref": "world:test",
+                    "project": null, "skills": [], "files": files}}})
+            .to_string(),
+        )
+        .unwrap();
+    }
+
+    /// Central's reading of the skill (FAKE `control.skills.revision.read`):
+    /// the body in use by its digest, and the proposal that waits, if any.
+    fn central_reading(dir: &Path, in_use: &str, waiting: Option<&str>) {
+        let proposal = waiting.map(|digest| {
+            serde_json::json!({"revision_ref": "central:skill-revision:k1", "proposed_digest": digest})
+        });
+        fs::write(
+            dir.join("control.skills.revision.read.json"),
+            serde_json::json!({"ok": true, "data": {"schema": "central.skill-revision-reading/v1", "name": "alpha",
+                "scope": "control-user", "in_use": {"digest": in_use}, "proposal": proposal,
+                "accept": {"available": waiting.is_some(), "action": "control.skills.revision.accept"}}})
+            .to_string(),
+        )
+        .unwrap();
+    }
+
+    /// A Central-kept member's revision, handed to Central (`ctrl` answering
+    /// its propose with the digest of the body it was handed).
+    #[cfg(unix)]
+    fn handed_alpha(home: &AikitHome, temp: &Path, bin: &Path) -> PathBuf {
+        proposed_alpha(home, temp, true);
+        as_central(home, temp, "control-user");
+        let ctrl = fake_ctrl(
+            bin,
+            &serde_json::json!({"ok":true,"data":{"schema":"central.skill-revision-reading/v1","name":"alpha","scope":"control-user",
+                "proposal":{"revision_ref":"central:skill-revision:k1","proposed_digest":sha(ALPHA_TWO)},
+                "accept":{"available":true,"action":"control.skills.revision.accept"}}}),
+        );
+        let Accepted::Handed(_) =
+            accept_revision_with(home, "skill/practice/alpha", &ctrl).unwrap()
+        else {
+            panic!("a Central source's proposal is handed to Central");
+        };
+        ctrl
+    }
+
+    /// The person's one Accept is enough: once Central has written the
+    /// revision AIKit handed it, the member's source follows on its own —
+    /// synced from Central's tree and promoted, through AIKit's own sync and
+    /// promote — and Follow answers what it did: the member's revision in use,
+    /// the snapshot Roll back returns to, and every other member Central's
+    /// tree had moved, which came with it.
+    #[cfg(unix)]
+    #[test]
+    fn after_the_persons_accept_in_central_the_source_follows_with_a_receipt() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = AikitHome::at(temp.path().join("aikit"));
+        home.ensure_layout().unwrap();
+        let source = temp.path().join("practice");
+        skill(&source.join("alpha"), "alpha", "alpha-one");
+        skill(&source.join("beta"), "beta", "beta-one");
+        add_directory(&home, "practice", &source, false).unwrap();
+        sync(&home, "practice").unwrap();
+        promote(&home, "practice", false, &[]).unwrap();
+        let bin = temp.path().join("bin");
+        let ctrl = handed_alpha(&home, temp.path(), &bin);
+        let in_use = load_state(&home, "practice").unwrap().active_snapshot;
+        // Before the person's Accept there, it waits in Central: nothing to follow.
+        central_reading(&bin, &sha(ALPHA_ONE), Some(&sha(ALPHA_TWO)));
+        let waiting = follow_revision_with(&home, "skill/practice/alpha", &ctrl).unwrap_err();
+        assert_eq!(waiting.code(), "refinement.central_waiting");
+        assert!(
+            waiting.message().contains("control.skills.revision.accept"),
+            "{}",
+            waiting.message()
+        );
+        assert_eq!(
+            load_state(&home, "practice").unwrap().active_snapshot,
+            in_use
+        );
+        // The person accepted it: Central's body in use is the one handed.
+        central_reading(&bin, &sha(ALPHA_TWO), None);
+        central_tree(
+            &bin,
+            "central-tree:2",
+            &[
+                ("alpha/SKILL.md", ALPHA_TWO),
+                ("alpha/references/rules.md", "alpha-one\n"),
+                (
+                    "beta/SKILL.md",
+                    "---\nname: beta\ndescription: A member under refinement.\n---\n\nbeta-two\n",
+                ),
+                ("beta/references/rules.md", "beta-one\n"),
+            ],
+        );
+        let followed = follow_revision_with(&home, "skill/practice/alpha", &ctrl).unwrap();
+        assert_eq!(followed.followed, "skill/practice/alpha");
+        assert_eq!(followed.source, "practice");
+        assert_eq!(followed.revision_ref, "central:skill-revision:k1");
+        assert_eq!(followed.accepted_digest, sha(ALPHA_TWO));
+        assert_eq!(followed.owner_revision.as_deref(), Some("central-tree:2"));
+        assert_eq!(followed.rollback_to, in_use);
+        assert_eq!(followed.also_moved, vec!["skill/practice/beta".to_owned()]);
+        assert!(!followed.revision.is_empty());
+        // The member in use is the accepted revision; the proposal is answered.
+        let state = load_state(&home, "practice").unwrap();
+        assert_eq!(
+            state.active_snapshot.as_deref(),
+            Some(followed.active_snapshot.as_str())
+        );
+        assert!(state.proposals.is_empty());
+        assert_eq!(
+            fs::read_to_string(
+                snapshot_dir(&home, "practice", &followed.active_snapshot)
+                    .join("registry/capsules/skill/practice/alpha/payload/SKILL.md")
+            )
+            .unwrap(),
+            ALPHA_TWO
+        );
+        assert!(refinements(&home).unwrap().is_empty());
+        // Central was read for the skill, then for its tree, at Central's root.
+        let made = calls(&bin);
+        let actions: Vec<&str> = made.iter().map(|call| call[5].as_str()).collect();
+        assert_eq!(
+            actions,
+            [
+                "control.skills.revision.propose",
+                "control.skills.revision.read",
+                "control.skills.revision.read",
+                // The sync reads the tree and holds its snapshot to it; the
+                // promotion holds it to the tree once more.
+                "central.file-map.skill-tree",
+                "central.file-map.skill-tree",
+                "central.file-map.skill-tree",
+            ],
+            "{made:?}"
+        );
+        let read: serde_json::Value = serde_json::from_str(&made[2][6]).unwrap();
+        assert_eq!(
+            read,
+            serde_json::json!({"scope": "control-user", "name": "alpha"})
+        );
+        assert_eq!(
+            follow_revision_with(&home, "skill/practice/alpha", &ctrl)
+                .unwrap_err()
+                .code(),
+            "refinement.none"
+        );
+    }
+
+    /// Follow picks up only what the person accepted in Central: a revision
+    /// AIKit keeps itself, one never handed, one Central does not hold in use
+    /// (discarded there, or changed since), and a tree that moved again after
+    /// Central wrote it are each refused in words, and nothing is promoted.
+    #[cfg(unix)]
+    #[test]
+    fn a_follow_of_what_central_has_not_accepted_is_refused_in_words_and_promotes_nothing() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = AikitHome::at(temp.path().join("aikit"));
+        home.ensure_layout().unwrap();
+        let source = temp.path().join("practice");
+        skill(&source.join("alpha"), "alpha", "alpha-one");
+        add_directory(&home, "practice", &source, false).unwrap();
+        sync(&home, "practice").unwrap();
+        promote(&home, "practice", false, &[]).unwrap();
+        let bin = temp.path().join("bin");
+        // A source AIKit keeps: its Accept keeps the revision here.
+        proposed_alpha(&home, temp.path(), true);
+        let ctrl = fake_ctrl(&bin, &serde_json::json!({"ok": false}));
+        let refused = follow_revision_with(&home, "skill/practice/alpha", &ctrl).unwrap_err();
+        assert_eq!(refused.code(), "refinement.not_handed");
+        assert!(
+            refused.message().contains("aikit source refine accept"),
+            "{}",
+            refused.message()
+        );
+        // Central's, never handed: Accept hands it first.
+        as_central(&home, temp.path(), "control-user");
+        let refused = follow_revision_with(&home, "skill/practice/alpha", &ctrl).unwrap_err();
+        assert_eq!(refused.code(), "refinement.not_handed");
+        assert!(calls(&bin).is_empty(), "Central is not asked");
+        discard_revision(&home, "skill/practice/alpha").unwrap();
+        let ctrl = handed_alpha(&home, temp.path(), &bin);
+        let in_use = load_state(&home, "practice").unwrap().active_snapshot;
+        // Discarded in Central: its body in use is the one before.
+        central_reading(&bin, &sha(ALPHA_ONE), None);
+        let refused = follow_revision_with(&home, "skill/practice/alpha", &ctrl).unwrap_err();
+        assert_eq!(refused.code(), "refinement.central_not_accepted");
+        assert!(
+            refused.message().contains("aikit source refine discard"),
+            "{}",
+            refused.message()
+        );
+        // Accepted, but Central's tree moved again before AIKit read it.
+        central_reading(&bin, &sha(ALPHA_TWO), None);
+        central_tree(
+            &bin,
+            "central-tree:3",
+            &[
+                ("alpha/SKILL.md", ALPHA_ONE),
+                ("alpha/references/rules.md", "alpha-one\n"),
+            ],
+        );
+        let refused = follow_revision_with(&home, "skill/practice/alpha", &ctrl).unwrap_err();
+        assert_eq!(refused.code(), "refinement.follow_mismatch");
+        let state = load_state(&home, "practice").unwrap();
+        assert_eq!(state.active_snapshot, in_use, "nothing is promoted");
+        assert_eq!(state.proposals.len(), 1, "the proposal stays");
+        assert!(
+            state.candidate_snapshot.is_some(),
+            "the sync stands as the candidate"
+        );
     }
 }
