@@ -39,6 +39,14 @@ pub const SEARCH_THREADS: u32 = 2;
 /// different installed release is disclosed as version drift in `status()`,
 /// matching the bkmr/GitNexus convention, never refused: literal content
 /// search is a stable surface.
+/// What one retained match may cost a bounded pass in read bytes
+/// ([`RipgrepSearcher::search_bounded`]): its event, the line cut at
+/// `MAX_COLUMNS` with its submatches, and its file's begin and end events.
+pub const MATCH_EVENT_BYTES: usize = 2048;
+
+/// The wall-clock budget of a bounded pass whose request names none.
+const BOUNDED_SEARCH_TIMEOUT: Duration = Duration::from_secs(30);
+
 pub const RIPGREP_TESTED_VERSION: &str = "15.2.0";
 
 pub fn executable() -> PathBuf {
@@ -247,6 +255,45 @@ impl<R: CommandRunner> RipgrepSearcher<R> {
             Some(budget) => self.runner.run_with_timeout(&argv, budget)?,
             None => self.runner.run(&argv)?,
         };
+        Self::outcome_of(request, &argv, &output)
+    }
+
+    /// [`RipgrepSearcher::search`] with what is read bounded as well as what
+    /// is kept: the stream may carry `request.limit` matches' worth of events
+    /// (`MATCH_EVENT_BYTES` each), and a stream past that is not read on. The
+    /// runner stops it at that capacity and refuses the output whole (no
+    /// truncated success), so the pass answers truncated with no sample and
+    /// a ranking caller rescores from its exact counts. A runner that cannot
+    /// bound one read runs the pass unbounded, as [`RipgrepSearcher::search`].
+    pub fn search_bounded(&self, request: &SearchRequest) -> Result<RipgrepOutcome> {
+        if request.is_no_match() || request.roots.is_empty() || request.limit == usize::MAX {
+            return self.search(request);
+        }
+        let argv = request.argv(&self.executable);
+        // Both streams share the allowance half and half: stdout's half is
+        // the match budget.
+        let allowance = request
+            .limit
+            .saturating_add(1)
+            .saturating_mul(MATCH_EVENT_BYTES)
+            .saturating_mul(2);
+        let budget = request.timeout.unwrap_or(BOUNDED_SEARCH_TIMEOUT);
+        match self.runner.run_with_limits(&argv, budget, allowance, false) {
+            Ok(output) => Self::outcome_of(request, &argv, &output),
+            Err(error) if error.code() == "mux.command_output_limit" => Ok(RipgrepOutcome {
+                truncated: true,
+                ..RipgrepOutcome::default()
+            }),
+            Err(error) if error.code() == "mux.command_limits_unsupported" => self.search(request),
+            Err(error) => Err(error),
+        }
+    }
+
+    fn outcome_of(
+        request: &SearchRequest,
+        argv: &[String],
+        output: &crate::runner::Output,
+    ) -> Result<RipgrepOutcome> {
         // 0 = matches, 1 = clean no-match. Both parse their stream; only a
         // ripgrep failure (2) becomes an error.
         let outcome = parse_events(&output.stdout, request.limit)?;
@@ -475,6 +522,55 @@ mod tests {
         assert_eq!(outcome.matches[0].line, "harness gate holds");
         assert!(outcome.truncated);
         assert_eq!(outcome.files_searched, 1);
+    }
+
+    #[test]
+    fn a_bounded_pass_reads_no_more_than_its_matches_are_worth() {
+        let line = rg_json_line("/ground/a.md", 3, "harness gate holds");
+        let within = ScriptedRunner::new().on("--json", &format!("{line}\n"));
+        let mut bounded = request();
+        bounded.limit = 1;
+        let outcome = RipgrepSearcher::new(within, "rg")
+            .search_bounded(&bounded)
+            .unwrap();
+        assert_eq!(outcome.matches.len(), 1);
+        assert!(!outcome.truncated);
+        // Past the two matches' worth its one retained match allows, the
+        // stream is refused whole: truncated, no sample.
+        let flood = format!("{line}\n").repeat(2 * MATCH_EVENT_BYTES / line.len() + 2);
+        let past = ScriptedRunner::new().on("--json", &flood);
+        let outcome = RipgrepSearcher::new(past, "rg")
+            .search_bounded(&bounded)
+            .unwrap();
+        assert_eq!(
+            outcome,
+            RipgrepOutcome {
+                truncated: true,
+                ..RipgrepOutcome::default()
+            }
+        );
+    }
+
+    #[test]
+    fn real_ripgrep_is_stopped_at_the_bounded_pass_s_capacity() {
+        if !available() {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        for index in 0..64 {
+            std::fs::write(dir.path().join(format!("f{index}.md")), "harness gate\n").unwrap();
+        }
+        let mut wide = request();
+        wide.roots = vec![dir.path().to_path_buf()];
+        wide.include_globs = vec![];
+        wide.limit = 1000;
+        let searcher = RipgrepSearcher::new(SystemRunner::new(), executable());
+        let all = searcher.search_bounded(&wide).unwrap();
+        assert_eq!((all.matches.len(), all.truncated), (64, false));
+        let mut narrow = wide.clone();
+        narrow.limit = 2;
+        let cut = searcher.search_bounded(&narrow).unwrap();
+        assert_eq!((cut.matches.len(), cut.truncated), (0, true));
     }
 
     #[test]

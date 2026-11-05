@@ -40,7 +40,7 @@ use aikit_store::edit::{OverlayDocument, ProfileDocument};
 use aikit_store::generation::{self, GenerationBuilder};
 use aikit_store::home::AikitHome;
 use aikit_store::index::Index;
-use aikit_store::registry::{load_project_local, load_registry, RegistryProblem, Snapshot};
+use aikit_store::registry::{load_registry, RegistryProblem, Snapshot};
 use aikit_store::trust::{TrustSnapshot, TrustStore};
 use aikit_store::SessionSpaceApplicationStore;
 
@@ -376,6 +376,14 @@ impl Service {
         Self::open(home, cwd, |k| std::env::var(k).ok())
     }
 
+    /// [`Service::discover`] for `aikit hook dispatch`, which a harness runs
+    /// around every tool call: the catalogue is the retained one while its
+    /// change signal holds ([`load_catalog_retained`]).
+    pub fn discover_for_dispatch(cwd: &Path) -> Result<Self> {
+        let home = AikitHome::discover()?;
+        Self::open_with(home, cwd, |k| std::env::var(k).ok(), true)
+    }
+
     /// Resolve a palette outcome without discarding any of the reviewed intent.
     ///
     /// The capsule supplies the executable entry point. The intent supplies the
@@ -559,11 +567,22 @@ impl Service {
     where
         F: Fn(&str) -> Option<String>,
     {
+        Self::open_with(home, cwd, env, false)
+    }
+
+    fn open_with<F>(home: AikitHome, cwd: &Path, env: F, retained: bool) -> Result<Self>
+    where
+        F: Fn(&str) -> Option<String>,
+    {
         let (project, central_meta_root, knowledge_central_root, descriptor) =
             Self::open_context(&home, cwd, &env)?;
         let project_root = project.as_ref().map(|p| p.root.clone());
 
-        let load = load_catalog(&home, project_root.as_deref())?;
+        let load = if retained {
+            load_catalog_retained(&home, project_root.as_deref())?
+        } else {
+            load_catalog(&home, project_root.as_deref())?
+        };
         let catalog = load.catalog;
         let problems = load.problems;
 
@@ -4518,9 +4537,18 @@ pub fn load_catalog(
     home: &AikitHome,
     project_root: Option<&Path>,
 ) -> Result<aikit_store::registry::RegistryLoad> {
-    use aikit_core::id::RegistrySource;
-    let mut load = aikit_store::registry::RegistryLoad::default();
+    load_roots(&catalog_roots(home, project_root)?)
+}
 
+/// The registry roots a catalogue is read from, in the order they layer: the
+/// home's registries by name, the active skill-source snapshots, then the
+/// project's own `.aikit`.
+fn catalog_roots(
+    home: &AikitHome,
+    project_root: Option<&Path>,
+) -> Result<Vec<(aikit_core::id::RegistrySource, PathBuf)>> {
+    use aikit_core::id::RegistrySource;
+    let mut roots = Vec::new();
     if let Ok(entries) = std::fs::read_dir(home.registries()) {
         let mut names: Vec<String> = entries
             .flatten()
@@ -4529,23 +4557,129 @@ pub fn load_catalog(
             .collect();
         names.sort();
         for name in names {
-            let root = home.registry(&name);
-            let one = load_registry(&root, RegistrySource::new(name))?;
-            load.merge(one);
+            roots.push((RegistrySource::new(name.clone()), home.registry(&name)));
         }
     }
-
     for (name, root) in crate::skill_sources::active_registries(home)? {
-        let one = load_registry(&root, RegistrySource::new(name))?;
-        load.merge(one);
+        roots.push((RegistrySource::new(name), root));
     }
-
     if let Some(root) = project_root {
-        let local = load_project_local(root)?;
-        load.merge(local);
+        roots.push((RegistrySource::project_local(), root.join(".aikit")));
     }
+    Ok(roots)
+}
 
+fn load_roots(
+    roots: &[(aikit_core::id::RegistrySource, PathBuf)],
+) -> Result<aikit_store::registry::RegistryLoad> {
+    let mut load = aikit_store::registry::RegistryLoad::default();
+    for (source, root) in roots {
+        load.merge(load_registry(root, source.clone())?);
+    }
     Ok(load)
+}
+
+/// How many retained catalogues the home keeps, one per set of roots (a
+/// project's `.aikit` is one of them); the oldest written go first.
+const RETAINED_CATALOGUES: usize = 8;
+
+/// [`load_catalog`], retained across processes for hook dispatch (DLW build
+/// ruling 2026-11-05: a retained resolved view for hook dispatch is allowed,
+/// served only while a change signal says none of its inputs moved). The
+/// catalogue is the costly input — every capsule's files read and hashed — so
+/// it is what is kept, under the change signal of every root it is read from
+/// (`registry_walk`, `status_signal`) and of the binary reading it. Which roots are
+/// active is read fresh every time; a load with problems is never kept, so it
+/// is read fresh until they are gone. Everything else the view is resolved
+/// from — trust, the profile layers, the descriptor — and the routines are
+/// read fresh on every dispatch, and the view is resolved fresh over the
+/// catalogue: together they cost about a millisecond.
+pub fn load_catalog_retained(
+    home: &AikitHome,
+    project_root: Option<&Path>,
+) -> Result<aikit_store::registry::RegistryLoad> {
+    use aikit_store::registry::{registry_walk, status_signal, RetainedCatalogue};
+    let roots = catalog_roots(home, project_root)?;
+    let mut named = blake3::Hasher::new();
+    for (source, root) in &roots {
+        named.update(source.to_string().as_bytes());
+        named.update(b"\0");
+        named.update(root.as_os_str().as_encoded_bytes());
+        named.update(b"\0");
+    }
+    let mut reader = named.clone();
+    if let Some(binary) = std::env::current_exe()
+        .ok()
+        .and_then(|path| std::fs::metadata(path).ok())
+    {
+        reader.update(&binary.len().to_le_bytes());
+        if let Ok(modified) = binary.modified() {
+            let since = modified
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default();
+            reader.update(&since.as_nanos().to_le_bytes());
+        }
+    }
+    reader.update(env!("CARGO_PKG_VERSION").as_bytes());
+    let signal_over = |entries: &[aikit_store::registry::RootWalk]| {
+        let mut signal = reader.clone();
+        signal.update(status_signal(entries).as_bytes());
+        signal.finalize().to_hex().to_string()
+    };
+    let dir = home.cache().join("dispatch");
+    let path = dir.join(format!("{}.json", &named.finalize().to_hex()[..24]));
+    // The retained entries are read again, one status read each: an entry added or
+    // removed moves its directory, so the walk is not needed to see it.
+    let kept = std::fs::read(&path)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<RetainedCatalogue>(&bytes).ok())
+        .and_then(|retained| {
+            let signal = signal_over(&retained.entries);
+            retained.load_under(&signal)
+        });
+    if let Some(load) = kept {
+        return Ok(load);
+    }
+    // Fresh: the signal is taken before the load, so a change during it is seen next time.
+    let walked: Vec<&Path> = roots.iter().map(|(_, root)| root.as_path()).collect();
+    let entries = registry_walk(&walked);
+    let signal = signal_over(&entries);
+    let load = load_roots(&roots)?;
+    if let Some(retained) = RetainedCatalogue::of(&load, signal, entries) {
+        let _ = std::fs::create_dir_all(&dir);
+        let staged = dir.join(format!(
+            ".{}-{}.staged",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        if serde_json::to_vec(&retained)
+            .ok()
+            .is_some_and(|body| std::fs::write(&staged, body).is_ok())
+        {
+            let _ = std::fs::rename(&staged, &path);
+        }
+        let _ = std::fs::remove_file(&staged);
+        prune_retained_catalogues(&dir);
+    }
+    Ok(load)
+}
+
+fn prune_retained_catalogues(dir: &Path) {
+    let mut kept: Vec<(std::time::SystemTime, PathBuf)> = std::fs::read_dir(dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter(|entry| entry.file_name().to_string_lossy().ends_with(".json"))
+        .filter_map(|entry| Some((entry.metadata().ok()?.modified().ok()?, entry.path())))
+        .collect();
+    kept.sort();
+    let surplus = kept.len().saturating_sub(RETAINED_CATALOGUES);
+    for (_, path) in kept.into_iter().take(surplus) {
+        let _ = std::fs::remove_file(path);
+    }
 }
 
 /// Turn the discovered project profile chain and the session overlay into the
@@ -5096,5 +5230,76 @@ mod scoped_pi_world_consumer_tests {
         assert!(!serde_json::to_string(&disclosure)
             .unwrap()
             .contains("synthetic-private-origin"));
+    }
+}
+
+#[cfg(test)]
+mod retained_catalogue_tests {
+    use super::*;
+    use aikit_core::catalog::Catalog;
+
+    fn capsule(home: &AikitHome, name: &str, description: &str) -> PathBuf {
+        let base = home
+            .registries()
+            .join(format!("personal/capsules/script/demo/{name}"));
+        std::fs::create_dir_all(base.join("payload")).unwrap();
+        std::fs::write(
+            base.join("manifest.toml"),
+            format!(
+                "schema = 1\nid = \"script/demo/{name}\"\nkind = \"script\"\nname = \"{name}\"\n\
+                 description = \"{description}\"\n\n[script]\nentry = \"payload/run.sh\"\n\
+                 interpreter = [\"/bin/sh\"]\n"
+            ),
+        )
+        .unwrap();
+        std::fs::write(base.join("payload/run.sh"), "echo one\n").unwrap();
+        base
+    }
+
+    fn described(load: &aikit_store::registry::RegistryLoad, name: &str) -> Option<String> {
+        load.catalog
+            .get(&CapsuleId::parse(&format!("script/demo/{name}")).unwrap())
+            .map(|capsule| capsule.description.clone())
+    }
+
+    #[test]
+    fn hook_dispatch_keeps_its_catalogue_while_nothing_it_reads_moves() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = AikitHome::at(temp.path());
+        home.ensure_layout().unwrap();
+        let greet = capsule(&home, "greet", "first");
+        let fresh = load_catalog_retained(&home, None).unwrap();
+        assert_eq!(fresh.catalog, load_catalog(&home, None).unwrap().catalog);
+        let kept: Vec<PathBuf> = std::fs::read_dir(home.cache().join("dispatch"))
+            .unwrap()
+            .flatten()
+            .map(|entry| entry.path())
+            .collect();
+        assert_eq!(kept.len(), 1, "{kept:?}");
+        // What is served while the signal holds is the retained reading: a
+        // retained description no registry file says proves it.
+        let text = std::fs::read_to_string(&kept[0]).unwrap();
+        std::fs::write(&kept[0], text.replace("\"first\"", "\"retained\"")).unwrap();
+        let served = load_catalog_retained(&home, None).unwrap();
+        assert_eq!(described(&served, "greet").as_deref(), Some("retained"));
+        // A payload byte moves the revision and the signal: read fresh.
+        std::fs::write(greet.join("payload/run.sh"), "echo two\n").unwrap();
+        let moved = load_catalog_retained(&home, None).unwrap();
+        assert_eq!(described(&moved, "greet").as_deref(), Some("first"));
+        assert_eq!(moved.catalog, load_catalog(&home, None).unwrap().catalog);
+        // A capsule added is read too.
+        capsule(&home, "wave", "second");
+        let added = load_catalog_retained(&home, None).unwrap();
+        assert_eq!(described(&added, "wave").as_deref(), Some("second"));
+        // A load with a problem is not kept: it is read fresh until it is gone.
+        let broken = home
+            .registries()
+            .join("personal/capsules/script/demo/broken");
+        std::fs::create_dir_all(&broken).unwrap();
+        std::fs::write(broken.join("manifest.toml"), "not toml [").unwrap();
+        let before = std::fs::read(&kept[0]).unwrap();
+        let troubled = load_catalog_retained(&home, None).unwrap();
+        assert_eq!(troubled.problems.len(), 1);
+        assert_eq!(std::fs::read(&kept[0]).unwrap(), before);
     }
 }

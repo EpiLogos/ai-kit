@@ -168,8 +168,11 @@ pub const WORK_REPOS_MAX_READ_BYTES: u64 = 16 * 1024 * 1024;
 /// per project (the NOW-field walk's discipline).
 const MARKER_WALK_DEPTH: usize = 8;
 
-/// Matches retained per repo before grouping; the per-repo *file* limit is the
-/// caller's `limit`, so total materialised hits stay bounded by
+/// Matches retained per repo before grouping, and what the match pass may
+/// read: the stream is stopped past this many matches' worth of events
+/// (`RipgrepSearcher::search_bounded`), so one repository full of a common
+/// word costs a bounded read, not a capture overflow. The per-repo *file*
+/// limit is the caller's `limit`, so total materialised hits stay bounded by
 /// `limit × projects`.
 const PER_REPO_MATCH_BUDGET: usize = 4000;
 
@@ -1166,7 +1169,9 @@ impl<R: CommandRunner> WorkReposSourcePoolProvider<R> {
             timeout: Some(std::time::Duration::from_secs(30)),
         };
         self.require_project(project)?;
-        let outcome = self.searcher.search(&request)?;
+        // The budget bounds what is read, not only what is kept: a stream
+        // past it is stopped, and the pass is rescored from exact counts.
+        let outcome = self.searcher.search_bounded(&request)?;
         self.require_project(project)?;
         // Group matches by file; count distinct terms and keep the first
         // matching line as the snippet. Term membership folds case, matching
@@ -1404,18 +1409,24 @@ impl<R: CommandRunner> WorkReposSourcePoolProvider<R> {
                 )
                 .with("source", source.to_string()));
             }
+            // A pass stopped before it sampled this file takes its snippet
+            // from the check over the selected files: a native line too.
+            let (snippet, line) = match &evidence.snippet {
+                Some(snippet) => (Some(snippet.clone()), evidence.first_line),
+                None => checked_lines.first().map_or((None, 0), |(number, line)| {
+                    let cut: String = line.chars().take(240).collect();
+                    (Some(cut.trim_end().to_string()), *number)
+                }),
+            };
             hits.push(SourceHit {
                 source,
                 revision: Some(before.binding.revision),
                 provider: provider(),
                 score: Some(score),
                 title: safe_work_member(&relative)?.to_owned(),
-                snippet: evidence.snippet.clone().unwrap_or_default(),
+                provider_binding: snippet.as_ref().map(|_| format!("line:{line}")),
+                snippet: snippet.unwrap_or_default(),
                 tags: Self::tags(project),
-                provider_binding: evidence
-                    .snippet
-                    .as_ref()
-                    .map(|_| format!("line:{}", evidence.first_line)),
                 retrieval_mode: SourceSearchMode::Fulltext,
             });
         }

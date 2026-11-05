@@ -136,8 +136,14 @@ pub fn resolve(home: &AikitHome, cwd: &Path) -> Result<Option<ProjectMatch>> {
         )
     })?;
     let mut candidates: Vec<(usize, ProjectSpec, PathBuf, &'static str)> = Vec::new();
-    let repository = repository_at(&cwd);
-    for spec in load_all(home)? {
+    let specs = load_all(home)?;
+    // Only a specification that names repositories asks which one `cwd` is.
+    let repository = specs
+        .iter()
+        .any(|spec| !spec.repositories.is_empty())
+        .then(|| repository_at(&cwd))
+        .flatten();
+    for spec in specs {
         for directory in &spec.directories {
             if cwd.starts_with(directory) && same_repository_boundary(directory, &cwd) {
                 candidates.push((
@@ -349,7 +355,63 @@ fn same_repository_boundary(root: &Path, cwd: &Path) -> bool {
     !cwd_git.starts_with(root) || world_ground(root, &cwd_git)
 }
 
+/// The environment that moves git's answer about where a repository is or
+/// what it is configured with. Where any is set, git itself is asked.
+const GIT_ENVIRONMENT: [&str; 11] = [
+    "GIT_DIR",
+    "GIT_WORK_TREE",
+    "GIT_COMMON_DIR",
+    "GIT_CEILING_DIRECTORIES",
+    "GIT_DISCOVERY_ACROSS_FILESYSTEM",
+    "GIT_CONFIG",
+    "GIT_CONFIG_GLOBAL",
+    "GIT_CONFIG_SYSTEM",
+    "GIT_CONFIG_NOSYSTEM",
+    "GIT_CONFIG_COUNT",
+    "GIT_CONFIG_PARAMETERS",
+];
+
+fn git_environment_set() -> bool {
+    GIT_ENVIRONMENT
+        .iter()
+        .any(|key| std::env::var_os(key).is_some_and(|value| !value.is_empty()))
+}
+
+/// The working tree `path` stands in, as `git rev-parse --show-toplevel`
+/// answers for an ordinary checkout or a linked worktree: the nearest
+/// directory, `path` included, holding a `.git` directory with a `HEAD` or a
+/// `.git` file naming its gitdir. Read from the filesystem, since a process
+/// per question cost every Service two git spawns; git is asked only where
+/// its environment says otherwise.
 fn git_root(path: &Path) -> Option<PathBuf> {
+    if git_environment_set() {
+        return git_toplevel(path);
+    }
+    let start = fs::canonicalize(path).ok()?;
+    start
+        .ancestors()
+        .find(|dir| git_dir_of(dir).is_some())
+        .map(Path::to_path_buf)
+}
+
+/// The gitdir a working tree's `.git` names: the directory itself, or the
+/// one a `.git` file points at.
+fn git_dir_of(dir: &Path) -> Option<PathBuf> {
+    let marker = dir.join(".git");
+    if marker.join("HEAD").is_file() {
+        return Some(marker);
+    }
+    let text = fs::read_to_string(&marker).ok()?;
+    let named = text.lines().next()?.strip_prefix("gitdir:")?.trim();
+    let gitdir = Path::new(named);
+    Some(if gitdir.is_absolute() {
+        gitdir.to_path_buf()
+    } else {
+        dir.join(gitdir)
+    })
+}
+
+fn git_toplevel(path: &Path) -> Option<PathBuf> {
     let output = std::process::Command::new("git")
         .args([
             "-C",
@@ -367,6 +429,15 @@ fn git_root(path: &Path) -> Option<PathBuf> {
 
 fn repository_at(path: &Path) -> Option<(String, PathBuf)> {
     let root = git_root(path)?;
+    let remote = match configured_origin(&root) {
+        Some(known) => known?,
+        None => git_origin(&root)?,
+    };
+    let identity = normalize_repository_identity(remote.trim()).ok()?;
+    Some((identity, root))
+}
+
+fn git_origin(root: &Path) -> Option<String> {
     let output = std::process::Command::new("git")
         .args([
             "-C",
@@ -377,12 +448,103 @@ fn repository_at(path: &Path) -> Option<(String, PathBuf)> {
         ])
         .output()
         .ok()?;
-    if !output.status.success() {
+    output
+        .status
+        .success()
+        .then(|| String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+/// The git configuration outside the repository that `git remote get-url`
+/// also reads: the user's and the system's, wherever this machine's git keeps
+/// them.
+fn shared_git_configs() -> Vec<PathBuf> {
+    let mut configs: Vec<PathBuf> = [
+        "/etc/gitconfig",
+        "/opt/homebrew/etc/gitconfig",
+        "/usr/local/etc/gitconfig",
+        "/Library/Developer/CommandLineTools/usr/share/git-core/gitconfig",
+        "/Applications/Xcode.app/Contents/Developer/usr/share/git-core/gitconfig",
+    ]
+    .into_iter()
+    .map(PathBuf::from)
+    .collect();
+    let home = std::env::var_os("HOME").map(PathBuf::from);
+    if let Some(home) = &home {
+        configs.push(home.join(".gitconfig"));
+    }
+    match std::env::var_os("XDG_CONFIG_HOME").filter(|value| !value.is_empty()) {
+        Some(xdg) => configs.push(PathBuf::from(xdg).join("git").join("config")),
+        None => configs.extend(home.map(|home| home.join(".config").join("git").join("config"))),
+    }
+    configs
+}
+
+/// What `git remote get-url origin` answers in `root`, read from the
+/// repository's own configuration: `Some(None)` when it names no origin, and
+/// `None` when the configuration does what this reading does not follow (an
+/// include, a URL rewrite, a per-worktree config, an origin named outside the
+/// repository, a quoted or continued value, git's own environment), so git
+/// itself is asked.
+fn configured_origin(root: &Path) -> Option<Option<String>> {
+    if git_environment_set() {
         return None;
     }
-    let remote = String::from_utf8_lossy(&output.stdout);
-    let identity = normalize_repository_identity(remote.trim()).ok()?;
-    Some((identity, root))
+    let gitdir = git_dir_of(root)?;
+    let common = match fs::read_to_string(gitdir.join("commondir")) {
+        Ok(text) => {
+            let named = Path::new(text.trim());
+            if named.is_absolute() {
+                named.to_path_buf()
+            } else {
+                gitdir.join(named)
+            }
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => gitdir,
+        Err(_) => return None,
+    };
+    let local = fs::read_to_string(common.join("config")).ok()?;
+    let followed = |text: &str| {
+        let lowered = text.to_ascii_lowercase();
+        !lowered.contains("include") && !lowered.contains("insteadof")
+    };
+    if !followed(&local) || local.to_ascii_lowercase().contains("worktreeconfig") {
+        return None;
+    }
+    for shared in shared_git_configs() {
+        match fs::read_to_string(&shared) {
+            Ok(text) if !followed(&text) || text.to_ascii_lowercase().contains("[remote") => {
+                return None
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(_) => return None,
+        }
+    }
+    let mut in_origin = false;
+    for line in local.lines() {
+        let line = line.trim();
+        if line.starts_with('[') {
+            let header = line.trim_end_matches(|c: char| c != ']');
+            in_origin =
+                header == "[remote \"origin\"]" || header.eq_ignore_ascii_case("[remote.origin]");
+            continue;
+        }
+        if !in_origin {
+            continue;
+        }
+        let Some((key, value)) = line.split_once('=') else {
+            continue;
+        };
+        if !key.trim().eq_ignore_ascii_case("url") {
+            continue;
+        }
+        let value = value.trim();
+        if value.contains(['"', '\\']) || value.contains(['#', ';']) {
+            return None;
+        }
+        return Some(Some(value.to_owned()));
+    }
+    Some(None)
 }
 
 fn project_file(home: &AikitHome, id: &str) -> PathBuf {
@@ -469,4 +631,90 @@ fn stable_unique(values: impl IntoIterator<Item = String>) -> Vec<String> {
 fn io(path: &Path, error: std::io::Error) -> AikitError {
     AikitError::new("project.io_failed", format!("{}: {error}", path.display()))
         .with("path", path.display().to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn git(cwd: &Path, args: &[&str]) -> String {
+        let output = std::process::Command::new("git")
+            .arg("-C")
+            .arg(cwd)
+            .args(args)
+            .output()
+            .unwrap();
+        String::from_utf8_lossy(&output.stdout).trim().to_owned()
+    }
+
+    #[test]
+    fn the_repository_read_from_its_files_is_the_one_git_answers() {
+        if std::process::Command::new("git")
+            .arg("--version")
+            .output()
+            .is_err()
+            || git_environment_set()
+        {
+            return;
+        }
+        let temp = tempfile::tempdir().unwrap();
+        let main = temp.path().join("main");
+        fs::create_dir_all(main.join("src/deep")).unwrap();
+        git(&main, &["init", "-q"]);
+        git(
+            &main,
+            &[
+                "-c",
+                "user.email=a@b",
+                "-c",
+                "user.name=a",
+                "commit",
+                "-q",
+                "--allow-empty",
+                "-m",
+                "first",
+            ],
+        );
+        // No origin yet: the files say so, as git does.
+        assert_eq!(configured_origin(&main), Some(None));
+        git(
+            &main,
+            &[
+                "remote",
+                "add",
+                "origin",
+                "https://github.com/epilogos/ai-kit.git",
+            ],
+        );
+        let linked = temp.path().join("linked");
+        git(&main, &["worktree", "add", "-q", linked.to_str().unwrap()]);
+        for (at, top) in [(main.join("src/deep"), &main), (linked.clone(), &linked)] {
+            let answered = PathBuf::from(git(&at, &["rev-parse", "--show-toplevel"]));
+            assert_eq!(git_root(&at), Some(answered.clone()), "{at:?}");
+            assert_eq!(git_root(&at).unwrap(), fs::canonicalize(top).unwrap());
+            assert_eq!(
+                configured_origin(&answered),
+                Some(Some(git(&answered, &["remote", "get-url", "origin"])))
+            );
+            assert_eq!(
+                repository_at(&at).map(|(identity, _)| identity),
+                Some("github.com/epilogos/ai-kit".to_owned())
+            );
+        }
+        assert_eq!(git_root(temp.path()), None);
+        // A URL rewrite is git's to apply: the reading leaves it to git.
+        git(
+            &main,
+            &[
+                "config",
+                "url.https://example.com/.insteadOf",
+                "https://github.com/",
+            ],
+        );
+        assert_eq!(configured_origin(&main), None);
+        assert_eq!(
+            repository_at(&main).map(|(identity, _)| identity),
+            Some("example.com/epilogos/ai-kit".to_owned())
+        );
+    }
 }

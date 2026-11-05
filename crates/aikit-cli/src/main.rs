@@ -6608,7 +6608,7 @@ fn cmd_bypasses(cwd: &std::path::Path) -> Result<Reply> {
 
 fn cmd_hook(cwd: &std::path::Path, c: HookCmd, json_mode: bool) -> Result<Reply> {
     let HookSub::Dispatch(a) = c.command;
-    let service = Service::discover(cwd)?;
+    let service = Service::discover_for_dispatch(cwd)?;
 
     let payload: Value = read_stdin_json();
     let event: HookEvent = hook::normalize(&a.client, &a.event, payload);
