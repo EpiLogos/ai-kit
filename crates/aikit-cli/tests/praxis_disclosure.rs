@@ -258,6 +258,100 @@ fn activity_evidence_separates_selected_loaded_and_invoked() {
 }
 
 #[test]
+fn a_session_s_development_entry_answers_for_its_activity() {
+    let (home, project) = fixture();
+    let profile = profile(project.path());
+    // The record the development entry keeps for a body launched under
+    // `agent-session/direct-745` (O-I 745): the harness's own key, and the
+    // alias from the launch to it.
+    let entry = home.path().join("state/development-entry");
+    let key = blake3::hash(b"claude\0s-745").to_hex().to_string();
+    let launched = format!(
+        "ses_{}",
+        &blake3::hash(b"agent-session/direct-745").to_hex()[..24]
+    );
+    write(
+        &entry.join(format!("{key}.json")),
+        &json!({"schema": "aikit.development-entry/v1", "client": "claude", "session": "s-745",
+            "concern": "work ticket #745", "project": "O-I", "checkout": project.path(),
+            "rendered_digest": "", "prepared_version": null, "source_revisions": {},
+            "emitted_at_unix_ms": 0, "loaded": ["docs-methodology"], "aikit_session": launched})
+        .to_string(),
+    );
+    write(
+        &entry.join("sessions").join(format!(
+            "{}.json",
+            blake3::hash(launched.as_bytes()).to_hex()
+        )),
+        &json!({"client": "claude", "session": "s-745"}).to_string(),
+    );
+    let open = run(
+        home.path(),
+        project.path(),
+        &[
+            "praxis",
+            "activity",
+            "--session",
+            "agent-session/direct-745",
+        ],
+    );
+    assert_eq!(open["data"]["schema"], "aikit.praxis-session/v1");
+    assert_eq!(open["data"]["standing"], "open");
+    assert_eq!(open["data"]["record"], "claude:s-745");
+    assert_eq!(open["data"]["activity"]["relied_upon"], json!([]));
+
+    // The close left its evidence: the session's record answers for it.
+    write(
+        &entry.join(format!("{key}.activity.json")),
+        &json!({"schema": "aikit.praxis-activity/v1", "loaded": ["skill/demo/docs-methodology"],
+            "relied_upon": ["skill/demo/docs-methodology"]})
+        .to_string(),
+    );
+    let closed = run(
+        home.path(),
+        project.path(),
+        &["praxis", "activity", "--session", "claude:s-745"],
+    );
+    assert_eq!(closed["data"]["standing"], "closed");
+    assert_eq!(
+        closed["data"]["activity"]["relied_upon"],
+        json!(["skill/demo/docs-methodology"])
+    );
+    let reading = run(
+        home.path(),
+        project.path(),
+        &[
+            "praxis",
+            "disclose",
+            "--profile-json",
+            &profile,
+            "--activity-session",
+            "agent-session/direct-745",
+        ],
+    );
+    let praxis = reading["data"]["praxis"].as_array().unwrap();
+    let docs = praxis
+        .iter()
+        .find(|entry| entry["id"] == "skill/demo/docs-methodology")
+        .unwrap();
+    assert_eq!(docs["involvement"]["loaded"], true);
+    assert_eq!(docs["involvement"]["relied_upon"], true);
+
+    let none = run(
+        home.path(),
+        project.path(),
+        &[
+            "praxis",
+            "activity",
+            "--session",
+            "agent-session/direct-other",
+        ],
+    );
+    assert_eq!(none["data"]["standing"], "unrecorded");
+    assert_eq!(none["data"]["activity"], Value::Null);
+}
+
+#[test]
 fn a2a_card_publishes_only_public_capabilities() {
     let (home, project) = fixture();
     let participation = project.path().join("participation.json");

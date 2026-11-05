@@ -5168,6 +5168,7 @@ fn cmd_praxis(cwd: &std::path::Path, a: PraxisCmd) -> Result<Reply> {
         PraxisSub::Disclose {
             profile_json,
             activity_json,
+            activity_session,
             select,
             now_workcell,
             now_machine,
@@ -5177,6 +5178,18 @@ fn cmd_praxis(cwd: &std::path::Path, a: PraxisCmd) -> Result<Reply> {
             now_primary,
         } => {
             let service = Service::discover(cwd)?;
+            // A session's record answers for its activity as the JSON would.
+            let activity_json = match activity_session {
+                Some(session) => {
+                    let reading = aikit_cli::development_entry::session_practice(
+                        &service.home().state(),
+                        service.resolved(),
+                        &session,
+                    )?;
+                    Some(reading["activity"].to_string()).filter(|json| json != "null")
+                }
+                None => activity_json,
+            };
             let data = aikit_cli::praxis_cli::disclose(
                 service.home(),
                 service.resolved(),
@@ -5193,6 +5206,15 @@ fn cmd_praxis(cwd: &std::path::Path, a: PraxisCmd) -> Result<Reply> {
                 }),
             )?;
             Ok(reply(&service, data, diagnostic_warnings(&service)))
+        }
+        PraxisSub::Activity { session } => {
+            let service = Service::discover(cwd)?;
+            let data = aikit_cli::development_entry::session_practice(
+                &service.home().state(),
+                service.resolved(),
+                &session,
+            )?;
+            Ok(reply(&service, data, vec![]))
         }
         PraxisSub::InstantiateCheck { invocation_json } => {
             let service = Service::discover(cwd)?;

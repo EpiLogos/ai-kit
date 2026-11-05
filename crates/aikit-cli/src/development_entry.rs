@@ -439,8 +439,13 @@ fn search_sources(
     WorkReposSourcePoolProvider<SystemRunner>,
     Vec<aikit_core::knowledge_source_pool::SourceHit>,
 )> {
+    // Body-free: a search that overflows its capture names the bytes it
+    // read, never the bytes themselves (a 16 MB match stream once rode into
+    // every receipt and filled the entry's whole budget).
     let provider = WorkReposSourcePoolProvider::connect_native(
-        SystemRunner::new().with_timeout(Duration::from_secs(10)),
+        SystemRunner::new()
+            .with_timeout(Duration::from_secs(10))
+            .with_body_free_diagnostics(),
         aikit_adapters::ripgrep::executable(),
         vec![project],
     )?;
@@ -817,8 +822,22 @@ pub fn collect_inventory(
         capabilities,
         praxis,
         matrix,
-        absences,
+        absences: absences.into_iter().map(bounded_absence).collect(),
     }
+}
+
+/// An absence as the entry names it: one line, at most `ABSENCE_CHARS`
+/// characters. What is missing stands above the bounded lists, so it must
+/// never be the part that fills the bound.
+const ABSENCE_CHARS: usize = 320;
+fn bounded_absence(absence: String) -> String {
+    let line = absence.replace('\n', " ");
+    if line.chars().count() <= ABSENCE_CHARS {
+        return line;
+    }
+    let mut cut: String = line.chars().take(ABSENCE_CHARS - 1).collect();
+    cut.push('…');
+    cut
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -1257,6 +1276,10 @@ pub struct EntryLedger {
     /// naming them again costs no forge read.
     #[serde(default)]
     pub tickets_read: BTreeSet<String>,
+    /// The AIKit session the body was launched under, when it was
+    /// (`EntryRequest::aikit_session`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub aikit_session: Option<String>,
 }
 
 fn ledger_work_owner(
@@ -1607,6 +1630,10 @@ fn mark_emitted(
 pub struct EntryRequest<'a> {
     pub event: &'a HookEvent,
     pub client: &'a str,
+    /// The AIKit session the body was launched under (`AIKIT_SESSION_ID`,
+    /// which `SessionId::of_agent_session` derives from an AgentSession ref),
+    /// when it was: what lets the rack of that AgentSession find this record.
+    pub aikit_session: Option<&'a str>,
     pub config: &'a EntryConfig,
     pub state: &'a Path,
     pub central: Option<&'a Path>,
@@ -1946,7 +1973,9 @@ fn prepare(
     // carries what it changed.
     let mut selection = ordinary_selection(&inventory, depth);
     selection.ticket = ticket.clone();
-    selection.degradations.extend(ticket_gaps);
+    selection
+        .degradations
+        .extend(ticket_gaps.into_iter().map(bounded_absence));
     let refine = match request.config.selection.as_deref() {
         Some("provider") => match (
             &request.config.provider_file,
@@ -2058,8 +2087,15 @@ fn prepare(
             .map(|l| l.invoked.clone())
             .unwrap_or_default(),
         tickets_read,
+        aikit_session: request
+            .aikit_session
+            .map(str::to_owned)
+            .or_else(|| prior.as_ref().and_then(|l| l.aikit_session.clone())),
     };
     store_ledger(request.state, &ledger);
+    if let Some(launched) = &ledger.aikit_session {
+        store_alias(request.state, launched, request.client, session);
+    }
     if refine {
         if let Err(reason) = spawn_refinement(request.client, session, &scope.checkout) {
             store_receipt(
@@ -3395,6 +3431,117 @@ pub fn activity_path(state: &Path, client: &str, session: &str) -> PathBuf {
     ledger_path(state, client, session).with_extension("activity.json")
 }
 
+/// Where the record of the body launched under one AIKit session is named,
+/// so a reader that knows only the AgentSession finds the harness's own.
+fn alias_path(state: &Path, aikit_session: &str) -> PathBuf {
+    state
+        .join("development-entry")
+        .join("sessions")
+        .join(format!(
+            "{}.json",
+            blake3::hash(aikit_session.as_bytes()).to_hex()
+        ))
+}
+
+fn store_alias(state: &Path, aikit_session: &str, client: &str, session: &str) {
+    let path = alias_path(state, aikit_session);
+    let body = json!({"client": client, "session": session});
+    let kept = std::fs::read(&path)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok());
+    if kept.as_ref() == Some(&body) {
+        return;
+    }
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let _ = std::fs::write(path, body.to_string());
+}
+
+fn load_alias(state: &Path, aikit_session: &str) -> Option<(String, String)> {
+    let kept: Value =
+        serde_json::from_slice(&std::fs::read(alias_path(state, aikit_session)).ok()?).ok()?;
+    Some((
+        kept["client"].as_str()?.to_owned(),
+        kept["session"].as_str()?.to_owned(),
+    ))
+}
+
+pub const PRAXIS_SESSION_SCHEMA: &str = "aikit.praxis-session/v1";
+
+/// The practice one session loaded, invoked and relied on, read from its
+/// development-entry record (`aikit praxis activity --session`; O-I 745, the
+/// Skillset rack's Loaded, Invoked and Relied-on rungs). `session` is the
+/// record's own `<client>:<id>` (spelled `agent-session/<client>:<id>` too),
+/// an AgentSession ref the body was launched under, or that launch's AIKit
+/// session id. `closed`: the evidence the ticket's close left, relied-on
+/// included. `open`: what the session has loaded and invoked so far; nothing
+/// is relied on until a close names it. `unrecorded`: no entry is kept.
+pub fn session_practice(state: &Path, view: &ResolvedView, session: &str) -> Result<Value> {
+    practice_of(state, &active_catalogue(view, &BTreeMap::new()), session)
+}
+
+fn practice_of(state: &Path, catalogue: &[PraxisCandidate], session: &str) -> Result<Value> {
+    let named = session.trim();
+    let bare = named.strip_prefix("agent-session/").unwrap_or(named);
+    let own = bare
+        .split_once(':')
+        .filter(|(client, id)| !client.is_empty() && !id.is_empty() && !client.contains('/'))
+        .map(|(client, id)| (client.to_owned(), id.to_owned()));
+    let kept = own
+        .clone()
+        .filter(|(client, id)| load_ledger(state, client, id).is_some());
+    let record = match (kept, own) {
+        (Some(record), _) => Some(record),
+        // A record's own name that nothing keeps: unrecorded, unless it is
+        // also an AgentSession a body was launched under.
+        (None, Some(_)) if !named.starts_with("agent-session/") => None,
+        (None, _) => {
+            let unnamed = || {
+                fail(
+                    "development_entry.session_unnamed",
+                    format!("`{named}` names no session: give `<client>:<id>`, an AgentSession ref or an AIKit session id"),
+                )
+            };
+            let launched = if bare.starts_with("ses_") {
+                bare.to_owned()
+            } else if named.starts_with("agent-session/") {
+                let reference = ResourceRef::parse(named).map_err(|_| unnamed())?;
+                aikit_core::SessionId::of_agent_session(&reference).to_string()
+            } else {
+                return Err(unnamed());
+            };
+            load_alias(state, &launched)
+        }
+    };
+    let unrecorded = |reason: &str| {
+        json!({"schema": PRAXIS_SESSION_SCHEMA, "session": named, "record": Value::Null,
+            "standing": "unrecorded", "ticket": Value::Null, "activity": Value::Null, "reason": reason})
+    };
+    let Some((client, id)) = record else {
+        return Ok(unrecorded("no development entry is kept for this session"));
+    };
+    let Some(ledger) = load_ledger(state, &client, &id) else {
+        return Ok(unrecorded(
+            "the session's development entry is no longer kept",
+        ));
+    };
+    let closed: Option<aikit_core::agent_praxis::PraxisActivity> =
+        std::fs::read(activity_path(state, &client, &id))
+            .ok()
+            .and_then(|bytes| serde_json::from_slice(&bytes).ok());
+    let standing = if closed.is_some() { "closed" } else { "open" };
+    let activity = match closed {
+        Some(activity) => activity,
+        None => session_activity(&ledger, &[], catalogue).0,
+    };
+    Ok(json!({
+        "schema": PRAXIS_SESSION_SCHEMA, "session": named, "record": format!("{client}:{id}"),
+        "standing": standing, "ticket": ledger.ticket.as_ref().map(ClaimedTicket::label),
+        "activity": activity, "reason": Value::Null,
+    }))
+}
+
 /// The use check, on a PreToolUse: why this tool call's close of the
 /// session's claimed ticket must be refused, or `None`. Every other call
 /// answers from the command text alone, before any file is read.
@@ -3687,6 +3834,7 @@ mod tests {
             loaded: BTreeSet::new(),
             invoked: BTreeSet::new(),
             tickets_read: BTreeSet::new(),
+            aikit_session: None,
         };
         store_ledger(temp.path(), &ledger);
         assert_eq!(load_ledger(temp.path(), "claude", "s1"), Some(ledger));
@@ -4116,6 +4264,7 @@ mod tests {
             loaded: loaded.iter().map(|n| (*n).to_owned()).collect(),
             invoked: BTreeSet::new(),
             tickets_read: BTreeSet::new(),
+            aikit_session: None,
         }
     }
 
@@ -4246,6 +4395,73 @@ mod tests {
     }
 
     #[test]
+    fn a_session_s_practice_is_read_by_its_record_or_by_its_launch() {
+        let temp = tempfile::tempdir().unwrap();
+        let launch = ResourceRef::parse("agent-session/direct-745").unwrap();
+        let launched = aikit_core::SessionId::of_agent_session(&launch).to_string();
+        let mut ledger = ledger_with(claimed_723(), &["wayfinder", "grilling"]);
+        ledger.invoked.insert("wayfinder".into());
+        ledger.aikit_session = Some(launched.clone());
+        store_ledger(temp.path(), &ledger);
+        store_alias(temp.path(), &launched, "claude", "s-723");
+        let read = |session: &str| practice_of(temp.path(), &catalogue(), session).unwrap();
+        // Open: what it loaded and invoked so far; nothing relied on yet.
+        for named in [
+            "claude:s-723",
+            "agent-session/claude:s-723",
+            "agent-session/direct-745",
+            launched.as_str(),
+        ] {
+            let open = read(named);
+            assert_eq!(open["schema"], PRAXIS_SESSION_SCHEMA);
+            assert_eq!(open["standing"], "open", "{named}: {open}");
+            assert_eq!(open["record"], "claude:s-723");
+            assert_eq!(open["ticket"], "EpiLogos/O-I#723");
+            assert_eq!(
+                open["activity"]["loaded"],
+                json!(["skill/central/grilling", "skill/central/wayfinder"])
+            );
+            assert_eq!(
+                open["activity"]["invoked"],
+                json!(["skill/central/wayfinder"])
+            );
+            assert_eq!(open["activity"]["relied_upon"], json!([]));
+        }
+        // Closed: the evidence the close left, relied-on included.
+        let (closed, _) = session_activity(&ledger, &["wayfinder".to_owned()], &catalogue());
+        std::fs::write(
+            activity_path(temp.path(), "claude", "s-723"),
+            serde_json::to_vec(&closed).unwrap(),
+        )
+        .unwrap();
+        let after = read("agent-session/direct-745");
+        assert_eq!(after["standing"], "closed");
+        assert_eq!(
+            after["activity"]["relied_upon"],
+            json!(["skill/central/wayfinder"])
+        );
+        // Another launch, or a record never kept, is unrecorded, not empty.
+        for other in ["agent-session/direct-other", "claude:never"] {
+            let none = read(other);
+            assert_eq!(none["standing"], "unrecorded", "{other}");
+            assert_eq!(none["activity"], Value::Null);
+        }
+        assert!(practice_of(temp.path(), &catalogue(), "not a session").is_err());
+    }
+
+    #[test]
+    fn an_overflowing_absence_is_one_bounded_line() {
+        let flood = format!(
+            "source search unavailable: captured_stdout={}",
+            "{\"type\":\"match\"}\n".repeat(100_000)
+        );
+        let line = bounded_absence(flood);
+        assert_eq!(line.chars().count(), ABSENCE_CHARS);
+        assert!(line.ends_with('…') && !line.contains('\n'));
+        assert_eq!(bounded_absence("short".into()), "short");
+    }
+
+    #[test]
     fn the_refinement_the_hook_spawns_is_a_command_the_cli_parses() {
         use clap::Parser;
         let mut argv = vec![std::ffi::OsString::from("aikit")];
@@ -4300,6 +4516,7 @@ mod tests {
             EntryRequest {
                 event,
                 client: "claude",
+                aikit_session: None,
                 config,
                 state,
                 central: None,
@@ -4485,6 +4702,7 @@ mod tests {
             loaded: BTreeSet::new(),
             invoked: BTreeSet::new(),
             tickets_read: BTreeSet::new(),
+            aikit_session: None,
         };
         let state = world.join("owned-entry-state");
         store_ledger(&state, &ledger);
