@@ -2633,7 +2633,7 @@ mod tests {
             printf ready > "$2"
             n=0
             while [ ! -e "$1" ] && [ "$n" -lt 500 ]; do
-                if [ -e "$3" ]; then printf alive > "$4"; fi
+                if [ -e "$3" ]; then printf alive > "$4.part" && mv "$4.part" "$4"; fi
                 n=$((n+1)); sleep 0.02
             done
             printf stopped > "$5"
@@ -3304,7 +3304,7 @@ mod tests {
             exec >/dev/null 2>/dev/null
             printf ready > "$2"
             while [ ! -e "$1" ]; do
-                if [ -e "$3" ]; then printf alive > "$4"; fi
+                if [ -e "$3" ]; then printf alive > "$4.part" && mv "$4.part" "$4"; fi
                 sleep 0.02
             done
             printf stopped > "$5"
@@ -3382,7 +3382,7 @@ mod tests {
             exec >/dev/null 2>/dev/null
             printf ready > "$2"
             while [ ! -e "$1" ]; do
-                if [ -e "$3" ]; then printf alive > "$4"; fi
+                if [ -e "$3" ]; then printf alive > "$4.part" && mv "$4.part" "$4"; fi
                 sleep 0.02
             done
             printf stopped > "$5"

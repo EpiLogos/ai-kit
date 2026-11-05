@@ -1129,6 +1129,7 @@ fn now_context_route(command: &NowContextCmd) -> &'static str {
         NowContextSub::Contemplate(_) => "cmd_now_contemplate",
         NowContextSub::TestSelection(_) => "cmd_now_test_selection",
         NowContextSub::PublishIntelligence(_) => "cmd_now_publish_intelligence",
+        NowContextSub::EntryRefine(_) => "cmd_now_entry_refine",
         NowContextSub::Service(c) => match &c.command {
             NowServiceSub::Provision(_) => "cmd_now_service_provision",
             NowServiceSub::Start(_) => "cmd_now_service_start",
@@ -1830,6 +1831,12 @@ pub enum NowContextSub {
     /// into the participant's prepared view through the existing CAS publish
     /// path, and append one replayable change per published item.
     PublishIntelligence(Box<NowPublishIntelligenceArgs>),
+    /// Refine one session's development entry with the elected decision
+    /// provider, publishing by compare-and-swap against the emitted version.
+    /// The development-entry hook starts this detached
+    /// (`development_entry::spawn_refinement`); it is not a step a person
+    /// needs to run.
+    EntryRefine(NowEntryRefineArgs),
     /// Provision, start, inspect, stop, restart and upgrade the local Redis
     /// NOW service through AIKit's own lifecycle — no Workcell involved.
     Service(NowServiceCmd),
@@ -1973,6 +1980,17 @@ pub struct NowTestSelectionArgs {
     /// An `aikit.contemplation-decision/v1` from `now-context contemplate`.
     #[arg(long, value_name = "PATH")]
     pub decision: Option<std::path::PathBuf>,
+}
+
+#[derive(Debug, Args)]
+pub struct NowEntryRefineArgs {
+    #[arg(long)]
+    pub client: String,
+    #[arg(long)]
+    pub session: String,
+    /// The session's checkout, as the hook saw it.
+    #[arg(long = "cwd", value_name = "DIR")]
+    pub cwd: std::path::PathBuf,
 }
 
 #[derive(Debug, Args)]

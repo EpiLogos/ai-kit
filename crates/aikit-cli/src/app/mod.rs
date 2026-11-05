@@ -2381,6 +2381,8 @@ impl Service {
     ///   PreToolUse wait in front of every call;
     /// * composed continuity reactions on their events: file-context on
     ///   PreToolUse (the rest ride the events above already);
+    /// * the development entry's use check, on PreToolUse, when its capsule
+    ///   is active;
     /// * Enabled Event Routines whose trigger names this client and event.
     pub fn working_hook_events(
         &self,
@@ -2403,6 +2405,15 @@ impl Service {
         }
         let tuning = ContinuityTuning::resolve(&self.view);
         if tuning.allows(aikit_core::continuity::FILE_CONTEXT) {
+            working.insert(HookEventKind::PreToolUse);
+        }
+        // The development entry's use check refuses a Wayfinder ticket's close
+        // before it happens, so it needs the PreToolUse it gates.
+        if self
+            .view
+            .active
+            .contains_key(&CapsuleId::parse(crate::development_entry::CAPABILITY)?)
+        {
             working.insert(HookEventKind::PreToolUse);
         }
         let routines = aikit_store::RoutineStore::new(self.home.clone()).list()?;
@@ -2521,21 +2532,30 @@ impl Service {
         // Development entry: the concern-selected operative context for a body
         // entered directly into a Project checkout or seat. Operative only when
         // the composition selects its capsule; a failure is named in the
-        // body's context (ordinary operation continues) and never gates.
+        // body's context (ordinary operation continues) and never gates. Its
+        // one refusal is the use check (O-I 723): closing the session's
+        // claimed Wayfinder ticket before it loaded the practice the ticket
+        // names, or with a result that claims practice it never loaded.
         if matches!(
             event.kind,
             aikit_core::hooks::HookEventKind::SessionStart
                 | aikit_core::hooks::HookEventKind::UserPromptSubmit
                 | aikit_core::hooks::HookEventKind::PreCompact
+                | aikit_core::hooks::HookEventKind::PreToolUse
+                | aikit_core::hooks::HookEventKind::PostToolUse
         ) {
             let id = CapsuleId::parse(crate::development_entry::CAPABILITY)?;
             if let Some(active) = self.view.active.get(&id) {
                 let central = crate::temporal::central_root_enclosing(event.cwd.as_deref());
                 let roots = self.catalog.capsule_roots();
                 let state = self.home.state();
+                // On PreToolUse the entry is the use check, which answers with
+                // a refusal or nothing; on every other event it delivers.
+                let checking = event.kind == aikit_core::hooks::HookEventKind::PreToolUse;
+                let allowed = decision.allowed;
                 let outcome = crate::development_entry::EntryConfig::from_table(&active.config)
                     .and_then(|config| {
-                        crate::development_entry::deliver(&crate::development_entry::EntryRequest {
+                        let request = crate::development_entry::EntryRequest {
                             event,
                             client: &event.client,
                             config: &config,
@@ -2543,12 +2563,33 @@ impl Service {
                             central: central.as_deref(),
                             view: &self.view,
                             capsule_roots: &roots,
-                        })
+                        };
+                        match (checking, allowed) {
+                            (false, _) => crate::development_entry::deliver(&request),
+                            (true, true) => crate::development_entry::check_resolution(&request),
+                            // A call an earlier step refused is not checked.
+                            (true, false) => Ok(None),
+                        }
                     });
-                match outcome {
-                    Ok(Some(text)) => decision.injected.push(text),
-                    Ok(None) => {}
-                    Err(error) => decision.injected.push(format!(
+                match (checking, outcome) {
+                    (true, Ok(Some(reason))) => {
+                        decision.allowed = false;
+                        decision.denial = Some(aikit_core::hooks::Denial {
+                            capsule: id.clone(),
+                            phase: aikit_core::capsule::HookPhase::Gate,
+                            reason,
+                            from_system_failure: false,
+                        });
+                    }
+                    // A check that could not run fails open, and says so.
+                    (true, Err(error)) => decision.warnings.push(format!(
+                        "development entry use check unavailable: {}: {}",
+                        error.code(),
+                        error.message()
+                    )),
+                    (false, Ok(Some(text))) => decision.injected.push(text),
+                    (_, Ok(None)) => {}
+                    (false, Err(error)) => decision.injected.push(format!(
                         "[Development entry unavailable] {}: {} — nothing was prepared for this turn; ordinary operation continues.",
                         error.code(),
                         error.message()
