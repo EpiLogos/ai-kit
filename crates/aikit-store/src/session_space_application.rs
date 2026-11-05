@@ -350,13 +350,17 @@ impl SessionSpaceApplicationStore {
     /// none ever stands in no space. Answers the receipts in order. A step
     /// that fails says what stands and what to press next; a Group that
     /// stopped once the sessions stood in the set's space is finished by the
-    /// next press with the same `into`.
+    /// next press with the same `into`. With `agent_set`, the set's space is
+    /// tied to the Central agent set the chains were accepted as, so the set
+    /// held as a chain reads its own Join; a stopped Group whose space is not
+    /// tied yet is tied by the next press.
     pub fn group(
         &self,
         from: &SessionSpaceRef,
         agent_sessions: &[aikit_core::resource::ResourceRef],
         into: SessionSpaceRef,
         label: Option<String>,
+        agent_set: Option<aikit_core::session_space_application::SessionSpaceAgentSetBinding>,
     ) -> Result<Vec<SessionSpaceReceipt>> {
         let source = self.load(from)?;
         let mut receipts = Vec::new();
@@ -379,17 +383,36 @@ impl SessionSpaceApplicationStore {
                     ),
                 ));
             }
+            if let Some(binding) = agent_set.filter(|binding| {
+                set.agent_set.as_ref().map(|tied| &tied.agent_set_ref)
+                    != Some(&binding.agent_set_ref)
+            }) {
+                let tied = self
+                    .stage(Some(&into), SessionSpaceMutation::BindAgentSet { binding })
+                    .and_then(|preview| self.apply(&preview));
+                receipts.push(tied.map_err(|why| {
+                    AikitError::new(
+                        "session_space.group_untied",
+                        format!(
+                            "Group stopped at tying {into} to its set: the sessions stand in {into}; {}. Press Group again to finish.",
+                            why.message()
+                        ),
+                    )
+                })?);
+            }
         } else {
             let (set_intents, _) = aikit_core::session_space_application::group_intents(
                 &source,
                 agent_sessions,
                 into.clone(),
                 label.clone(),
+                agent_set,
             )?;
             for (index, intent) in set_intents.into_iter().enumerate() {
                 let step = match &intent {
                     SessionSpaceMutation::Create { .. } => "making the set's space",
                     SessionSpaceMutation::BindProjectContext { .. } => "its Project",
+                    SessionSpaceMutation::BindAgentSet { .. } => "tying it to its set",
                     SessionSpaceMutation::AttachAgentSession { .. } => "seating a session",
                     _ => "a bench",
                 };
@@ -1039,12 +1062,18 @@ mod tests {
             store.apply(&attach).unwrap();
         }
         let pair = SessionSpaceRef::parse("session-space/crew-pair").unwrap();
+        let tie = aikit_core::session_space_application::SessionSpaceAgentSetBinding {
+            agent_set_ref: "agent-set:crew-pair".into(),
+            revision: Some("r1".into()),
+            provenance: vec!["accepted with Group".into()],
+        };
         let receipts = store
             .group(
                 &crew,
                 &[who("ada"), who("bo")],
                 pair.clone(),
                 Some("pair".into()),
+                Some(tie.clone()),
             )
             .unwrap();
         assert_eq!(
@@ -1053,14 +1082,20 @@ mod tests {
                 "session-space/crew-pair",
                 "session-space/crew-pair",
                 "session-space/crew-pair",
+                "session-space/crew-pair",
                 "session-space/crew",
                 "session-space/crew",
                 "session-space/crew",
             ],
-            "the set's space and its seats first, then the set held, then the sessions taken out last"
+            "the set's space, its tie and its seats first, then the set held, then the sessions taken out last"
         );
         let set = store.load(&pair).unwrap();
         assert_eq!(set.agent_sessions.len(), 2);
+        assert_eq!(
+            set.agent_set.as_ref(),
+            Some(&tie),
+            "the set held as a chain reads its own Join from Central"
+        );
         let rack = store.load(&crew).unwrap();
         assert_eq!(
             rack.agent_sessions.keys().collect::<Vec<_>>(),
@@ -1069,7 +1104,7 @@ mod tests {
         assert_eq!(rack.set_chains[&pair].purpose.as_deref(), Some("pair"));
         // A standing space that is no stopped Group is refused; nothing is written.
         let standing = store
-            .group(&crew, &[who("cy")], pair.clone(), None)
+            .group(&crew, &[who("cy")], pair.clone(), None, None)
             .unwrap_err();
         assert_eq!(standing.code(), "session_space.group_into_standing");
         assert_eq!(store.load(&crew).unwrap(), rack);
@@ -1099,14 +1134,31 @@ mod tests {
             )
             .unwrap();
         store.apply(&seat).unwrap();
+        let trio_set = aikit_core::session_space_application::SessionSpaceAgentSetBinding {
+            agent_set_ref: "agent-set:crew-trio".into(),
+            revision: Some("r1".into()),
+            provenance: Vec::new(),
+        };
         let finished = store
-            .group(&crew, &[who("cy")], trio.clone(), None)
+            .group(
+                &crew,
+                &[who("cy")],
+                trio.clone(),
+                None,
+                Some(trio_set.clone()),
+            )
             .unwrap();
         assert_eq!(
             finished.len(),
-            2,
-            "the set held, then cy taken out; nothing seated twice"
+            3,
+            "the set's space tied, the set held, then cy taken out; nothing seated twice"
         );
+        assert_eq!(store.load(&trio).unwrap().agent_set, Some(trio_set.clone()));
+        // Pressed again with the same tie, nothing is tied twice.
+        assert!(store
+            .group(&crew, &[who("cy")], trio.clone(), None, Some(trio_set))
+            .unwrap()
+            .is_empty());
         let rack = store.load(&crew).unwrap();
         assert!(rack.agent_sessions.is_empty());
         assert_eq!(rack.set_chains.len(), 2);

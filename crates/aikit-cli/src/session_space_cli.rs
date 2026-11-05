@@ -510,7 +510,9 @@ enum Command {
     /// Project contexts and its bench; --space holds --into as one chain, and
     /// each session is detached from --space last. Each step is an ordinary
     /// stage and apply; answers the receipts in order. A Group that stopped
-    /// partway is finished by the same call.
+    /// partway is finished by the same call. --agent-set ties --into to the
+    /// Central agent set the chains were accepted as (its revision with
+    /// --agent-set-revision), so the set held as a chain reads its own Join.
     Group {
         #[arg(long)]
         space: String,
@@ -520,6 +522,10 @@ enum Command {
         into: String,
         #[arg(long)]
         label: Option<String>,
+        #[arg(long = "agent-set")]
+        agent_set: Option<String>,
+        #[arg(long = "agent-set-revision", requires = "agent_set")]
+        agent_set_revision: Option<String>,
     },
     /// Swap a chain's agent for another (O-I manual §19.15, the Agent rack's
     /// Hot-Swap), keeping the rest of its chain: a new, separately attributed
@@ -1545,6 +1551,8 @@ fn run(cli: Cli) -> Result<()> {
             agent_sessions,
             into,
             label,
+            agent_set,
+            agent_set_revision,
         } => emit(
             &SessionSpaceApplicationStore::new(home.clone()).group(
                 &space_ref(&space)?,
@@ -1554,6 +1562,15 @@ fn run(cli: Cli) -> Result<()> {
                     .collect::<Result<Vec<_>>>()?,
                 space_ref(&into)?,
                 label,
+                agent_set.map(|agent_set_ref| {
+                    aikit_core::session_space_application::SessionSpaceAgentSetBinding {
+                        agent_set_ref,
+                        revision: agent_set_revision,
+                        provenance: vec![
+                            "tied by Group, as the set its chains were accepted as".into()
+                        ],
+                    }
+                }),
             )?,
         ),
         Command::HotSwap {
@@ -2194,14 +2211,53 @@ mod epi_prime_cli_tests {
                 agent_sessions,
                 into,
                 label,
+                agent_set,
+                agent_set_revision,
             } => {
                 assert_eq!(space, "session-space/crew");
                 assert_eq!(agent_sessions, ["agent-session/ada", "agent-session/bo"]);
                 assert_eq!(into, "session-space/crew-pair");
                 assert_eq!(label, None);
+                assert_eq!((agent_set, agent_set_revision), (None, None));
             }
             other => panic!("group parsed as {other:?}"),
         }
+        let tied = Cli::try_parse_from([
+            "aikit-session-space",
+            "group",
+            "--space",
+            "session-space/crew",
+            "--agent-session",
+            "agent-session/ada",
+            "--into",
+            "session-space/crew-pair",
+            "--agent-set",
+            "agent-set:crew-pair",
+            "--agent-set-revision",
+            "r1",
+        ])
+        .unwrap();
+        assert!(matches!(
+            tied.command,
+            Command::Group { agent_set: Some(ref set), agent_set_revision: Some(ref revision), .. }
+                if set == "agent-set:crew-pair" && revision == "r1"
+        ));
+        assert!(
+            Cli::try_parse_from([
+                "aikit-session-space",
+                "group",
+                "--space",
+                "session-space/crew",
+                "--agent-session",
+                "agent-session/ada",
+                "--into",
+                "session-space/crew-pair",
+                "--agent-set-revision",
+                "r1",
+            ])
+            .is_err(),
+            "a revision names the set it is of"
+        );
         assert!(
             Cli::try_parse_from([
                 "aikit-session-space",
