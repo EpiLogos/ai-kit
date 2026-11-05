@@ -635,6 +635,18 @@ fn missing_task_authority_refuses_before_now_allocation() {
     assert!(!w.root.join("Control/agents/now").exists());
 }
 
+/// A task reading is the record as prepared and, beside it, the task's
+/// Budget as `turns`; before the person sets one it names no cap.
+fn assert_reads_as_prepared(reading: &Value, prepared: &Value) {
+    let mut record = reading.clone();
+    let turns = record
+        .as_object_mut()
+        .and_then(|reading| reading.remove("turns"))
+        .expect("a task reading discloses its Budget as turns");
+    assert_eq!(turns["cap"], Value::Null, "{turns}");
+    assert_eq!(&record, prepared);
+}
+
 #[test]
 #[ignore = "requires exact source-built Central, Workcell and Actuation; mandatory CAW lane"]
 fn refused_central_source_amendment_keeps_ready_task_and_same_now() {
@@ -645,7 +657,7 @@ fn refused_central_source_amendment_keeps_ready_task_and_same_now() {
         "--agent-session".into(),
         "agent-session/task".into(),
     ]);
-    assert_eq!(before, ready);
+    assert_reads_as_prepared(&before, &ready);
     let mut amended = w.prepare_input();
     amended["central"]["source_refs"] = json!(["source/agency", "source/new-skill"]);
     let refused = w.command(&[

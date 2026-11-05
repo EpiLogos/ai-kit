@@ -376,7 +376,7 @@ fn absent_attachment_foreign_host_and_dropped_requirement_cannot_start_work() {
         "--agent-session".into(),
         "agent-session/task".into(),
     ]);
-    assert_eq!(current, prepared);
+    assert_reads_as_prepared(&current, &prepared);
     assert!(!w.root.join("Work/demo/src/protocol.log").exists());
 }
 
