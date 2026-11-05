@@ -33,7 +33,8 @@ use crate::gateway_install::{
 use crate::gateway_ops::read_process_record;
 use crate::gateway_upgrade::{
     default_plan, plan_line, plan_reading, write_atomic, CommandOutcome, DrainRecord, Driver,
-    Identity, Installer, Mode, Running, StartAction, Store, Transaction, UpgradeEnv, UpgradeOrigin,
+    Identity, Installer, Lingering, LingeringChild, Mode, Running, StartAction, Store, Transaction,
+    UpgradeEnv, UpgradeOrigin,
 };
 
 /// Start a worker as a plain detached process instead of under the service
@@ -96,6 +97,33 @@ impl SystemEnv {
             .nth(1)
             .and_then(|pid| pid.trim_matches(|c: char| !c.is_ascii_digit()).parse().ok())
     }
+}
+
+/// The live children of `parent` in a `ps -A -o pid=,ppid=,lstart=,command=`
+/// table. `lstart` is five words on both platforms (`Thu Nov  5 06:10:02
+/// 2026`); the command is the rest of the line.
+pub fn children_in_process_table(parent: u32, table: &str) -> Vec<LingeringChild> {
+    table
+        .lines()
+        .filter_map(|line| {
+            let mut words = line.split_whitespace();
+            let pid = words.next()?.parse::<u32>().ok()?;
+            let ppid = words.next()?.parse::<u32>().ok()?;
+            if ppid != parent {
+                return None;
+            }
+            let since = words.by_ref().take(5).collect::<Vec<_>>();
+            if since.len() != 5 {
+                return None;
+            }
+            let command = words.collect::<Vec<_>>().join(" ");
+            Some(LingeringChild {
+                pid,
+                command,
+                since: Some(since.join(" ")),
+            })
+        })
+        .collect()
 }
 
 /// The executable a service definition runs: launchd's first
@@ -412,6 +440,29 @@ impl UpgradeEnv for SystemEnv {
             ),
             ..DrainRecord::default()
         })
+    }
+
+    fn lingering(&self, pid: u32) -> Result<Option<Lingering>> {
+        // `kill -0` asks whether the process exists without signalling it.
+        let alive = self
+            .control
+            .run("kill", &["-0".to_owned(), pid.to_string()])?
+            .status
+            .success();
+        if !alive {
+            return Ok(None);
+        }
+        let table = self.control.run(
+            "ps",
+            &[
+                "-A".to_owned(),
+                "-o".to_owned(),
+                "pid=,ppid=,lstart=,command=".to_owned(),
+            ],
+        )?;
+        Ok(Some(Lingering {
+            children: children_in_process_table(pid, &String::from_utf8_lossy(&table.stdout)),
+        }))
     }
 
     fn start_service(&self, lifecycle: GatewayLifecycle) -> Result<StartAction> {
@@ -1433,6 +1484,23 @@ pub fn probe_remote(remote: &crate::gateway_contact::GatewayRemote) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_lingering_gateway_s_children_are_read_from_the_process_table() {
+        let table = "    1     0 Mon Nov  2 08:00:00 2026     /sbin/launchd\n \
+                      5591     1 Thu Nov  5 05:58:12 2026     /Users/p/.local/bin/aikit gateway serve --unix\n \
+                      6010  5591 Thu Nov  5 06:10:00 2026     ctrl --json --root /Users/p/Central action run central.file-map.refresh {\"embeddings\":true}\n \
+                      6011  6010 Thu Nov  5 06:10:01 2026     git status\n";
+        assert_eq!(
+            children_in_process_table(5591, table),
+            vec![LingeringChild {
+                pid: 6010,
+                command: "ctrl --json --root /Users/p/Central action run central.file-map.refresh {\"embeddings\":true}".into(),
+                since: Some("Thu Nov 5 06:10:00 2026".into()),
+            }]
+        );
+        assert!(children_in_process_table(6011, table).is_empty());
+    }
 
     fn transaction_in(store: &Store, id: &str, phase: crate::gateway_upgrade::Phase, updated: u64) {
         let mut transaction: crate::gateway_upgrade::Transaction =

@@ -340,6 +340,122 @@ impl SessionSpaceApplicationStore {
         Ok(receipts)
     }
 
+    /// Group (O-I manual §19.15, the Agent rack: "select agents' chains and
+    /// choose Group: they become one chain that holds an Agent rack of
+    /// them"): `agent_sessions` of `from` move into `into`, a set's own space
+    /// in the same Project, and `from` holds `into` as one chain. Each step is
+    /// an ordinary stage and apply (aikit-core `group_intents`): the set's
+    /// space is made and every session seated there first, the set is held as
+    /// a chain of `from`, and the sessions are detached from `from` last, so
+    /// none ever stands in no space. Answers the receipts in order. A step
+    /// that fails says what stands and what to press next; a Group that
+    /// stopped once the sessions stood in the set's space is finished by the
+    /// next press with the same `into`.
+    pub fn group(
+        &self,
+        from: &SessionSpaceRef,
+        agent_sessions: &[aikit_core::resource::ResourceRef],
+        into: SessionSpaceRef,
+        label: Option<String>,
+    ) -> Result<Vec<SessionSpaceReceipt>> {
+        let source = self.load(from)?;
+        let mut receipts = Vec::new();
+        if self.state_file(&into).exists() {
+            // A Group that stopped partway seated every session in `into`
+            // while `from` may still hold some, and may not yet hold `into`.
+            let set = self.load(&into)?;
+            let marker = format!("grouped out of {from}");
+            let finishing = !agent_sessions.is_empty()
+                && agent_sessions.iter().all(|session| {
+                    set.agent_sessions
+                        .get(session)
+                        .is_some_and(|seat| seat.provenance.contains(&marker))
+                });
+            if !finishing {
+                return Err(AikitError::new(
+                    "session_space.group_into_standing",
+                    format!(
+                        "{into} already stands: Group makes a set in a space of its own; to join a standing space, attach the sessions there"
+                    ),
+                ));
+            }
+        } else {
+            let (set_intents, _) = aikit_core::session_space_application::group_intents(
+                &source,
+                agent_sessions,
+                into.clone(),
+                label.clone(),
+            )?;
+            for (index, intent) in set_intents.into_iter().enumerate() {
+                let step = match &intent {
+                    SessionSpaceMutation::Create { .. } => "making the set's space",
+                    SessionSpaceMutation::BindProjectContext { .. } => "its Project",
+                    SessionSpaceMutation::AttachAgentSession { .. } => "seating a session",
+                    _ => "a bench",
+                };
+                let applied = self
+                    .stage((index > 0).then_some(&into), intent)
+                    .and_then(|preview| self.apply(&preview));
+                receipts.push(applied.map_err(|why| {
+                    AikitError::new(
+                        "session_space.group_unseated",
+                        format!(
+                            "Group stopped at {step}: {from} still holds every chain it had; {}{}. Detach what {into} holds, or press Group again once it holds them all.",
+                            why.message(),
+                            if index > 0 { format!("; {into} stands") } else { String::new() }
+                        ),
+                    )
+                })?);
+            }
+        }
+        // The rack's own steps, read again: what a stopped press already did
+        // is not done twice.
+        let source = self.load(from)?;
+        let held = source.set_chains.contains_key(&into);
+        let set_chain = SessionSpaceMutation::AttachSetChain {
+            chain: aikit_core::session_space_application::SessionSpaceSetChain {
+                space: into.clone(),
+                purpose: label,
+                provenance: vec![format!(
+                    "grouped from {} of the rack's chains",
+                    agent_sessions.len()
+                )],
+            },
+        };
+        let steps = (!held).then_some(set_chain).into_iter().chain(
+            agent_sessions
+                .iter()
+                .filter(|session| source.agent_sessions.contains_key(*session))
+                .map(|session| SessionSpaceMutation::DetachAgentSession {
+                    agent_session: session.clone(),
+                }),
+        );
+        for intent in steps {
+            let step = match &intent {
+                SessionSpaceMutation::AttachSetChain { .. } => {
+                    "holding the set as a chain".to_owned()
+                }
+                SessionSpaceMutation::DetachAgentSession { agent_session } => {
+                    format!("taking {agent_session} out of {from}")
+                }
+                _ => "the rack".to_owned(),
+            };
+            let applied = self
+                .stage(Some(from), intent)
+                .and_then(|preview| self.apply(&preview));
+            receipts.push(applied.map_err(|why| {
+                AikitError::new(
+                    "session_space.group_stopped",
+                    format!(
+                        "Group stopped at {step}: the sessions stand in {into}, the set's space, and {from} still holds some of them; {}. Press Group again to finish.",
+                        why.message()
+                    ),
+                )
+            })?);
+        }
+        Ok(receipts)
+    }
+
     /// Stage restoration from one exact prior receipt through the same current
     /// basis/preview/apply authority. History never writes canonical state itself.
     pub fn stage_restore(
@@ -899,6 +1015,102 @@ mod tests {
                 .is_err(),
             "a refusal writes nothing"
         );
+    }
+
+    #[test]
+    fn group_makes_a_set_of_the_chosen_chains_and_a_stopped_group_is_finished_by_the_next_press() {
+        // O-I manual §19.15: "select agents' chains and choose Group: they become one chain that holds an Agent rack of them".
+        let (_dir, store) = store();
+        let crew = create(&store, "crew").space;
+        let who = |name: &str| ResourceRef::parse(format!("agent-session/{name}")).unwrap();
+        for name in ["ada", "bo", "cy"] {
+            let attach = store
+                .stage(
+                    Some(&crew),
+                    SessionSpaceMutation::AttachAgentSession {
+                        attachment: SessionSpaceAgentAttachmentIntent {
+                            agent_session: who(name),
+                            purpose: Some(format!("{name}'s chain")),
+                            provenance: vec!["seated".into()],
+                        },
+                    },
+                )
+                .unwrap();
+            store.apply(&attach).unwrap();
+        }
+        let pair = SessionSpaceRef::parse("session-space/crew-pair").unwrap();
+        let receipts = store
+            .group(
+                &crew,
+                &[who("ada"), who("bo")],
+                pair.clone(),
+                Some("pair".into()),
+            )
+            .unwrap();
+        assert_eq!(
+            receipts.iter().map(|receipt| receipt.space.to_string()).collect::<Vec<_>>(),
+            [
+                "session-space/crew-pair",
+                "session-space/crew-pair",
+                "session-space/crew-pair",
+                "session-space/crew",
+                "session-space/crew",
+                "session-space/crew",
+            ],
+            "the set's space and its seats first, then the set held, then the sessions taken out last"
+        );
+        let set = store.load(&pair).unwrap();
+        assert_eq!(set.agent_sessions.len(), 2);
+        let rack = store.load(&crew).unwrap();
+        assert_eq!(
+            rack.agent_sessions.keys().collect::<Vec<_>>(),
+            vec![&who("cy")]
+        );
+        assert_eq!(rack.set_chains[&pair].purpose.as_deref(), Some("pair"));
+        // A standing space that is no stopped Group is refused; nothing is written.
+        let standing = store
+            .group(&crew, &[who("cy")], pair.clone(), None)
+            .unwrap_err();
+        assert_eq!(standing.code(), "session_space.group_into_standing");
+        assert_eq!(store.load(&crew).unwrap(), rack);
+
+        // A Group that stopped after seating: the rack still holds a session and does not hold the set yet.
+        let trio = SessionSpaceRef::parse("session-space/crew-trio").unwrap();
+        let created = store
+            .stage(
+                None,
+                SessionSpaceMutation::Create {
+                    id: trio.clone(),
+                    label: None,
+                },
+            )
+            .unwrap();
+        store.apply(&created).unwrap();
+        let seat = store
+            .stage(
+                Some(&trio),
+                SessionSpaceMutation::AttachAgentSession {
+                    attachment: SessionSpaceAgentAttachmentIntent {
+                        agent_session: who("cy"),
+                        purpose: None,
+                        provenance: vec!["grouped out of session-space/crew".into()],
+                    },
+                },
+            )
+            .unwrap();
+        store.apply(&seat).unwrap();
+        let finished = store
+            .group(&crew, &[who("cy")], trio.clone(), None)
+            .unwrap();
+        assert_eq!(
+            finished.len(),
+            2,
+            "the set held, then cy taken out; nothing seated twice"
+        );
+        let rack = store.load(&crew).unwrap();
+        assert!(rack.agent_sessions.is_empty());
+        assert_eq!(rack.set_chains.len(), 2);
+        assert_eq!(store.load(&trio).unwrap().agent_sessions.len(), 1);
     }
 
     #[test]

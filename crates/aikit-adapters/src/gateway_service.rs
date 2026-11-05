@@ -341,6 +341,151 @@ pub struct GatewayTickLoop {
     pub hook: Box<dyn GatewayTick>,
 }
 
+/// How long a stop waits for a running tick to finish on its own before it
+/// ends the tick's command. Well inside a service manager's own escalation
+/// (launchd's ExitTimeOut is 20 s), so the drained, persisted exit is still
+/// the gateway's own.
+pub const TICK_STOP_GRACE: Duration = Duration::from_secs(5);
+/// How long a stop waits for the tick to end once its command was ended: the
+/// runner's group cleanup is bounded at 2 s. A tick still running after this
+/// is left to end with the process.
+const TICK_END_WAIT: Duration = Duration::from_secs(5);
+
+/// What a stop met in the tick loop when the tick had not finished within
+/// [`TICK_STOP_GRACE`]: the command it was running and since when, and
+/// whether ending that command let the tick end. Recorded in the stop's
+/// drain report and the service log, so a stop that had to end work says
+/// which work.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TickAtStop {
+    /// The command the tick was running, when it was running one through the
+    /// runner.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command: Option<crate::runner::RunningCommand>,
+    pub grace_ms: u64,
+    /// `false`: the tick did not end once its command was ended, and it is
+    /// left to end with the process.
+    pub tick_ended: bool,
+}
+
+impl TickAtStop {
+    pub fn sentence(&self) -> String {
+        let since = |command: &crate::runner::RunningCommand| {
+            jiff::Timestamp::from_second((command.since_unix_ms / 1000) as i64).map_or_else(
+                |_| format!("{} ms", command.since_unix_ms),
+                |at| at.to_string(),
+            )
+        };
+        match (&self.command, self.tick_ended) {
+            (Some(command), true) => format!(
+                "stopped with a tick still running: {}, since {}; its child was ended",
+                command.command,
+                since(command)
+            ),
+            (Some(command), false) => format!(
+                "stopped with a tick still running: {}, since {}; its child was ended but the \
+                 tick did not return, so it is left to end with the process",
+                command.command,
+                since(command)
+            ),
+            (None, true) => format!(
+                "stopped with a tick still running after {} ms and no command of its own; it \
+                 ended when the stop was raised",
+                self.grace_ms
+            ),
+            (None, false) => format!(
+                "stopped with a tick still running after {} ms and no command of its own to \
+                 end; it is left to end with the process",
+                self.grace_ms
+            ),
+        }
+    }
+}
+
+/// The running tick loop and the stop its commands answer to.
+struct TickLoopHandle {
+    handle: JoinHandle<()>,
+    stop: crate::runner::CommandStop,
+}
+
+/// End the tick loop for a service stop without waiting on it unboundedly:
+/// the shutdown flag is already set, so a tick between passes ends at once;
+/// one still running after the grace has its command ended (and no other
+/// started), and one that still does not return is left to end with the
+/// process. `None` when the tick ended inside the grace.
+fn end_tick_loop(tick: TickLoopHandle, grace: Duration) -> Option<TickAtStop> {
+    let finished_within = |handle: &JoinHandle<()>, within: Duration| {
+        let deadline = std::time::Instant::now() + within;
+        loop {
+            if handle.is_finished() {
+                return true;
+            }
+            if std::time::Instant::now() >= deadline {
+                return false;
+            }
+            thread::sleep(Duration::from_millis(20));
+        }
+    };
+    if finished_within(&tick.handle, grace) {
+        let _ = tick.handle.join();
+        return None;
+    }
+    let command = tick.stop.running();
+    tick.stop.raise();
+    let tick_ended = finished_within(&tick.handle, TICK_END_WAIT);
+    if tick_ended {
+        let _ = tick.handle.join();
+    }
+    Some(TickAtStop {
+        command,
+        grace_ms: grace.as_millis() as u64,
+        tick_ended,
+    })
+}
+
+/// The operator's stop: drain the conversation turns, stop the carriers, end
+/// the tick within its grace, and say in one log line what the stop met.
+fn stop_on_signal(
+    runtime: &GatewayServiceRuntime,
+    shutdown: &AtomicBool,
+    tick_loop: &Mutex<Option<TickLoopHandle>>,
+) {
+    let drained = runtime
+        .engine
+        .as_ref()
+        .map(|engine| engine.drain("stop requested by the operating system", None));
+    shutdown.store(true, Ordering::SeqCst);
+    // The tick is part of what the stop met: it ends inside its grace, or its
+    // command is ended and the drain report and the log say which.
+    let tick_at_stop =
+        take_tick_loop(tick_loop).and_then(|tick| end_tick_loop(tick, TICK_STOP_GRACE));
+    match drained {
+        Some(Ok(mut report)) => {
+            report.tick_at_stop = tick_at_stop;
+            eprintln!("gateway drained for stop: {}", report.stop_summary());
+        }
+        Some(Err(error)) => match tick_at_stop {
+            Some(tick) => eprintln!(
+                "gateway drain for stop failed: {error}; {}",
+                tick.sentence()
+            ),
+            None => eprintln!("gateway drain for stop failed: {error}"),
+        },
+        None => {
+            if let Some(tick) = tick_at_stop {
+                eprintln!("gateway {}", tick.sentence());
+            }
+        }
+    }
+}
+
+fn take_tick_loop(tick_loop: &Mutex<Option<TickLoopHandle>>) -> Option<TickLoopHandle> {
+    tick_loop
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .take()
+}
+
 /// The serving gateway's own Workcell occupancy, read from that Workcell's
 /// occupancy owner (Actuation) at the moment a peer asks. The gateway keeps no
 /// copy: a reader answers each `occupancy-read`/`occupancy-list` command fresh,
@@ -993,12 +1138,14 @@ fn serve_gateway_service(
 
     let mut workers = Vec::new();
 
-    let tick_loop: Option<(Arc<AtomicBool>, std::thread::JoinHandle<()>)> =
-        ticks.map(|loop_config| {
-            let tick_shutdown = Arc::new(AtomicBool::new(false));
+    // Every command a tick runs answers to `stop`: a service stop ends the
+    // one still running after its grace instead of waiting on it.
+    let tick_loop: Arc<Mutex<Option<TickLoopHandle>>> =
+        Arc::new(Mutex::new(ticks.map(|loop_config| {
+            let stop = crate::runner::CommandStop::new();
             let handle = {
                 let shutdown = Arc::clone(&shutdown);
-                let tick_shutdown = Arc::clone(&tick_shutdown);
+                let stop = stop.clone();
                 thread::spawn(move || {
                     let GatewayTickLoop { interval, hook } = loop_config;
                     let mut last_error = None;
@@ -1008,7 +1155,7 @@ fn serve_gateway_service(
                     let mut until_next_tick = interval;
                     while !shutdown.load(Ordering::SeqCst) {
                         if until_next_tick == Duration::ZERO {
-                            if let Err(error) = hook.tick() {
+                            if let Err(error) = stop.scope(|| hook.tick()) {
                                 last_error = Some(error);
                             }
                             until_next_tick = interval;
@@ -1017,11 +1164,10 @@ fn serve_gateway_service(
                         until_next_tick = until_next_tick.saturating_sub(step);
                     }
                     let _ = last_error;
-                    tick_shutdown.store(true, Ordering::SeqCst);
                 })
             };
-            (tick_shutdown, handle)
-        });
+            TickLoopHandle { handle, stop }
+        })));
 
     if let Some(bind) = config.websocket_bind.clone() {
         let token = config
@@ -1120,20 +1266,11 @@ fn serve_gateway_service(
     let stop_watcher = stop_signal.map(|signal| {
         let shutdown = Arc::clone(&shutdown);
         let runtime = Arc::clone(&runtime);
+        let tick_loop = Arc::clone(&tick_loop);
         thread::spawn(move || {
             while !shutdown.load(Ordering::SeqCst) {
                 if signal.load(Ordering::SeqCst) {
-                    if let Some(engine) = &runtime.engine {
-                        match engine.drain("stop requested by the operating system", None) {
-                            Ok(report) => eprintln!(
-                                "gateway drained for stop: {} turn(s) resolved, {} interrupted",
-                                report.turns_resolved.len(),
-                                report.turns_interrupted.len()
-                            ),
-                            Err(error) => eprintln!("gateway drain for stop failed: {error}"),
-                        }
-                    }
-                    shutdown.store(true, Ordering::SeqCst);
+                    stop_on_signal(&runtime, &shutdown, &tick_loop);
                     return;
                 }
                 thread::sleep(Duration::from_millis(50));
@@ -1165,11 +1302,13 @@ fn serve_gateway_service(
     if let Some(watcher) = stop_watcher {
         let _ = watcher.join();
     }
-    // Stop the tick loop and the connector pumps, and wait for both, before
-    // the final state write.
-    if let Some((tick_shutdown, handle)) = tick_loop {
-        tick_shutdown.store(true, Ordering::SeqCst);
-        let _ = handle.join();
+    // Stop the tick loop and the connector pumps before the final state
+    // write. The tick is waited on for its grace only (the hook never touches
+    // gateway state): a stop is never held by a tick's child.
+    if let Some(tick) = take_tick_loop(&tick_loop) {
+        if let Some(tick_at_stop) = end_tick_loop(tick, TICK_STOP_GRACE) {
+            eprintln!("gateway {}", tick_at_stop.sentence());
+        }
     }
     for worker in connector_workers {
         let _ = worker.join();
@@ -3113,5 +3252,113 @@ mod tests {
             .recv_timeout(Duration::from_secs(10))
             .unwrap()
             .unwrap();
+    }
+
+    /// The tick's child the stop below must end: a command that never
+    /// returns, standing in for a routine Action blocked on a stalled File
+    /// Provider (5 Nov 2026: a `ctrl … central.file-map.refresh` waited 17
+    /// minutes in open() and the gateway's stop waited on it).
+    #[cfg(unix)]
+    struct NeverReturningTick {
+        pid_file: std::path::PathBuf,
+        outcomes: Arc<Mutex<Vec<String>>>,
+    }
+
+    #[cfg(unix)]
+    impl GatewayTick for NeverReturningTick {
+        fn tick(&self) -> Result<serde_json::Value> {
+            use crate::runner::CommandRunner as _;
+            let script = format!("echo $$ > '{}'; exec sleep 1000", self.pid_file.display());
+            let outcome =
+                crate::runner::SystemRunner::new().run(&["sh".into(), "-c".into(), script]);
+            self.outcomes.lock().unwrap().push(match &outcome {
+                Ok(output) => format!("returned {}", output.status),
+                Err(error) => error.code().to_owned(),
+            });
+            outcome.map(|_| serde_json::Value::Null)
+        }
+    }
+
+    /// Ends the tick's child if the test fails before the service does: only
+    /// the pid this test started, never a pattern.
+    #[cfg(unix)]
+    struct EndChild(std::path::PathBuf);
+
+    #[cfg(unix)]
+    impl EndChild {
+        fn pid(&self) -> Option<rustix::process::Pid> {
+            std::fs::read_to_string(&self.0)
+                .ok()
+                .and_then(|text| text.trim().parse::<i32>().ok())
+                .and_then(rustix::process::Pid::from_raw)
+        }
+    }
+
+    #[cfg(unix)]
+    impl Drop for EndChild {
+        fn drop(&mut self) {
+            if let Some(pid) = self.pid() {
+                let _ = rustix::process::kill_process(pid, rustix::process::Signal::KILL);
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_stop_ends_a_tick_whose_child_never_returns_instead_of_waiting_on_it() {
+        let root = tempfile::tempdir().unwrap();
+        let socket = root.path().join("gateway.sock");
+        let pid_file = root.path().join("tick-child.pid");
+        let child = EndChild(pid_file.clone());
+        let outcomes = Arc::new(Mutex::new(Vec::new()));
+        let stop = Arc::new(AtomicBool::new(false));
+        let config = GatewayServiceConfig {
+            websocket_bind: None,
+            websocket_bearer_token: None,
+            unix_socket: Some(socket.clone()),
+            state_file: None,
+            max_frame_bytes: DEFAULT_GATEWAY_MAX_FRAME_BYTES,
+        };
+        let hooks = GatewayServiceHooks {
+            ticks: Some(GatewayTickLoop {
+                interval: Duration::from_millis(50),
+                hook: Box::new(NeverReturningTick {
+                    pid_file: pid_file.clone(),
+                    outcomes: Arc::clone(&outcomes),
+                }),
+            }),
+            stop_signal: Some(Arc::clone(&stop)),
+            ..Default::default()
+        };
+        let (done_tx, done_rx) = mpsc::channel();
+        thread::spawn(move || {
+            let _ = done_tx.send(run_gateway_service_with_hooks(gateway(), config, hooks));
+        });
+        wait_connectable(&socket);
+        let started = Instant::now() + Duration::from_secs(30);
+        while child.pid().is_none() {
+            assert!(Instant::now() < started, "the tick never started its child");
+            thread::sleep(Duration::from_millis(20));
+        }
+        let pid = child.pid().unwrap();
+
+        // The operating system's stop, as launchd or `kill -TERM` sends it.
+        stop.store(true, Ordering::SeqCst);
+        done_rx
+            .recv_timeout(Duration::from_secs(30))
+            .expect("the stop waited on the tick's child instead of ending it")
+            .unwrap();
+
+        // The tick's command was ended by the stop, not by its own return,
+        // and its child is gone rather than left to the next process.
+        assert_eq!(
+            outcomes.lock().unwrap().as_slice(),
+            ["mux.command_stopped".to_owned()]
+        );
+        let gone = Instant::now() + Duration::from_secs(10);
+        while rustix::process::test_kill_process(pid).is_ok() {
+            assert!(Instant::now() < gone, "the tick's child outlived the stop");
+            thread::sleep(Duration::from_millis(20));
+        }
     }
 }

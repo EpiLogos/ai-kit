@@ -555,6 +555,112 @@ impl SystemRunner {
     }
 }
 
+/// A stop raised against the commands one thread runs. While a caller works
+/// inside [`CommandStop::scope`], each command a [`SystemRunner`] captures on
+/// that thread is named here while it runs; once the stop is raised, the one
+/// running is ended through the runner's own process-group cleanup, answered
+/// as `mux.command_stopped`, and none starts after it. A service's stop uses
+/// it so that it never waits on a periodic pass's child for as long as that
+/// child likes: a `ctrl` blocked in open() on a stalled File Provider held a
+/// gateway's stop for 17 minutes on 5 Nov 2026.
+#[derive(Debug, Clone, Default)]
+pub struct CommandStop(std::sync::Arc<CommandStopState>);
+
+#[derive(Debug, Default)]
+struct CommandStopState {
+    raised: std::sync::atomic::AtomicBool,
+    running: Mutex<Option<RunningCommand>>,
+}
+
+/// A command a [`CommandStop`] met running: what it is and since when.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct RunningCommand {
+    pub command: String,
+    pub since_unix_ms: u64,
+}
+
+thread_local! {
+    static THREAD_COMMAND_STOP: std::cell::RefCell<Option<CommandStop>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+impl CommandStop {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// End the command running under this stop and refuse any after it.
+    pub fn raise(&self) {
+        self.0
+            .raised
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    pub fn is_raised(&self) -> bool {
+        self.0.raised.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// The command running under this stop now, if one is.
+    pub fn running(&self) -> Option<RunningCommand> {
+        self.0
+            .running
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    /// Run `body` with this stop governing every command it captures on this
+    /// thread; the thread's previous stop, if any, is restored afterwards.
+    pub fn scope<T>(&self, body: impl FnOnce() -> T) -> T {
+        struct Restore(Option<CommandStop>);
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                let previous = self.0.take();
+                THREAD_COMMAND_STOP.with(|slot| *slot.borrow_mut() = previous);
+            }
+        }
+        let _restore = Restore(THREAD_COMMAND_STOP.with(|slot| slot.replace(Some(self.clone()))));
+        body()
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    fn current() -> Option<CommandStop> {
+        THREAD_COMMAND_STOP.with(|slot| slot.borrow().clone())
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    fn enter(&self, command: String) -> RunningUnderStop<'_> {
+        let since_unix_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |elapsed| elapsed.as_millis() as u64);
+        *self
+            .0
+            .running
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(RunningCommand {
+            command,
+            since_unix_ms,
+        });
+        RunningUnderStop(self)
+    }
+}
+
+/// Clears the running command when its capture ends, however it ends.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+struct RunningUnderStop<'a>(&'a CommandStop);
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+impl Drop for RunningUnderStop<'_> {
+    fn drop(&mut self) {
+        *self
+            .0
+             .0
+            .running
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+    }
+}
+
 /// The observed result of signalling a child group created by this caller.
 /// Neither result establishes that descendants were reaped or have retired.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -1303,6 +1409,24 @@ fn capture_native_command(
     if !preserve_stdin {
         command.stdin(Stdio::null());
     }
+    let stop = CommandStop::current();
+    let stopped_subject = || {
+        if body_free_diagnostics {
+            "Selected command".to_owned()
+        } else {
+            format!("`{}`", argv.join(" "))
+        }
+    };
+    if stop.as_ref().is_some_and(CommandStop::is_raised) {
+        return Err(AikitError::new(
+            "mux.command_stopped",
+            format!(
+                "{} was not started: its caller is stopping",
+                stopped_subject()
+            ),
+        )
+        .with("execution_started", "false"));
+    }
     command
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -1339,6 +1463,13 @@ fn capture_native_command(
         reaped_status: None,
         ownership_lost: false,
     };
+    let _running = stop.as_ref().map(|stop| {
+        stop.enter(if body_free_diagnostics {
+            "Selected command".to_owned()
+        } else {
+            argv.join(" ")
+        })
+    });
     let mut stdout_pipe = owned
         .child
         .stdout
@@ -1495,6 +1626,23 @@ fn capture_native_command(
                     policy,
                 ));
             }
+        }
+        if stop.as_ref().is_some_and(CommandStop::is_raised) {
+            // The caller is stopping: the group is ended through the same
+            // owned cleanup a timeout uses, never left to finish on its own.
+            let cleanup = owned.cleanup(Instant::now() + Duration::from_secs(2));
+            return Err(command_failure(
+                AikitError::new(
+                    "mux.command_stopped",
+                    format!("{} was ended: its caller is stopping", stopped_subject()),
+                ),
+                argv,
+                cleanup,
+                stdout,
+                stderr,
+                None,
+                policy,
+            ));
         }
         if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
             let cleanup = owned.cleanup(Instant::now() + Duration::from_secs(2));

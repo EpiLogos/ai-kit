@@ -225,7 +225,8 @@ pub use gateway_service::{
     run_gateway_service_with_hooks, run_gateway_service_with_ticks, GatewayConversationHooks,
     GatewayEncounterRelay, GatewayOccupancyReader, GatewayServiceConfig, GatewayServiceHooks,
     GatewayServiceRuntime, GatewayStateLock, GatewayTick, GatewayTickLoop, SubscriptionHub,
-    SubscriptionSink, DEFAULT_GATEWAY_MAX_FRAME_BYTES, GATEWAY_SERVICE_CARRIER_VERSION,
+    SubscriptionSink, TickAtStop, DEFAULT_GATEWAY_MAX_FRAME_BYTES, GATEWAY_SERVICE_CARRIER_VERSION,
+    TICK_STOP_GRACE,
 };
 pub use harness_disclosure::{
     disclose, ComposedEntry, DriftEntry, DriftKind, HarnessDisclosure, NativeEntry,

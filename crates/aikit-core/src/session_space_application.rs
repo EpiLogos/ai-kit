@@ -262,6 +262,20 @@ pub struct SessionSpaceDecisionHelperBinding {
     pub provenance: Vec<String>,
 }
 
+/// A chain of this space that is a set: another SessionSpace, whose sessions
+/// are its chains, standing as one chain of this rack (O-I manual §19.15:
+/// "select agents' chains and choose Group: they become one chain that holds
+/// an Agent rack of them"). The set's own sessions are the set space's; this
+/// space keeps only the chain that holds it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionSpaceSetChain {
+    pub space: SessionSpaceRef,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub purpose: Option<String>,
+    #[serde(default)]
+    pub provenance: Vec<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionSpaceFocus {
     pub target: ResourceRef,
@@ -304,6 +318,10 @@ pub struct SessionSpaceAuthoredState {
     /// one is named (O-I manual §19.20). Absent from a space that names none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub decision_helper: Option<SessionSpaceDecisionHelperBinding>,
+    /// The chains of this space that are sets, each another SessionSpace
+    /// (O-I manual §19.15, Group). Absent from a space that holds no set.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub set_chains: BTreeMap<SessionSpaceRef, SessionSpaceSetChain>,
 }
 
 impl SessionSpaceAuthoredState {
@@ -322,6 +340,7 @@ impl SessionSpaceAuthoredState {
             agent_set: None,
             benched: BTreeSet::new(),
             decision_helper: None,
+            set_chains: BTreeMap::new(),
         }
     }
 
@@ -383,6 +402,17 @@ impl SessionSpaceAuthoredState {
             .filter(|helper| !self.agent_sessions.contains_key(&helper.agent_session))
         {
             return Err(helper_unattached(&helper.agent_session, self.id()));
+        }
+        for (key, chain) in &self.set_chains {
+            if key != &chain.space || &chain.space == self.id() {
+                return Err(AikitError::new(
+                    "session_space.set_chain_invalid",
+                    format!(
+                        "{} names a set chain {key} that is not another space it holds",
+                        self.id()
+                    ),
+                ));
+            }
         }
         for (binding_ref, binding) in &self.working_surfaces {
             if binding_ref != &binding.binding {
@@ -528,6 +558,15 @@ pub enum SessionSpaceMutation {
     },
     /// Name no decision helper; its session stays in the space.
     UnbindDecisionHelper,
+    /// Hold another space as one chain of this rack: a set (O-I manual
+    /// §19.15, Group).
+    AttachSetChain {
+        chain: SessionSpaceSetChain,
+    },
+    /// Hold that space no longer; the set's space and its sessions stand.
+    DetachSetChain {
+        space: SessionSpaceRef,
+    },
     Restore {
         target: Box<SessionSpaceAuthoredState>,
         evidence: String,
@@ -814,6 +853,20 @@ fn apply_intent(
                 .unwrap_or_else(|| "none".into());
             changed.push(change("decision-helper", subject, "unbound"));
         }
+        SessionSpaceMutation::AttachSetChain { chain } => {
+            if &chain.space == state.id() {
+                return Err(AikitError::new(
+                    "session_space.set_chain_self",
+                    format!("{} cannot hold itself as one of its chains", state.id()),
+                ));
+            }
+            state.set_chains.insert(chain.space.clone(), chain.clone());
+            changed.push(change("set-chain", chain.space.to_string(), "attached"));
+        }
+        SessionSpaceMutation::DetachSetChain { space } => {
+            state.set_chains.remove(space);
+            changed.push(change("set-chain", space.to_string(), "detached"));
+        }
         SessionSpaceMutation::UnbindAgentSet => {
             let subject = state
                 .agent_set
@@ -934,6 +987,138 @@ pub fn drag_out_intents(
         });
     }
     Ok(intents)
+}
+
+/// What Group stages (O-I manual §19.15, the Agent rack: "To make a set,
+/// select agents' chains and choose Group: they become one chain that holds an
+/// Agent rack of them"), as two lists in apply order. For `into`, the set's
+/// own space: the space, the same Project memberships on the same
+/// ContextResolution evidence, and each grouped session's own attachment (and
+/// its bench, where it is benched). For `from`: `into` held as one chain of
+/// the rack, then each grouped session detached, last, so no session ever
+/// stands in no space of its Project. Refused in words: no session named, one
+/// named twice, a session `from` does not hold, the decision helper (it
+/// answers every agent of the rack and stays its chain), a working surface
+/// that binds a grouped session, the same space, and a membership `from`
+/// holds without its Context evidence.
+pub fn group_intents(
+    from: &SessionSpaceAuthoredState,
+    agent_sessions: &[ResourceRef],
+    into: SessionSpaceRef,
+    label: Option<String>,
+) -> Result<(Vec<SessionSpaceMutation>, Vec<SessionSpaceMutation>)> {
+    let refused = |code: &'static str, message: String| Err(AikitError::new(code, message));
+    if agent_sessions.is_empty() {
+        return refused(
+            "session_space.group_empty",
+            format!("Group names no chain of {} to make a set of", from.id()),
+        );
+    }
+    if &into == from.id() {
+        return refused(
+            "session_space.group_same_space",
+            format!("Group makes a set in a space of its own, not in {into} itself"),
+        );
+    }
+    let mut seen = BTreeSet::new();
+    for session in agent_sessions {
+        if !seen.insert(session) {
+            return refused(
+                "session_space.group_twice",
+                format!("Group names {session} twice"),
+            );
+        }
+        if !from.agent_sessions.contains_key(session) {
+            return refused(
+                "session_space.group_unattached",
+                format!(
+                    "{session} is not a session of {}, so it is no chain of it to group",
+                    from.id()
+                ),
+            );
+        }
+        if from
+            .decision_helper
+            .as_ref()
+            .is_some_and(|helper| &helper.agent_session == session)
+        {
+            return refused(
+                "session_space.group_decision_helper",
+                format!(
+                    "{session} is the decision helper of {}: it answers every agent of the rack and stays its chain",
+                    from.id()
+                ),
+            );
+        }
+        if let Some(binding) = from
+            .working_surfaces
+            .values()
+            .find(|binding| &binding.agent_session == session)
+        {
+            return refused(
+                "session_space.group_working_surface",
+                format!(
+                    "{session} works in the surface {} of {}; unbind that working surface before grouping it",
+                    binding.binding,
+                    from.id()
+                ),
+            );
+        }
+    }
+    let mut set = vec![SessionSpaceMutation::Create {
+        id: into.clone(),
+        label: label.clone(),
+    }];
+    for member in &from.definition.projects {
+        let project = ProjectRef::parse(member.as_str())?;
+        let Some(context) = from.project_contexts.get(&project) else {
+            return refused(
+                "session_space.group_membership_without_context",
+                format!(
+                    "{} is a member of Project {project} without its Context evidence, so a set's space cannot hold that Project",
+                    from.id()
+                ),
+            );
+        };
+        set.push(SessionSpaceMutation::BindProjectContext {
+            binding: Box::new(SessionSpaceProjectContextBinding::new(
+                project,
+                context.clone(),
+            )?),
+        });
+    }
+    let marker = format!("grouped out of {}", from.id());
+    for session in agent_sessions {
+        let mut carried = from.agent_sessions[session].clone();
+        carried.provenance.push(marker.clone());
+        set.push(SessionSpaceMutation::AttachAgentSession {
+            attachment: carried,
+        });
+        if from.benched.contains(session) {
+            set.push(SessionSpaceMutation::BenchAgentSession {
+                agent_session: session.clone(),
+                benched: true,
+            });
+        }
+    }
+    let mut rack = vec![SessionSpaceMutation::AttachSetChain {
+        chain: SessionSpaceSetChain {
+            space: into,
+            purpose: label,
+            provenance: vec![format!(
+                "grouped from {} of the rack's chains",
+                agent_sessions.len()
+            )],
+        },
+    }];
+    rack.extend(
+        agent_sessions
+            .iter()
+            .map(|session| SessionSpaceMutation::DetachAgentSession {
+                agent_session: session.clone(),
+            }),
+    );
+    Ok((set, rack))
 }
 
 /// What Hot-Swap stages in the chain's own space (O-I manual §19.15, the
@@ -1425,6 +1610,158 @@ mod tests {
         assert_eq!(
             refused.code(),
             "session_space.drag_out_membership_without_context"
+        );
+    }
+
+    #[test]
+    fn group_makes_the_chosen_chains_one_chain_that_holds_a_rack_of_them() {
+        // O-I manual §19.15: "To make a set, select agents' chains and choose Group: they become one chain that holds an Agent rack
+        // of them."
+        let from = rack("crew", &["ada", "bo", "cy"]);
+        let (ada, bo, cy) = (
+            ResourceRef::parse("agent-session/ada").unwrap(),
+            ResourceRef::parse("agent-session/bo").unwrap(),
+            ResourceRef::parse("agent-session/cy").unwrap(),
+        );
+        let from = stage_session_space(
+            Some(&from),
+            SessionSpaceMutation::BenchAgentSession {
+                agent_session: bo.clone(),
+                benched: true,
+            },
+        )
+        .unwrap()
+        .proposed;
+        let into = SessionSpaceRef::parse("session-space/crew-pair").unwrap();
+        let (set_intents, rack_intents) = group_intents(
+            &from,
+            &[ada.clone(), bo.clone()],
+            into.clone(),
+            Some("pair".into()),
+        )
+        .unwrap();
+        let mut set: Option<SessionSpaceAuthoredState> = None;
+        for intent in set_intents {
+            set = Some(stage_session_space(set.as_ref(), intent).unwrap().proposed);
+        }
+        let set = set.unwrap();
+        assert_eq!(set.id(), &into);
+        assert_eq!(set.label.as_deref(), Some("pair"));
+        assert_eq!(
+            set.agent_sessions.keys().collect::<Vec<_>>(),
+            vec![&ada, &bo]
+        );
+        assert_eq!(
+            set.agent_sessions[&ada].purpose.as_deref(),
+            Some("ada's chain")
+        );
+        assert!(set.agent_sessions[&ada]
+            .provenance
+            .iter()
+            .any(|p| p == "grouped out of session-space/crew"));
+        assert!(set.benched.contains(&bo), "a benched chain stays benched");
+        assert_eq!(set.project_contexts, from.project_contexts);
+        // The rack's own: the set held first as one chain, the grouped sessions detached last.
+        assert!(matches!(
+            rack_intents[0],
+            SessionSpaceMutation::AttachSetChain { .. }
+        ));
+        let mut rack = from.clone();
+        for intent in rack_intents {
+            rack = stage_session_space(Some(&rack), intent).unwrap().proposed;
+        }
+        assert_eq!(rack.agent_sessions.keys().collect::<Vec<_>>(), vec![&cy]);
+        assert_eq!(rack.set_chains.keys().collect::<Vec<_>>(), vec![&into]);
+        assert_eq!(rack.set_chains[&into].purpose.as_deref(), Some("pair"));
+        assert!(rack.benched.is_empty(), "the bench went with the chain");
+        let encoded = serde_json::to_value(&rack).unwrap();
+        assert_eq!(
+            encoded["set_chains"]["session-space/crew-pair"]["space"],
+            "session-space/crew-pair"
+        );
+        // A space that holds no set says nothing of sets.
+        assert!(serde_json::to_value(&from)
+            .unwrap()
+            .get("set_chains")
+            .is_none());
+        let back = stage_session_space(
+            Some(&rack),
+            SessionSpaceMutation::DetachSetChain {
+                space: into.clone(),
+            },
+        )
+        .unwrap()
+        .proposed;
+        assert!(back.set_chains.is_empty());
+        let selfish = stage_session_space(
+            Some(&rack),
+            SessionSpaceMutation::AttachSetChain {
+                chain: SessionSpaceSetChain {
+                    space: rack.id().clone(),
+                    purpose: None,
+                    provenance: Vec::new(),
+                },
+            },
+        )
+        .unwrap_err();
+        assert_eq!(selfish.code(), "session_space.set_chain_self");
+    }
+
+    #[test]
+    fn group_refuses_in_words_what_it_cannot_carry() {
+        let from = rack("crew", &["ada", "cy"]);
+        let into = || SessionSpaceRef::parse("session-space/set").unwrap();
+        let ada = ResourceRef::parse("agent-session/ada").unwrap();
+        let nobody = ResourceRef::parse("agent-session/nobody").unwrap();
+        for (sessions, space, code, words) in [
+            (
+                vec![],
+                into(),
+                "session_space.group_empty",
+                "Group names no chain of session-space/crew",
+            ),
+            (
+                vec![ada.clone(), ada.clone()],
+                into(),
+                "session_space.group_twice",
+                "names agent-session/ada twice",
+            ),
+            (
+                vec![nobody],
+                into(),
+                "session_space.group_unattached",
+                "agent-session/nobody is not a session of session-space/crew",
+            ),
+            (
+                vec![ada.clone()],
+                from.id().clone(),
+                "session_space.group_same_space",
+                "a space of its own",
+            ),
+        ] {
+            let refused = group_intents(&from, &sessions, space, None).unwrap_err();
+            assert_eq!(refused.code(), code);
+            assert!(refused.to_string().contains(words), "{refused}");
+        }
+        let helped = stage_session_space(
+            Some(&from),
+            SessionSpaceMutation::BindDecisionHelper {
+                binding: SessionSpaceDecisionHelperBinding {
+                    agent_session: ada.clone(),
+                    provenance: Vec::new(),
+                },
+            },
+        )
+        .unwrap()
+        .proposed;
+        let refused = group_intents(&helped, std::slice::from_ref(&ada), into(), None).unwrap_err();
+        assert_eq!(refused.code(), "session_space.group_decision_helper");
+        let mut bare = from.clone();
+        bare.project_contexts.clear();
+        let refused = group_intents(&bare, &[ada], into(), None).unwrap_err();
+        assert_eq!(
+            refused.code(),
+            "session_space.group_membership_without_context"
         );
     }
 

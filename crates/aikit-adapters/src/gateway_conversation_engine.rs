@@ -1341,6 +1341,26 @@ pub struct DrainReport {
     /// Communiques waiting at this gateway, by Position. They are in the
     /// journal and survive the restart.
     pub communiques: Vec<CommuniqueCount>,
+    /// A service stop that met the tick still running past its grace: the
+    /// command it ended, and whether the tick then returned.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tick_at_stop: Option<crate::gateway_service::TickAtStop>,
+}
+
+impl DrainReport {
+    /// The report as a stop's log line: the turns it met and, when the tick
+    /// was still running past its grace, the command it ended.
+    pub fn stop_summary(&self) -> String {
+        let turns = format!(
+            "{} turn(s) resolved, {} interrupted",
+            self.turns_resolved.len(),
+            self.turns_interrupted.len()
+        );
+        match &self.tick_at_stop {
+            Some(tick) => format!("{turns}; {}", tick.sentence()),
+            None => turns,
+        }
+    }
 }
 
 /// The conversation an upgrade was asked for from, so its receipt returns
@@ -3018,6 +3038,7 @@ impl GatewayConversationEngine {
             turns_interrupted,
             prompts_not_started,
             communiques,
+            tick_at_stop: None,
         })
     }
 
