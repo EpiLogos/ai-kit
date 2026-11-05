@@ -1485,9 +1485,208 @@ fn store_receipt(state: &Path, client: &str, session: &str, receipt: &Value) {
         "{}-{stamp}.json",
         &blake3::hash(format!("{client}\0{session}").as_bytes()).to_hex()[..16]
     );
+    let path = dir.join(name);
     if let Ok(body) = serde_json::to_vec_pretty(receipt) {
-        let _ = std::fs::write(dir.join(name), body);
+        let _ = std::fs::write(&path, body);
     }
+    retain_when_due(state, Some(&path));
+}
+
+// The development entry's state lifecycle (DLW build ruling 2026-11-05:
+// receipts get a lifecycle in AIKit's own code, not a hand prune). Receipts
+// are evidence of what an entry delivered, which nothing reads back: each
+// session keeps its newest `RECEIPTS_PER_SESSION`, none older than
+// `RECEIPT_MAX_AGE`, and while the receipts together exceed
+// `RECEIPTS_MAX_BYTES` the oldest go first. A session's ledger and its
+// activity file are one record, kept while either was written or read within
+// `RECORD_IDLE_LIMIT`: every event of a live session renews its ledger, and a
+// disclose that reads a record renews both (`renew`), so neither the ledger of
+// a session still standing nor an activity file a disclose still reads is
+// taken. A launch's alias goes once the record it names is gone.
+
+/// The newest receipts each session keeps.
+pub const RECEIPTS_PER_SESSION: usize = 16;
+/// The age past which a receipt goes, whatever its session.
+pub const RECEIPT_MAX_AGE: Duration = Duration::from_secs(14 * 24 * 60 * 60);
+/// What all receipts together may hold; past it the oldest go first.
+pub const RECEIPTS_MAX_BYTES: u64 = 64 * 1024 * 1024;
+/// How long a record stands unwritten and unread before it goes.
+pub const RECORD_IDLE_LIMIT: Duration = Duration::from_secs(30 * 24 * 60 * 60);
+/// How often the rule runs: at the first receipt written this long after its
+/// last run, which its own record (`retention.json`) dates.
+pub const RETENTION_INTERVAL: Duration = Duration::from_secs(60 * 60);
+pub const RETENTION_SCHEMA: &str = "aikit.development-entry-retention/v1";
+const RETENTION_RECORD: &str = "retention.json";
+
+/// What one run of the rule removed and kept.
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize)]
+pub struct Retained {
+    pub removed_receipts: usize,
+    pub removed_receipt_bytes: u64,
+    pub removed_records: usize,
+    pub removed_aliases: usize,
+    pub kept_receipts: usize,
+    pub kept_receipt_bytes: u64,
+    pub kept_records: usize,
+    pub kept_aliases: usize,
+}
+
+/// Mark a record's file as written or read now; nothing when it is absent.
+fn renew(path: &Path) {
+    if let Ok(file) = std::fs::File::options().write(true).open(path) {
+        let _ = file.set_modified(SystemTime::now());
+    }
+}
+
+/// Run the rule when its interval has passed, sparing the receipt just
+/// written, and date the run with its own record.
+pub fn retain_when_due(state: &Path, spare: Option<&Path>) -> Option<Retained> {
+    let record = state.join("development-entry").join(RETENTION_RECORD);
+    let now = SystemTime::now();
+    let last = std::fs::metadata(&record).and_then(|meta| meta.modified());
+    if last.is_ok_and(|last| now.duration_since(last).unwrap_or_default() < RETENTION_INTERVAL) {
+        return None;
+    }
+    let retained = retain(state, now, spare);
+    let body = json!({
+        "schema": RETENTION_SCHEMA,
+        "at_unix_ms": now.duration_since(UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0),
+        "rule": {
+            "receipts_per_session": RECEIPTS_PER_SESSION,
+            "receipt_max_age_seconds": RECEIPT_MAX_AGE.as_secs(),
+            "receipts_max_bytes": RECEIPTS_MAX_BYTES,
+            "record_idle_limit_seconds": RECORD_IDLE_LIMIT.as_secs(),
+        },
+        "retained": retained,
+    });
+    let _ = std::fs::write(&record, body.to_string());
+    Some(retained)
+}
+
+/// One run of the rule over `<state>/development-entry`, as of `now`. Files
+/// it does not name (anything but receipts, records and aliases) stay.
+pub fn retain(state: &Path, now: SystemTime, spare: Option<&Path>) -> Retained {
+    let root = state.join("development-entry");
+    let mut out = Retained::default();
+    let idle = |modified: SystemTime| now.duration_since(modified).unwrap_or_default();
+    let files = |dir: &Path| {
+        std::fs::read_dir(dir)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .filter_map(|entry| {
+                let meta = entry.metadata().ok().filter(|meta| meta.is_file())?;
+                Some((
+                    entry.file_name().to_string_lossy().into_owned(),
+                    entry.path(),
+                    meta,
+                ))
+            })
+            .collect::<Vec<_>>()
+    };
+
+    // Records: `<blake3>.json` ledgers and the `<blake3>.activity.json` beside them.
+    let mut records: BTreeMap<String, Vec<(PathBuf, SystemTime)>> = BTreeMap::new();
+    for (name, path, meta) in files(&root) {
+        let Some(stem) = name
+            .strip_suffix(".activity.json")
+            .or_else(|| name.strip_suffix(".json"))
+        else {
+            continue;
+        };
+        if stem.len() != 64 || !stem.bytes().all(|b| b.is_ascii_hexdigit()) {
+            continue;
+        }
+        records
+            .entry(stem.to_owned())
+            .or_default()
+            .push((path, meta.modified().unwrap_or(now)));
+    }
+    for parts in records.values() {
+        let last = parts.iter().map(|(_, modified)| *modified).max();
+        if last.is_some_and(|last| idle(last) > RECORD_IDLE_LIMIT) {
+            for (path, _) in parts {
+                let _ = std::fs::remove_file(path);
+            }
+            out.removed_records += 1;
+        } else {
+            out.kept_records += 1;
+        }
+    }
+
+    // Receipts: `<session blake3, 16>-<unix ms>.json`, newest first.
+    let mut receipts: Vec<(String, u64, u64, PathBuf)> = files(&root.join("receipts"))
+        .into_iter()
+        .filter_map(|(name, path, meta)| {
+            let (session, stamp) = name.strip_suffix(".json")?.split_once('-')?;
+            Some((session.to_owned(), stamp.parse().ok()?, meta.len(), path))
+        })
+        .collect();
+    receipts.sort_by_key(|receipt| std::cmp::Reverse(receipt.1));
+    let now_ms = now
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    let max_age_ms = RECEIPT_MAX_AGE.as_millis() as u64;
+    let mut per_session: BTreeMap<String, usize> = BTreeMap::new();
+    let mut kept = Vec::new();
+    for receipt in receipts {
+        let (session, stamp, bytes, path) = &receipt;
+        let count = per_session.entry(session.clone()).or_default();
+        *count += 1;
+        let spared = spare == Some(path.as_path());
+        if !spared && (*count > RECEIPTS_PER_SESSION || now_ms.saturating_sub(*stamp) > max_age_ms)
+        {
+            if std::fs::remove_file(path).is_ok() {
+                out.removed_receipts += 1;
+                out.removed_receipt_bytes += bytes;
+            }
+        } else {
+            kept.push(receipt);
+        }
+    }
+    let mut total: u64 = kept.iter().map(|(_, _, bytes, _)| bytes).sum();
+    let mut standing = vec![true; kept.len()];
+    for (index, (_, _, bytes, path)) in kept.iter().enumerate().rev() {
+        if total <= RECEIPTS_MAX_BYTES {
+            break;
+        }
+        if spare == Some(path.as_path()) {
+            continue;
+        }
+        if std::fs::remove_file(path).is_ok() {
+            standing[index] = false;
+            total -= bytes;
+            out.removed_receipts += 1;
+            out.removed_receipt_bytes += bytes;
+        }
+    }
+    out.kept_receipts = standing.iter().filter(|kept| **kept).count();
+    out.kept_receipt_bytes = total;
+
+    // Aliases: each names a record; it goes once that record is gone.
+    for (_, path, _) in files(&root.join("sessions")) {
+        let named = std::fs::read(&path)
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
+            .and_then(|kept| {
+                Some((
+                    kept["client"].as_str()?.to_owned(),
+                    kept["session"].as_str()?.to_owned(),
+                ))
+            });
+        match named {
+            Some((client, session)) if ledger_path(state, &client, &session).exists() => {
+                out.kept_aliases += 1;
+            }
+            _ => {
+                if std::fs::remove_file(&path).is_ok() {
+                    out.removed_aliases += 1;
+                }
+            }
+        }
+    }
+    out
 }
 
 fn now_ms() -> u64 {
@@ -1657,6 +1856,9 @@ pub fn deliver(request: &EntryRequest<'_>) -> Result<Option<String>> {
         HookEventKind::PreToolUse => return Ok(None),
         _ => {}
     }
+    // Every other event of a live session renews its record, so the state's
+    // lifecycle (`retain`) never takes the ledger of a session still standing.
+    renew(&ledger_path(request.state, request.client, &session));
     let Some(central) = request.central else {
         return Ok(None);
     };
@@ -3526,6 +3728,9 @@ fn practice_of(state: &Path, catalogue: &[PraxisCandidate], session: &str) -> Re
             "the session's development entry is no longer kept",
         ));
     };
+    // A record a disclose reads is still read: it stands its idle limit again.
+    renew(&ledger_path(state, &client, &id));
+    renew(&activity_path(state, &client, &id));
     let closed: Option<aikit_core::agent_praxis::PraxisActivity> =
         std::fs::read(activity_path(state, &client, &id))
             .ok()
@@ -4459,6 +4664,103 @@ mod tests {
         assert_eq!(line.chars().count(), ABSENCE_CHARS);
         assert!(line.ends_with('…') && !line.contains('\n'));
         assert_eq!(bounded_absence("short".into()), "short");
+    }
+
+    #[test]
+    fn the_entry_state_keeps_what_is_live_or_read_and_bounds_the_rest() {
+        let temp = tempfile::tempdir().unwrap();
+        let state = temp.path();
+        let now = SystemTime::now();
+        let days = |n: u64| Duration::from_secs(n * 24 * 60 * 60);
+        let date = |path: &Path, ago: Duration| {
+            let file = std::fs::File::options().write(true).open(path).unwrap();
+            file.set_modified(now - ago).unwrap();
+        };
+        let record = |session: &str, ago: Duration, closed: bool| {
+            let mut ledger = ledger_with(claimed_723(), &[]);
+            ledger.session = session.into();
+            store_ledger(state, &ledger);
+            date(&ledger_path(state, "claude", session), ago);
+            if closed {
+                let activity = activity_path(state, "claude", session);
+                std::fs::write(&activity, b"{}").unwrap();
+                date(&activity, ago);
+            }
+        };
+        // Live (written today), idle open, idle closed, closed but its
+        // activity written lately, and idle but read by a disclose now.
+        record("live", days(0), false);
+        record("idle", days(40), false);
+        record("idle-closed", days(40), true);
+        record("closed-lately", days(40), false);
+        std::fs::write(activity_path(state, "claude", "closed-lately"), b"{}").unwrap();
+        record("read-now", days(40), false);
+        let read = practice_of(state, &[], "claude:read-now").unwrap();
+        assert_eq!(read["standing"], "open");
+        store_alias(state, "ses_live", "claude", "live");
+        store_alias(state, "ses_idle", "claude", "idle");
+
+        let receipts = state.join("development-entry").join("receipts");
+        std::fs::create_dir_all(&receipts).unwrap();
+        let now_ms = now.duration_since(UNIX_EPOCH).unwrap().as_millis() as u64;
+        let receipt = |session: &str, ago_ms: u64, bytes: u64| {
+            let prefix = &blake3::hash(format!("claude\0{session}").as_bytes()).to_hex()[..16];
+            let path = receipts.join(format!("{prefix}-{}.json", now_ms - ago_ms));
+            std::fs::File::create(&path)
+                .unwrap()
+                .set_len(bytes)
+                .unwrap();
+            path
+        };
+        // Twenty receipts of one session today: the newest sixteen stay.
+        let busy: Vec<PathBuf> = (0..20)
+            .map(|i| receipt("live", 1000 * (20 - i), 10))
+            .collect();
+        // Three of another from twenty days ago: all go, by age.
+        for i in 0..3 {
+            receipt("idle", days(20).as_millis() as u64 + i, 10);
+        }
+        // Three of 30 MiB each today: past the 64 MiB cap the oldest goes.
+        let heavy: Vec<PathBuf> = (0..3)
+            .map(|i| receipt("heavy", 60_000 * (3 - i), 30 * 1024 * 1024))
+            .collect();
+        let unknown = receipts.join("notes.txt");
+        std::fs::write(&unknown, b"kept").unwrap();
+        // The receipt just written is spared even past its session's count.
+        let just = receipt("live", 600_000, 10);
+
+        let retained = retain(state, now, Some(&just));
+        let kept = |session: &str| ledger_path(state, "claude", session).exists();
+        assert!(kept("live") && kept("read-now") && kept("closed-lately"));
+        assert!(activity_path(state, "claude", "closed-lately").exists());
+        assert!(!kept("idle") && !kept("idle-closed"));
+        assert!(!activity_path(state, "claude", "idle-closed").exists());
+        assert!(alias_path(state, "ses_live").exists() && !alias_path(state, "ses_idle").exists());
+        assert!(busy[..4].iter().all(|p| !p.exists()) && busy[4..].iter().all(|p| p.exists()));
+        assert!(just.exists() && unknown.exists());
+        assert!(!heavy[0].exists() && heavy[1].exists() && heavy[2].exists());
+        assert_eq!(
+            retained,
+            Retained {
+                removed_receipts: 4 + 3 + 1,
+                removed_receipt_bytes: 4 * 10 + 3 * 10 + 30 * 1024 * 1024,
+                removed_records: 2,
+                removed_aliases: 1,
+                kept_receipts: 16 + 1 + 2,
+                kept_receipt_bytes: 17 * 10 + 2 * 30 * 1024 * 1024,
+                kept_records: 3,
+                kept_aliases: 1,
+            }
+        );
+        // The rule dates its run and does not run again within its interval.
+        assert!(retain_when_due(state, None).is_some());
+        let dated: Value = serde_json::from_slice(
+            &std::fs::read(state.join("development-entry").join(RETENTION_RECORD)).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(dated["schema"], RETENTION_SCHEMA);
+        assert_eq!(dated["rule"]["receipts_per_session"], RECEIPTS_PER_SESSION);
+        assert_eq!(retain_when_due(state, None), None);
     }
 
     #[test]

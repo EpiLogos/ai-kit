@@ -153,6 +153,224 @@ pub fn load_registry(root: &Path, source: RegistrySource) -> Result<RegistryLoad
     Ok(load)
 }
 
+// ---------------------------------------------------------------------------
+// The retained catalogue's change signal
+// ---------------------------------------------------------------------------
+
+/// The most threads the signal's walk and status reads run on.
+pub const SIGNAL_THREADS: usize = 8;
+/// How many entries one thread reads the status of at a time; the signal is
+/// folded chunk by chunk in order, so it is the same on any number of threads.
+const SIGNAL_CHUNK: usize = 128;
+
+/// The entries of one registry root a walk found, by their paths under it.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct RootWalk {
+    pub root: std::path::PathBuf,
+    pub entries: Vec<String>,
+}
+
+/// Every entry [`load_registry`] can read under each root's `capsules/` and
+/// `profiles/`, in order: each section itself (named even where it is absent,
+/// so its arrival is seen), every directory under it, and every other entry.
+/// The roots are walked on up to [`SIGNAL_THREADS`] threads at once.
+pub fn registry_walk(roots: &[&Path]) -> Vec<RootWalk> {
+    let walk = |root: &Path| {
+        let mut entries = Vec::new();
+        for section in ["capsules", "profiles"] {
+            let top = root.join(section);
+            entries.push(section.to_owned());
+            for entry in walkdir::WalkDir::new(&top)
+                .follow_links(false)
+                .sort_by_file_name()
+                .min_depth(1)
+                .into_iter()
+                .flatten()
+            {
+                if let Ok(under) = entry.path().strip_prefix(root) {
+                    entries.push(under.to_string_lossy().into_owned());
+                }
+            }
+        }
+        RootWalk {
+            root: root.to_path_buf(),
+            entries,
+        }
+    };
+    in_parallel(roots, |root| walk(root))
+}
+
+/// The change signal of the entries [`registry_walk`] found: each by path,
+/// kind, length, permissions, inode, and modification and status-change times,
+/// or as absent. A write to a file moves its status-change time, which no
+/// ordinary call sets back, and adding, removing or renaming an entry moves its
+/// directory's modification time; so an equal signal over the entries a walk
+/// found says nothing the load reads has moved since that walk (DLW build
+/// ruling 2026-11-05: a reading is retained only while a change signal vouches
+/// for it). Reading it is one status read per entry, with no directory listed.
+pub fn status_signal(walks: &[RootWalk]) -> String {
+    let chunks: Vec<(&Path, &[String])> = walks
+        .iter()
+        .flat_map(|walk| {
+            walk.entries
+                .chunks(SIGNAL_CHUNK)
+                .map(move |chunk| (walk.root.as_path(), chunk))
+        })
+        .collect();
+    let mut hasher = blake3::Hasher::new();
+    for walk in walks {
+        hasher.update(walk.root.as_os_str().as_encoded_bytes());
+        hasher.update(&(walk.entries.len() as u64).to_le_bytes());
+    }
+    for signal in in_parallel(&chunks, |(root, chunk)| chunk_signal(root, chunk)) {
+        hasher.update(signal.as_bytes());
+    }
+    hasher.finalize().to_hex().to_string()
+}
+
+fn chunk_signal(root: &Path, entries: &[String]) -> blake3::Hash {
+    let mut hasher = blake3::Hasher::new();
+    for entry in entries {
+        hasher.update(entry.as_bytes());
+        hasher.update(b"\0");
+        // A path the walk did not write is never read: an entry names a place under its root.
+        let under = Path::new(entry);
+        if under.is_absolute()
+            || under
+                .components()
+                .any(|part| !matches!(part, std::path::Component::Normal(_)))
+        {
+            hasher.update(b"\0refused");
+            continue;
+        }
+        let Ok(meta) = std::fs::symlink_metadata(root.join(under)) else {
+            hasher.update(b"\0absent");
+            continue;
+        };
+        let kind: u8 = if meta.is_dir() {
+            b'd'
+        } else if meta.is_file() {
+            b'f'
+        } else {
+            b'l'
+        };
+        hasher.update(&[0, kind]);
+        hasher.update(&meta.len().to_le_bytes());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            for value in [
+                u64::from(meta.mode()),
+                meta.ino(),
+                meta.dev(),
+                meta.mtime() as u64,
+                meta.mtime_nsec() as u64,
+                meta.ctime() as u64,
+                meta.ctime_nsec() as u64,
+            ] {
+                hasher.update(&value.to_le_bytes());
+            }
+        }
+        #[cfg(not(unix))]
+        if let Ok(modified) = meta.modified() {
+            let since = modified
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default();
+            hasher.update(&since.as_nanos().to_le_bytes());
+        }
+    }
+    hasher.finalize()
+}
+
+/// `work` over every item, on up to [`SIGNAL_THREADS`] threads, the answers in
+/// the items' order. A person's sources hold thousands of entries, and reading
+/// them one after another costs a hook dispatch most of its time.
+fn in_parallel<T: Sync, R: Send>(items: &[T], work: impl Fn(&T) -> R + Sync) -> Vec<R> {
+    let threads = std::thread::available_parallelism()
+        .map_or(1, std::num::NonZeroUsize::get)
+        .clamp(1, SIGNAL_THREADS)
+        .min(items.len());
+    if threads < 2 {
+        return items.iter().map(&work).collect();
+    }
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    let mut answers: Vec<(usize, R)> = std::thread::scope(|scope| {
+        let workers: Vec<_> = (0..threads)
+            .map(|_| {
+                scope.spawn(|| {
+                    let mut taken = Vec::new();
+                    loop {
+                        let at = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        let Some(item) = items.get(at) else {
+                            return taken;
+                        };
+                        taken.push((at, work(item)));
+                    }
+                })
+            })
+            .collect();
+        workers
+            .into_iter()
+            .flat_map(|worker| match worker.join() {
+                Ok(taken) => taken,
+                Err(panic) => std::panic::resume_unwind(panic),
+            })
+            .collect()
+    });
+    answers.sort_by_key(|(at, _)| *at);
+    answers.into_iter().map(|(_, answer)| answer).collect()
+}
+
+/// A catalogue as it is retained between processes: what a load with no
+/// problems understood, with the change signal it was read under and the
+/// entries that signal is read over ([`registry_walk`], [`status_signal`]).
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct RetainedCatalogue {
+    pub schema: String,
+    pub signal: String,
+    pub entries: Vec<RootWalk>,
+    pub capsules: Vec<Capsule>,
+    pub profiles: Vec<Profile>,
+}
+
+pub const RETAINED_CATALOGUE_SCHEMA: &str = "aikit.retained-catalogue/v2";
+
+impl RetainedCatalogue {
+    /// The retained form of a load, or `None` when the load had problems (a
+    /// problem is reported fresh, so such a load is read fresh) or does not
+    /// survive the round trip unchanged.
+    pub fn of(load: &RegistryLoad, signal: String, entries: Vec<RootWalk>) -> Option<Self> {
+        if !load.problems.is_empty() {
+            return None;
+        }
+        let retained = Self {
+            schema: RETAINED_CATALOGUE_SCHEMA.into(),
+            signal,
+            entries,
+            capsules: load.catalog.capsules.values().cloned().collect(),
+            profiles: load.catalog.profiles.values().cloned().collect(),
+        };
+        let text = serde_json::to_vec(&retained).ok()?;
+        let back: Self = serde_json::from_slice(&text).ok()?;
+        (back == retained).then_some(retained)
+    }
+
+    /// The load again, when it was taken under `signal`.
+    pub fn load_under(self, signal: &str) -> Option<RegistryLoad> {
+        if self.schema != RETAINED_CATALOGUE_SCHEMA || self.signal != signal {
+            return None;
+        }
+        let mut load = RegistryLoad::default();
+        for capsule in self.capsules {
+            load.catalog.insert(capsule);
+        }
+        for profile in self.profiles {
+            load.catalog.insert_profile(profile);
+        }
+        Some(load)
+    }
+}
+
 /// Load `<repo>/.aikit/` as the project-local registry.
 pub fn load_project_local(repo: &Path) -> Result<RegistryLoad> {
     load_registry(&repo.join(".aikit"), RegistrySource::project_local())
