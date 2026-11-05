@@ -1462,8 +1462,9 @@ mcp-servers = false
 
     #[test]
     fn an_absent_login_stays_legal_everywhere() {
-        // Note-only harnesses are honest: claude's login is the in-TUI /login
-        // flow, and no one-shot command is invented for it.
+        // Note-only harnesses are honest: a login with no one-shot form (an
+        // in-TUI flow, a first-launch wizard) declares none, and no command is
+        // invented for it.
         let profile = claude_shaped_profile();
         assert!(
             profile
