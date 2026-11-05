@@ -742,10 +742,18 @@ fn spawn_parts(
     })?;
     // Own the child immediately: any subsequent pipe/capture setup failure
     // uses the same group teardown and reaping guard as ordinary shutdown.
+    // A connection target is a session's harness, named among the process's
+    // live children for as long as it is owned here.
+    let registered = crate::runner::register_child(
+        child.id(),
+        crate::runner::ChildOwner::Session,
+        argv.join(" "),
+    );
     let mut child = OwnedChild {
         child,
         terminated: None,
         stderr_capture: None,
+        _registered: registered,
     };
     let stdin = child.child.stdin.take().ok_or_else(|| {
         AikitError::new(
@@ -1000,6 +1008,8 @@ struct OwnedChild {
     child: Child,
     terminated: Option<ExitStatus>,
     stderr_capture: Option<StderrCapture>,
+    /// Declared last, so it is dropped after the group's teardown in `Drop`.
+    _registered: crate::runner::RegisteredChild,
 }
 
 impl OwnedChild {

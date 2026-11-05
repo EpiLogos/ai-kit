@@ -444,6 +444,8 @@ fn compose_plan_args() -> ComposeArgs {
         world: None,
         realise: false,
         resident_target: None,
+        session: None,
+        socket: None,
         model: None,
         provider: None,
         use_type: "compose".into(),
@@ -2427,7 +2429,14 @@ fn cmd_compose(cwd: &std::path::Path, args: ComposeArgs) -> Result<Reply> {
     // that source and observes the selected model before issuing a receipt.
     // Roster selection and ordinary composition still require their full
     // authored inputs below; this path makes no claim to those components.
-    let mut data = if args.realise && args.model.is_some() && args.resident_target.is_some() {
+    // A realisation on a session from its own Agency: AIKit reads the
+    // session's binding, space and owner itself (`--session`).
+    let mut data = if let Some(session) = &args.session {
+        service.compose_session_resident(
+            &aikit_core::ResourceRef::parse(session)?,
+            args.socket.as_deref(),
+        )?
+    } else if args.realise && args.model.is_some() && args.resident_target.is_some() {
         match admission.as_ref() {
             Some(admitted) => {
                 admitted.basis.read()?;

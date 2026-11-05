@@ -428,6 +428,10 @@ pub struct LingeringChild {
     pub command: String,
     /// When it started, as the process table says it.
     pub since: Option<String>,
+    /// Whose child it is, as the drain report that gateway persisted for its
+    /// stop names it ("the tick's", "a session's", "the mux's"), or that no
+    /// report of its stop says; `None` before the upgrade has read it.
+    pub owner: Option<String>,
 }
 
 impl Lingering {
@@ -443,12 +447,18 @@ impl Lingering {
         let children = self
             .children
             .iter()
-            .map(|child| match &child.since {
-                Some(since) => format!(
-                    "its child pid {}, `{}`, running since {since}",
-                    child.pid, child.command
-                ),
-                None => format!("its child pid {}, `{}`", child.pid, child.command),
+            .map(|child| {
+                let whose = child
+                    .owner
+                    .as_ref()
+                    .map_or_else(String::new, |owner| format!(" ({owner})"));
+                match &child.since {
+                    Some(since) => format!(
+                        "its child pid {}{whose}, `{}`, running since {since}",
+                        child.pid, child.command
+                    ),
+                    None => format!("its child pid {}{whose}, `{}`", child.pid, child.command),
+                }
             })
             .collect::<Vec<_>>()
             .join("; and on ");
@@ -2061,6 +2071,7 @@ mod tests {
                     pid: 6010,
                     command: command.into(),
                     since: Some("Thu Nov  5 06:10:00 2026".into()),
+                    owner: Some("the tick's".into()),
                 }],
             },
         ));
@@ -2075,7 +2086,7 @@ mod tests {
         assert!(
             outcome.summary.starts_with(&format!(
                 "the old gateway (pid 5591) drained but has not exited: it is waiting on its \
-                 child pid 6010, `{command}`, running since Thu Nov  5 06:10:00 2026"
+                 child pid 6010 (the tick's), `{command}`, running since Thu Nov  5 06:10:00 2026"
             )),
             "{}",
             outcome.summary

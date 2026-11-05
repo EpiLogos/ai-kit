@@ -555,6 +555,109 @@ impl SystemRunner {
     }
 }
 
+/// Whose a live child is: the gateway's periodic pass (`tick`), an agent
+/// session's harness (`session`), or any other command the runner runs
+/// (`mux`: the runner is the multiplexer floor's, and answers in its
+/// `mux.command_*` namespace). A stop that meets a
+/// child still running names it by this, so the upgrade can say whose child
+/// a lingering gateway waits on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ChildOwner {
+    Tick,
+    Session,
+    Mux,
+}
+
+impl ChildOwner {
+    /// "the tick's", "a session's", "the mux's".
+    pub fn possessive(self) -> &'static str {
+        match self {
+            Self::Tick => "the tick's",
+            Self::Session => "a session's",
+            Self::Mux => "the mux's",
+        }
+    }
+
+    /// Run `body` with every child it starts on this thread owned by `self`;
+    /// the thread's previous owner, if any, is restored afterwards.
+    pub fn scope<T>(self, body: impl FnOnce() -> T) -> T {
+        struct Restore(Option<ChildOwner>);
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                let previous = self.0.take();
+                THREAD_CHILD_OWNER.with(|slot| slot.set(previous));
+            }
+        }
+        let _restore = Restore(THREAD_CHILD_OWNER.with(|slot| slot.replace(Some(self))));
+        body()
+    }
+}
+
+/// One child this process started and has not yet seen end: its pid, whose
+/// it is, what it runs and since when.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct LiveChild {
+    pub pid: u32,
+    pub owner: ChildOwner,
+    pub command: String,
+    pub since_unix_ms: u64,
+}
+
+thread_local! {
+    static THREAD_CHILD_OWNER: std::cell::Cell<Option<ChildOwner>> =
+        const { std::cell::Cell::new(None) };
+}
+
+static LIVE_CHILDREN: Mutex<BTreeMap<u32, LiveChild>> = Mutex::new(BTreeMap::new());
+
+/// Every child this process started that has not ended, in pid order.
+pub fn live_children() -> Vec<LiveChild> {
+    LIVE_CHILDREN
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .values()
+        .cloned()
+        .collect()
+}
+
+/// Keeps a child in [`live_children`] for as long as its owner holds it.
+#[derive(Debug)]
+pub struct RegisteredChild(u32);
+
+impl Drop for RegisteredChild {
+    fn drop(&mut self) {
+        LIVE_CHILDREN
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&self.0);
+    }
+}
+
+/// Record a child just started: owned by the thread's [`ChildOwner::scope`],
+/// else by `otherwise`.
+pub fn register_child(pid: u32, otherwise: ChildOwner, command: String) -> RegisteredChild {
+    let owner = THREAD_CHILD_OWNER
+        .with(std::cell::Cell::get)
+        .unwrap_or(otherwise);
+    let since_unix_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_millis() as u64);
+    LIVE_CHILDREN
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .insert(
+            pid,
+            LiveChild {
+                pid,
+                owner,
+                command,
+                since_unix_ms,
+            },
+        );
+    RegisteredChild(pid)
+}
+
 /// A stop raised against the commands one thread runs. While a caller works
 /// inside [`CommandStop::scope`], each command a [`SystemRunner`] captures on
 /// that thread is named here while it runs; once the stop is raised, the one
@@ -1457,6 +1560,17 @@ fn capture_native_command(
             .with("execution_started", "false")
             .with_io_source(error)
     })?;
+    // Named among the process's live children until this capture ends,
+    // however it ends.
+    let _registered = register_child(
+        child.id(),
+        ChildOwner::Mux,
+        if body_free_diagnostics {
+            "Selected command".to_owned()
+        } else {
+            argv.join(" ")
+        },
+    );
     let mut owned = OwnedCommand {
         child,
         cleanup_attempted: false,
@@ -4455,5 +4569,66 @@ mod tests {
             ])
             .expect("printenv runs");
         assert_eq!(output.stdout.trim_end(), "withheld");
+    }
+
+    /// Round 22: each child the runner holds is named with whose it is while
+    /// it runs — a tick's under the tick's scope, the mux's otherwise — and
+    /// leaves the list when its capture ends.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn a_running_child_is_named_with_its_owner_until_its_capture_ends() {
+        let marker = format!("held-child-{}", std::process::id());
+        let script = format!("sleep 1; : {marker}");
+        let listed = |marker: &str| {
+            live_children()
+                .into_iter()
+                .find(|child| child.command.contains(marker))
+        };
+        let running = {
+            let script = script.clone();
+            std::thread::spawn(move || {
+                ChildOwner::Tick.scope(|| {
+                    SystemRunner::new()
+                        .run(&["sh".into(), "-c".into(), script])
+                        .unwrap()
+                })
+            })
+        };
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let held = loop {
+            if let Some(held) = listed(&marker) {
+                break held;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the child was never named"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        };
+        assert_eq!(held.owner, ChildOwner::Tick);
+        assert!(held.pid > 0);
+        assert_eq!(running.join().unwrap().status, 0);
+        assert!(listed(&marker).is_none(), "an ended child is not named");
+        // Outside any scope, a runner child is the mux's.
+        let other = format!("mux-child-{}", std::process::id());
+        let running = {
+            let other = other.clone();
+            std::thread::spawn(move || {
+                SystemRunner::new()
+                    .run(&["sh".into(), "-c".into(), format!("sleep 1; : {other}")])
+                    .unwrap()
+            })
+        };
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while listed(&other).is_none() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the child was never named"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert_eq!(listed(&other).unwrap().owner, ChildOwner::Mux);
+        running.join().unwrap();
+        assert_eq!(ChildOwner::Session.possessive(), "a session's");
     }
 }

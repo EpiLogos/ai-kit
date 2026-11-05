@@ -3011,6 +3011,17 @@ pub struct ComposeArgs {
     /// JSON file naming the existing SessionSpace, AgentSession and native owner socket.
     #[arg(long, requires = "realise")]
     pub resident_target: Option<std::path::PathBuf>,
+    /// Realise on this AgentSession from its own Agency: AIKit reads the
+    /// session's owner binding (its Agency source, Agent and World), admits
+    /// that Agency again, and finds the SessionSpace that holds the session
+    /// and the native owner that runs it. Nothing about the session is
+    /// supplied by the caller but its ref and the model.
+    #[arg(long, value_name = "AGENT_SESSION", requires_all = ["realise", "model"],
+        conflicts_with_all = ["agency_source", "resident_target"])]
+    pub session: Option<String>,
+    /// The native owner's socket, where it is not the one this AIKit home serves.
+    #[arg(long, requires = "session")]
+    pub socket: Option<std::path::PathBuf>,
     /// The Model to select, as a canonical `model:<stable-id>` ref.
     #[arg(long)]
     pub model: Option<String>,

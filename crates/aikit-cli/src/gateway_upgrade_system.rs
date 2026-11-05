@@ -121,9 +121,44 @@ pub fn children_in_process_table(parent: u32, table: &str) -> Vec<LingeringChild
                 pid,
                 command,
                 since: Some(since.join(" ")),
+                owner: None,
             })
         })
         .collect()
+}
+
+/// Whose a lingering child is, where the gateway persisted no drain report of
+/// its stop (one that predates it, or one that died before its stop ended).
+pub const NO_DRAIN_REPORT: &str =
+    "whose is unread: that gateway persisted no drain report of its stop";
+
+/// Name whose each lingering child is, from the drain report the gateway
+/// `pid` persisted for its stop: the tick's, a session's or the mux's, or one
+/// that report does not name. With no report of that gateway's (none, or
+/// another gateway's), each child says so.
+pub fn owners_from_drain_report(
+    pid: u32,
+    children: &mut [LingeringChild],
+    report: Option<&aikit_adapters::DrainReport>,
+) {
+    let Some(report) = report.filter(|report| report.gateway_pid == Some(pid)) else {
+        for child in children {
+            child.owner = Some(NO_DRAIN_REPORT.to_owned());
+        }
+        return;
+    };
+    for child in children {
+        child.owner = Some(
+            report
+                .children
+                .iter()
+                .find(|held| held.pid == child.pid)
+                .map_or("not one its drain report names", |held| {
+                    held.owner.possessive()
+                })
+                .to_owned(),
+        );
+    }
 }
 
 /// The executable a service definition runs: launchd's first
@@ -460,9 +495,13 @@ impl UpgradeEnv for SystemEnv {
                 "pid=,ppid=,lstart=,command=".to_owned(),
             ],
         )?;
-        Ok(Some(Lingering {
-            children: children_in_process_table(pid, &String::from_utf8_lossy(&table.stdout)),
-        }))
+        let mut children = children_in_process_table(pid, &String::from_utf8_lossy(&table.stdout));
+        owners_from_drain_report(
+            pid,
+            &mut children,
+            aikit_adapters::gateway_service::read_drain_report(&self.home.gateway_state()).as_ref(),
+        );
+        Ok(Some(Lingering { children }))
     }
 
     fn start_service(&self, lifecycle: GatewayLifecycle) -> Result<StartAction> {
@@ -1497,9 +1536,77 @@ mod tests {
                 pid: 6010,
                 command: "ctrl --json --root /Users/p/Central action run central.file-map.refresh {\"embeddings\":true}".into(),
                 since: Some("Thu Nov 5 06:10:00 2026".into()),
+                owner: None,
             }]
         );
         assert!(children_in_process_table(6011, table).is_empty());
+    }
+
+    /// Round 22: whose child lingers is read from the drain report the old
+    /// gateway persisted for its stop, matched by its pid; a report another
+    /// gateway persisted names none, and a child the report does not hold is
+    /// said to be one it does not name. Nothing is ended.
+    #[test]
+    fn whose_child_lingers_is_read_from_the_drain_report_that_gateway_persisted() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = dir.path().join("gateway.json");
+        let held = |pid, owner| aikit_adapters::runner::LiveChild {
+            pid,
+            owner,
+            command: "ctrl --json action run central.file-map.refresh".into(),
+            since_unix_ms: 1_793_944_200_000,
+        };
+        let report: aikit_adapters::DrainReport = serde_json::from_value(serde_json::json!({
+            "measured": true, "reason": "stop requested by the operating system",
+            "started_at_unix_ms": 1, "finished_at_unix_ms": 2, "grace_ms": 0,
+            "turns_resolved": [], "turns_interrupted": [], "communiques": []}))
+        .unwrap();
+        let report = aikit_adapters::DrainReport {
+            gateway_pid: Some(5591),
+            children: vec![
+                held(6010, aikit_adapters::runner::ChildOwner::Tick),
+                held(6020, aikit_adapters::runner::ChildOwner::Session),
+            ],
+            ..report
+        };
+        aikit_adapters::gateway_service::persist_drain_report(&report, &state).unwrap();
+        assert!(dir.path().join("gateway.drain.json").is_file());
+        let read = aikit_adapters::gateway_service::read_drain_report(&state).unwrap();
+        assert_eq!(read.children, report.children);
+        let lingering = |pid| LingeringChild {
+            pid,
+            command: "x".into(),
+            since: None,
+            owner: None,
+        };
+        let mut children = vec![lingering(6010), lingering(6020), lingering(6030)];
+        owners_from_drain_report(5591, &mut children, Some(&read));
+        assert_eq!(
+            children
+                .iter()
+                .map(|child| child.owner.as_deref().unwrap())
+                .collect::<Vec<_>>(),
+            [
+                "the tick's",
+                "a session's",
+                "not one its drain report names"
+            ]
+        );
+        let sentence = crate::gateway_upgrade::Lingering {
+            children: children[..1].to_vec(),
+        }
+        .sentence(5591);
+        assert_eq!(
+            sentence,
+            "the old gateway (pid 5591) drained but has not exited: it is waiting on its child \
+             pid 6010 (the tick's), `x`"
+        );
+        // Another gateway's report, or none, says no one's: the child says so.
+        for report in [Some(&read), None] {
+            let mut others = vec![lingering(6010)];
+            owners_from_drain_report(97240, &mut others, report);
+            assert_eq!(others[0].owner.as_deref(), Some(NO_DRAIN_REPORT));
+        }
     }
 
     fn transaction_in(store: &Store, id: &str, phase: crate::gateway_upgrade::Phase, updated: u64) {
