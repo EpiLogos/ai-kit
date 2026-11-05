@@ -996,16 +996,20 @@ pub fn drag_out_intents(
 /// ContextResolution evidence, and each grouped session's own attachment (and
 /// its bench, where it is benched). For `from`: `into` held as one chain of
 /// the rack, then each grouped session detached, last, so no session ever
-/// stands in no space of its Project. Refused in words: no session named, one
-/// named twice, a session `from` does not hold, the decision helper (it
-/// answers every agent of the rack and stays its chain), a working surface
-/// that binds a grouped session, the same space, and a membership `from`
-/// holds without its Context evidence.
+/// stands in no space of its Project. With `agent_set`, the set's space is
+/// tied to the Central agent set the chains were accepted as (O-I #842 round
+/// 21; manual §19.15 Join "belongs to the set of agents: the rack reads it
+/// from Central"), so the set held as a chain has its own Join to read.
+/// Refused in words: no session named, one named twice, a session `from`
+/// does not hold, the decision helper (it answers every agent of the rack and
+/// stays its chain), a working surface that binds a grouped session, the same
+/// space, and a membership `from` holds without its Context evidence.
 pub fn group_intents(
     from: &SessionSpaceAuthoredState,
     agent_sessions: &[ResourceRef],
     into: SessionSpaceRef,
     label: Option<String>,
+    agent_set: Option<SessionSpaceAgentSetBinding>,
 ) -> Result<(Vec<SessionSpaceMutation>, Vec<SessionSpaceMutation>)> {
     let refused = |code: &'static str, message: String| Err(AikitError::new(code, message));
     if agent_sessions.is_empty() {
@@ -1086,6 +1090,9 @@ pub fn group_intents(
                 context.clone(),
             )?),
         });
+    }
+    if let Some(binding) = agent_set {
+        set.push(SessionSpaceMutation::BindAgentSet { binding });
     }
     let marker = format!("grouped out of {}", from.id());
     for session in agent_sessions {
@@ -1638,6 +1645,7 @@ mod tests {
             &[ada.clone(), bo.clone()],
             into.clone(),
             Some("pair".into()),
+            None,
         )
         .unwrap();
         let mut set: Option<SessionSpaceAuthoredState> = None;
@@ -1661,6 +1669,28 @@ mod tests {
             .any(|p| p == "grouped out of session-space/crew"));
         assert!(set.benched.contains(&bo), "a benched chain stays benched");
         assert_eq!(set.project_contexts, from.project_contexts);
+        assert!(set.agent_set.is_none(), "no set named, no tie");
+        // Accepted as Central's set, the set's space is tied to it: the set held as a chain has its own Join to read.
+        let tie = SessionSpaceAgentSetBinding {
+            agent_set_ref: "agent-set:crew-pair".into(),
+            revision: Some("r1".into()),
+            provenance: vec!["accepted with Group".into()],
+        };
+        let (tied_intents, _) = group_intents(
+            &from,
+            &[ada.clone(), bo.clone()],
+            into.clone(),
+            Some("pair".into()),
+            Some(tie.clone()),
+        )
+        .unwrap();
+        let mut tied: Option<SessionSpaceAuthoredState> = None;
+        for intent in tied_intents {
+            tied = Some(stage_session_space(tied.as_ref(), intent).unwrap().proposed);
+        }
+        let tied = tied.unwrap();
+        assert_eq!(tied.agent_set.as_ref(), Some(&tie));
+        assert_eq!(tied.agent_sessions, set.agent_sessions);
         // The rack's own: the set held first as one chain, the grouped sessions detached last.
         assert!(matches!(
             rack_intents[0],
@@ -1739,7 +1769,7 @@ mod tests {
                 "a space of its own",
             ),
         ] {
-            let refused = group_intents(&from, &sessions, space, None).unwrap_err();
+            let refused = group_intents(&from, &sessions, space, None, None).unwrap_err();
             assert_eq!(refused.code(), code);
             assert!(refused.to_string().contains(words), "{refused}");
         }
@@ -1754,11 +1784,12 @@ mod tests {
         )
         .unwrap()
         .proposed;
-        let refused = group_intents(&helped, std::slice::from_ref(&ada), into(), None).unwrap_err();
+        let refused =
+            group_intents(&helped, std::slice::from_ref(&ada), into(), None, None).unwrap_err();
         assert_eq!(refused.code(), "session_space.group_decision_helper");
         let mut bare = from.clone();
         bare.project_contexts.clear();
-        let refused = group_intents(&bare, &[ada], into(), None).unwrap_err();
+        let refused = group_intents(&bare, &[ada], into(), None, None).unwrap_err();
         assert_eq!(
             refused.code(),
             "session_space.group_membership_without_context"

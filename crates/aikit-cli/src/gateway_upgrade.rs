@@ -1033,10 +1033,16 @@ impl<E: UpgradeEnv> Driver<'_, E> {
                                     lingering.sentence(pid),
                                     transaction.plan.exit_wait_ms
                                 ),
+                                // The gateway ends only its own children: the
+                                // upgrade names what the old one waits on and
+                                // ends nothing. Ending the gateway itself would
+                                // leave those children running without it.
                                 vec![format!(
-                                    "it exits once what it waits on returns; if it does not, \
-                                     end it (`kill -KILL {pid}`; it has already drained), then \
-                                     `aikit gateway upgrade resume {}`",
+                                    "it exits once what it waits on returns, and the service \
+                                     manager then starts the new build: `aikit gateway upgrade \
+                                     resume {}` once it has. Those processes are the old \
+                                     gateway's own; the upgrade ends none of them, and ending \
+                                     the gateway would leave them running without it",
                                     transaction.id
                                 )],
                             );
@@ -2078,6 +2084,16 @@ mod tests {
             !outcome.summary.contains("nothing answers"),
             "{}",
             outcome.summary
+        );
+        // The step ends nothing (round 21): the gateway ends only its own
+        // children, and a kill of the old gateway would orphan the one it
+        // waits on.
+        let step = outcome.operator_steps.join("\n");
+        assert!(!step.contains("kill"), "{step}");
+        assert!(
+            step.starts_with("it exits once what it waits on returns")
+                && step.contains("ends none of them"),
+            "{step}"
         );
         // Nothing was asked of the service manager while the old process lives.
         assert_eq!(script.start_calls.get(), 0);
