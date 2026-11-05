@@ -37,11 +37,12 @@
 //! (`login.argv`), grounded in the 2026-09-22 connection truth cards
 //! (docs/plans/2026-09-22-harness-connection-truth-cards.md, tags VL/VD):
 //! verified-live for codex, opencode and hermes, docs-verified for cline,
-//! qoder and cursor-cli. Harnesses whose login has no one-shot form — the
-//! in-TUI flows (claude, kimi, qwen), the browser consent gate the 2026-09-22
-//! live walk proved for gemini, the first-launch wizards (grok,
-//! antigravity) — stay note-only, and that absence is the honest record, not
-//! a gap.
+//! qoder and cursor-cli; claude's `claude auth login` is declared by the
+//! DLW build's ruling of 2026-11-04, beside its `claude auth status --json`
+//! check. Harnesses whose login has no one-shot form — the in-TUI flows
+//! (kimi, qwen), the browser consent gate the 2026-09-22 live walk proved
+//! for gemini, the first-launch wizards (grok, antigravity) — stay
+//! note-only, and that absence is the honest record, not a gap.
 //!
 //! ## Pi hooks (2026-09-18 census; carrier commissioned same day)
 //!
@@ -113,12 +114,13 @@ dispatch = { native-provider-binding = { provider-ref = "provider:anthropic", se
 
 [models.key-delivery]
 env-var = [{ provider-ref = "provider:anthropic", env-var = "ANTHROPIC_API_KEY" }]
-# Login commands pass 2026-09-23: claude's login is the in-TUI /login flow
-# (the cards verify no one-shot login command), so this fact stays note-only.
+# Login command by the DLW build's ruling of 2026-11-04 (O-I #758): `claude auth login` is
+# Claude Code's one-shot login, run as Codex's `codex login` is; it replaces
+# the 2026-09-23 note-only record of the in-TUI /login flow.
 # Logged-in check observed 2026-11-04 on Claude Code 2.1.314's own surface:
 # `claude auth status` prints a JSON object (`--json`, its default) whose
 # `loggedIn` is a boolean; nothing else it prints is read.
-own-login = [{ provider-ref = "provider:anthropic", note = "claude login keeps OAuth material in its own credential store (~/.claude/.credentials.json); the API key delivers only when credential:anthropic is bound", status = { argv = ["claude", "auth", "status", "--json"], json-true = "loggedIn" } }]
+own-login = [{ provider-ref = "provider:anthropic", note = "claude login keeps OAuth material in its own credential store (~/.claude/.credentials.json); the API key delivers only when credential:anthropic is bound", login = { argv = ["claude", "auth", "login"] }, status = { argv = ["claude", "auth", "status", "--json"], json-true = "loggedIn" } }]
 
 [sessions]
 posture = "observed"
@@ -1635,10 +1637,13 @@ mod tests {
     fn login_argv_is_declared_exactly_where_the_cards_verify_a_dedicated_login_command() {
         // The 2026-09-23 login-commands pass over the 2026-09-22 connection
         // truth cards: verified-live for codex/opencode/hermes, docs-verified
-        // for cline/qoder/cursor-cli. Every other harness stays note-only —
+        // for cline/qoder/cursor-cli. Claude Code's one-shot `claude auth
+        // login` (2.1.314's own command surface; DLW build ruling 2026-11-04,
+        // O-I #758 Sign in) joins them. Every other harness stays note-only —
         // an in-TUI flow, a browser consent gate or a first-launch wizard has
         // no one-shot login command to declare, and none is invented.
         let expected: &[(&str, &[&str])] = &[
+            ("claude-code", &["claude", "auth", "login"]),
             ("codex", &["codex", "login"]),
             ("opencode", &["opencode", "auth", "login"]),
             ("hermes", &["hermes", "auth", "add"]),

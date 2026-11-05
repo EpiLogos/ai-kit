@@ -201,3 +201,65 @@ fn harness_auth_check_runs_the_declared_native_check_and_describe_does_not() {
     assert!(output.status.success(), "{none}");
     assert_eq!(none["data"]["checks"], serde_json::json!([]));
 }
+
+/// DLW build ruling 2026-11-04 (O-I #758 Sign in): Claude Code signs in like
+/// Codex — `aikit harness auth claude` runs its one-shot `claude auth login`,
+/// and `--check` reads back `claude auth status --json` by its `loggedIn`
+/// alone. A fake `claude` stands on PATH: the real one is never run, and no
+/// keychain is reached.
+#[cfg(unix)]
+#[test]
+fn claude_signs_in_by_its_own_login_and_reads_back_its_logged_in_check() {
+    use std::os::unix::fs::PermissionsExt;
+    let temp = tempfile::tempdir().unwrap();
+    let bin = temp.path().join("bin");
+    fs::create_dir_all(&bin).unwrap();
+    let asked = temp.path().join("asked");
+    let claude = bin.join("claude");
+    fs::write(
+        &claude,
+        format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> {}\nif [ \"$*\" = \"auth status --json\" ]; then echo '{{\"loggedIn\": true, \"authMethod\": \"claude.ai\", \"email\": \"owner@example.com\"}}'; exit 0; fi\nif [ \"$*\" = \"auth login\" ]; then exit 0; fi\nexit 9\n",
+            asked.display()
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&claude, fs::Permissions::from_mode(0o755)).unwrap();
+    let path = format!("{}:/usr/bin:/bin", bin.display());
+    let aikit = |args: &[&str]| {
+        Command::new(cargo_bin("aikit"))
+            .args(args)
+            .env("AIKIT_HOME", temp.path().join("aikit"))
+            .env("HOME", temp.path())
+            .env("PATH", &path)
+            .current_dir(temp.path())
+            .output()
+            .unwrap()
+    };
+
+    let login = aikit(&["harness", "auth", "claude"]);
+    assert!(
+        login.status.success(),
+        "{}",
+        String::from_utf8_lossy(&login.stderr)
+    );
+    assert_eq!(fs::read_to_string(&asked).unwrap(), "auth login\n");
+
+    let checked = aikit(&["harness", "auth", "claude", "--check", "--json"]);
+    assert!(checked.status.success());
+    let stdout = String::from_utf8_lossy(&checked.stdout);
+    let value: Value = serde_json::from_str(stdout.trim())
+        .unwrap_or_else(|error| panic!("invalid JSON ({error}): {stdout:?}"));
+    assert_eq!(value["data"]["slug"], "claude-code");
+    let check = &value["data"]["checks"][0];
+    assert_eq!(check["provider_ref"], "provider:anthropic");
+    assert_eq!(check["signed_in"], true);
+    assert!(
+        !stdout.contains("example.com"),
+        "nothing else the harness printed is carried: {stdout}"
+    );
+    assert_eq!(
+        fs::read_to_string(&asked).unwrap(),
+        "auth login\nauth status --json\n"
+    );
+}

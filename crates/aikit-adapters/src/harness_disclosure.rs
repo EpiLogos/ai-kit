@@ -1020,19 +1020,31 @@ mod tests {
 
     #[test]
     fn a_note_only_own_login_discloses_note_only_without_inventing_a_command() {
-        let profile = for_slug("claude-code").expect("claude-code carries an embedded profile");
+        // Claude Code's own login is one-shot since 2026-11-04 (`claude auth
+        // login`), so it discloses runnable: binary and argument count only.
+        let claude = for_slug("claude-code").expect("claude-code carries an embedded profile");
+        let claude_disclosure = disclose(claude, &NativeObservation::default(), &[]);
+        let claude_auth = models_layer(&claude_disclosure)
+            .auth
+            .as_ref()
+            .expect("claude-code declares key-delivery facts");
+        assert!(matches!(
+            &claude_auth.own_login[..],
+            [OwnLoginDisclosure::Runnable { binary, arg_count: 2, .. }] if binary == "claude"
+        ));
+        let profile = for_slug("gemini").expect("gemini carries an embedded profile");
 
         let disclosure = disclose(profile, &NativeObservation::default(), &[]);
 
         let auth = models_layer(&disclosure)
             .auth
             .as_ref()
-            .expect("claude-code declares key-delivery facts");
+            .expect("gemini declares key-delivery facts");
         assert_eq!(auth.env_var.len(), 1);
         assert_eq!(
             auth.own_login,
             vec![OwnLoginDisclosure::NoteOnly {
-                provider_ref: "provider:anthropic".to_string(),
+                provider_ref: "provider:gemini".to_string(),
                 note: profile
                     .models
                     .as_ref()
@@ -1044,7 +1056,7 @@ mod tests {
                     .note
                     .clone(),
             }],
-            "claude's in-TUI login renders note-only: no one-shot command is invented"
+            "gemini's browser consent gate renders note-only: no one-shot command is invented"
         );
     }
 

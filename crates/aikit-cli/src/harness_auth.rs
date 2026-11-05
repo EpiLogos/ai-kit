@@ -628,35 +628,46 @@ mod tests {
     }
 
     #[test]
-    fn describe_reports_claude_note_only_with_its_note_as_the_instruction() {
+    fn describe_reports_claude_runnable_login_and_its_check_without_executing() {
+        // DLW build ruling 2026-11-04 (O-I #758 Sign in): Claude Code signs in
+        // like Codex — its one-shot `claude auth login`, read back by
+        // `claude auth status --json`. Describe runs neither.
         let face = auth_face("claude").unwrap();
         assert_eq!(face.slug, "claude-code");
         assert_eq!(face.env_var.len(), 1, "ANTHROPIC_API_KEY is declared");
         assert_eq!(face.own_login.len(), 1);
         let own_login = &face.own_login[0];
-        assert!(
-            !own_login.runnable,
-            "claude's login is the in-TUI flow; no one-shot command is declared"
+        assert!(own_login.runnable, "claude auth login is one-shot");
+        assert_eq!(
+            own_login.argv.as_deref().map(|argv| argv.join(" ")),
+            Some("claude auth login".to_string())
         );
-        assert!(own_login.argv.is_none());
         assert!(
-            own_login.note.contains("claude login"),
-            "the note is the instruction: {}",
+            !own_login.note.contains("in-TUI"),
+            "the note says what the login does: {}",
             own_login.note
+        );
+        assert_eq!(
+            plan_login("claude").unwrap().argv,
+            vec![
+                "claude".to_string(),
+                "auth".to_string(),
+                "login".to_string()
+            ]
         );
     }
 
     #[test]
     fn run_mode_refuses_a_note_only_harness_printing_the_note_as_the_instruction() {
-        let error = plan_login("claude").unwrap_err();
+        let error = plan_login("gemini").unwrap_err();
         assert_eq!(error.code(), "harness_auth.no_login_declared");
         let message = error.message();
         assert!(
-            message.starts_with("no declared one-shot login for claude-code; "),
+            message.starts_with("no declared one-shot login for gemini; "),
             "the refusal carries the contract phrasing: {message}"
         );
         assert!(
-            message.contains("claude login keeps OAuth material"),
+            message.contains("Login with Google"),
             "the own-login note rides the refusal as the instruction: {message}"
         );
     }
