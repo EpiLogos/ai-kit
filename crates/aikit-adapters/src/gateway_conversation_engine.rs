@@ -1345,6 +1345,14 @@ pub struct DrainReport {
     /// command it ended, and whether the tick then returned.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tick_at_stop: Option<crate::gateway_service::TickAtStop>,
+    /// The gateway that drained, when its stop persisted this report.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gateway_pid: Option<u32>,
+    /// Each child the runner still held when the stop had ended what it ends:
+    /// its pid and whose it is (the tick's, a session's, the mux's). A
+    /// gateway that lingers after its stop waits on one of these.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub children: Vec<crate::runner::LiveChild>,
 }
 
 impl DrainReport {
@@ -3039,6 +3047,8 @@ impl GatewayConversationEngine {
             prompts_not_started,
             communiques,
             tick_at_stop: None,
+            gateway_pid: None,
+            children: Vec::new(),
         })
     }
 
@@ -3171,6 +3181,11 @@ impl GatewayConversationEngine {
     fn persist(&self) -> Result<()> {
         let kernel = self.gateway.lock().map_err(|_| poisoned())?;
         persist_gateway_state(&kernel, self.state_file.as_deref())
+    }
+
+    /// The file the gateway's state is persisted to, when it has one.
+    pub fn state_file(&self) -> Option<&std::path::Path> {
+        self.state_file.as_deref()
     }
 }
 

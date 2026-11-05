@@ -137,6 +137,48 @@ pub fn restore_gateway_state(
     AgencyGateway::from_snapshot(snapshot)
 }
 
+/// Where a stop's drain report is persisted beside the gateway's state:
+/// `gateway.json` → `gateway.drain.json`.
+pub fn drain_report_path(state_file: &Path) -> PathBuf {
+    let stem = state_file.file_stem().map_or_else(
+        || "gateway".into(),
+        |stem| stem.to_string_lossy().into_owned(),
+    );
+    state_file.with_file_name(format!("{stem}.drain.json"))
+}
+
+/// The stop's drain report, written whole (temporary file, then rename).
+pub fn persist_drain_report(
+    report: &crate::gateway_conversation_engine::DrainReport,
+    state_file: &Path,
+) -> Result<()> {
+    let path = drain_report_path(state_file);
+    let encoded = serde_json::to_vec_pretty(report).map_err(|error| {
+        AikitError::new(
+            "agency_gateway_service.drain_encode",
+            format!("encode the drain report: {error}"),
+        )
+    })?;
+    let tmp = path.with_extension("json.tmp");
+    fs::write(&tmp, encoded)
+        .and_then(|()| fs::rename(&tmp, &path))
+        .map_err(|error| {
+            AikitError::new(
+                "agency_gateway_service.drain_write",
+                format!("write the drain report {}: {error}", path.display()),
+            )
+        })
+}
+
+/// The drain report a stop persisted beside `state_file`, when there is one
+/// that reads.
+pub fn read_drain_report(
+    state_file: &Path,
+) -> Option<crate::gateway_conversation_engine::DrainReport> {
+    let text = fs::read_to_string(drain_report_path(state_file)).ok()?;
+    serde_json::from_str(&text).ok()
+}
+
 pub fn persist_gateway_state(gateway: &AgencyGateway, state_file: Option<&Path>) -> Result<()> {
     let Some(path) = state_file else {
         return Ok(());
@@ -462,7 +504,21 @@ fn stop_on_signal(
     match drained {
         Some(Ok(mut report)) => {
             report.tick_at_stop = tick_at_stop;
+            // What the stop could not end stays named: each child still held,
+            // and whose it is, persisted before the process exits so the
+            // upgrade that waits on it can say whose child lingers.
+            report.gateway_pid = Some(std::process::id());
+            report.children = crate::runner::live_children();
             eprintln!("gateway drained for stop: {}", report.stop_summary());
+            if let Some(state_file) = runtime
+                .engine
+                .as_ref()
+                .and_then(|engine| engine.state_file())
+            {
+                if let Err(error) = persist_drain_report(&report, state_file) {
+                    eprintln!("gateway drain report not persisted: {error}");
+                }
+            }
         }
         Some(Err(error)) => match tick_at_stop {
             Some(tick) => eprintln!(
@@ -1155,7 +1211,10 @@ fn serve_gateway_service(
                     let mut until_next_tick = interval;
                     while !shutdown.load(Ordering::SeqCst) {
                         if until_next_tick == Duration::ZERO {
-                            if let Err(error) = stop.scope(|| hook.tick()) {
+                            // Every child a tick starts is the tick's.
+                            let ticked = crate::runner::ChildOwner::Tick
+                                .scope(|| stop.scope(|| hook.tick()));
+                            if let Err(error) = ticked {
                                 last_error = Some(error);
                             }
                             until_next_tick = interval;

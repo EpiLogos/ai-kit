@@ -628,6 +628,172 @@ fn compose_cli_realisation_uses_the_same_existing_resident_target() {
     println!("MODEL_COMPOSE_NATIVE_CONNECTION_EXECUTED");
 }
 
+/// `aikit compose --session <s> --realise --model <m>`: the caller names the
+/// session and the model; AIKit reads the session's Agency from its own owner
+/// binding, the SessionSpace that holds it and the owner that runs it, and the
+/// realisation is the one the explicit resident target gives (O-I #842, the
+/// Launch press: a unit starts on AIKit's realisation on its session).
+fn compose_on_session(w: &World, session: &str, path: Option<&std::ffi::OsStr>) -> Value {
+    let isolated_home = w.temp.path().join("client-home");
+    fs::create_dir_all(&isolated_home).unwrap();
+    let mut command = Command::new(env!("CARGO_BIN_EXE_aikit"));
+    command
+        .env("AIKIT_HOME", w.home.root())
+        .env("HOME", isolated_home)
+        .env_remove("CAW_SOURCE_API_KEY");
+    if let Some(path) = path {
+        command.env("PATH", path);
+    }
+    let output = command
+        .arg("--json")
+        .arg("-C")
+        .arg(w.temp.path())
+        .args([
+            "compose",
+            "--session",
+            session,
+            "--realise",
+            "--model",
+            "model:controlled-caw",
+            "--provider",
+            "provider:controlled-native",
+            "--socket",
+        ])
+        .arg(&w.socket)
+        .output()
+        .unwrap();
+    serde_json::from_slice(&output.stdout).unwrap_or_else(|_| {
+        json!({"unreadable": String::from_utf8_lossy(&output.stdout),
+            "stderr": String::from_utf8_lossy(&output.stderr)})
+    })
+}
+
+#[test]
+#[ignore = "requires pinned Actuation and native protocol owner; mandatory CAW lane"]
+fn compose_cli_realises_on_a_session_from_its_own_agency() {
+    let mut w = World::new();
+    let target = model_setup(&w, "normal", true);
+    let native = actuation();
+    let mut paths = vec![native.parent().unwrap().to_path_buf()];
+    paths.extend(std::env::split_paths(
+        &std::env::var_os("PATH").unwrap_or_default(),
+    ));
+    let path = std::env::join_paths(paths).unwrap();
+    start_model(&mut w, true);
+    let reading = compose_on_session(&w, "agent-session/root", Some(&path));
+    assert_eq!(reading["ok"], true, "{reading}");
+    assert_eq!(
+        reading["data"]["composition_scope"]["kind"],
+        "session-own-agency"
+    );
+    for field in [
+        "basis",
+        "agent_ref",
+        "agency_ref",
+        "world_binding_ref",
+        "world_ref",
+        "scope_ref",
+    ] {
+        assert_eq!(
+            reading["data"]["agency_admission"][field],
+            target["request"]["expected_agency"][field]
+        );
+    }
+    assert_eq!(
+        reading["data"]["resident_target"],
+        json!({"space": "session-space/root", "agent_session": "agent-session/root", "socket": w.socket})
+    );
+    let realisation = &reading["data"]["realisation"];
+    assert_eq!(realisation["schema"], "aikit.model-realisation/v2");
+    assert_eq!(realisation["selected"], true, "{reading}");
+    assert_eq!(realisation["executed"], false);
+    assert_eq!(prompts(&w), 0, "a realisation is no turn");
+    assert_no_secret(w.home.root());
+    w.stop();
+    println!("MODEL_SESSION_OWN_AGENCY_REALISED");
+}
+
+#[test]
+fn compose_on_a_session_refuses_in_aikits_words_what_the_session_lacks() {
+    let w = World::new();
+    // No SessionSpace holds it.
+    let unplaced = compose_on_session(&w, "agent-session/nowhere", None);
+    assert_eq!(
+        unplaced["error"]["code"], "model.session_unplaced",
+        "{unplaced}"
+    );
+    // Held by a space, but never admitted as an Agent's session.
+    let space = SessionSpaceRef::parse("session-space/unbound").unwrap();
+    let store = SessionSpaceApplicationStore::new(w.home.clone());
+    for (at, mutation) in [
+        (
+            None,
+            SessionSpaceMutation::Create {
+                id: space.clone(),
+                label: None,
+            },
+        ),
+        (
+            Some(&space),
+            SessionSpaceMutation::AttachAgentSession {
+                attachment: SessionSpaceAgentAttachmentIntent {
+                    agent_session: r("agent-session/unbound"),
+                    purpose: Some("A session with no Agency".into()),
+                    provenance: vec!["explicit fixture".into()],
+                },
+            },
+        ),
+    ] {
+        store.apply(&store.stage(at, mutation).unwrap()).unwrap();
+    }
+    let unbound = compose_on_session(&w, "agent-session/unbound", None);
+    assert_eq!(
+        unbound["error"]["code"], "encounter.agency_unbound",
+        "{unbound}"
+    );
+    assert!(unbound["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("has no Agency binding"));
+    // On the bench: no launch reaches it.
+    store
+        .apply(
+            &store
+                .stage(
+                    Some(&space),
+                    SessionSpaceMutation::BenchAgentSession {
+                        agent_session: r("agent-session/unbound"),
+                        benched: true,
+                    },
+                )
+                .unwrap(),
+        )
+        .unwrap();
+    let benched = compose_on_session(&w, "agent-session/unbound", None);
+    assert_eq!(
+        benched["error"]["code"], "model.session_benched",
+        "{benched}"
+    );
+    // The session's own path takes no source or target from the caller.
+    let output = Command::new(env!("CARGO_BIN_EXE_aikit"))
+        .env("AIKIT_HOME", w.home.root())
+        .args([
+            "--json",
+            "compose",
+            "--session",
+            "agent-session/unbound",
+            "--realise",
+            "--model",
+            "model:controlled-caw",
+            "--resident-target",
+            "target.json",
+        ])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("cannot be used with"));
+}
+
 #[test]
 #[ignore = "requires pinned Central and Actuation; mandatory CAW lane"]
 fn native_central_root_composes_without_a_profile_or_child_project() {

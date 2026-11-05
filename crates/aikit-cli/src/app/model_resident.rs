@@ -221,6 +221,73 @@ fn explicit_factory_selection(
     })))
 }
 
+impl Service {
+    /// What `aikit compose --session <s> --realise` realises on: the session's
+    /// own Agency admitted again from its owner binding, the one SessionSpace
+    /// that holds the session, and the native owner that runs it (this home's,
+    /// unless `socket` names another). The caller supplies the session and the
+    /// model; nothing else about the session is taken from it.
+    pub fn compose_session_resident(
+        &self,
+        session: &ResourceRef,
+        socket: Option<&std::path::Path>,
+    ) -> Result<Value> {
+        let spaces: Vec<_> = aikit_store::SessionSpaceApplicationStore::new(self.home.clone())
+            .list()?
+            .into_iter()
+            .filter(|state| state.agent_sessions.contains_key(session))
+            .collect();
+        let space = match spaces.as_slice() {
+            [space] => space,
+            [] => {
+                return Err(AikitError::new(
+                    "model.session_unplaced",
+                    format!(
+                        "{session} stands in no SessionSpace, so no resident of it can be opened"
+                    ),
+                ))
+            }
+            _ => {
+                return Err(AikitError::new(
+                    "model.session_ambiguous",
+                    format!(
+                        "{session} stands in {} SessionSpaces ({}); a realisation opens it in one",
+                        spaces.len(),
+                        spaces
+                            .iter()
+                            .map(|state| state.id().to_string())
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    ),
+                ))
+            }
+        };
+        if space.benched.contains(session) {
+            return Err(AikitError::new(
+                "model.session_benched",
+                format!(
+                    "{session} is on the bench in {}: it is given no work, so no launch reaches it",
+                    space.id()
+                ),
+            ));
+        }
+        let admitted =
+            crate::encounter_service::EncounterService::admit_own_agency(&self.home, session)?;
+        let socket = socket
+            .map(std::path::Path::to_path_buf)
+            .unwrap_or_else(|| crate::encounter_service::socket_path(&self.home));
+        Ok(json!({
+            "agency_admission": admitted,
+            "composition_scope": {
+                "kind": "session-own-agency",
+                "ambient_components_claimed": false,
+                "standing": "the session's own Agency from its owner binding, admitted again; no profile, plan or ambient composition is claimed"
+            },
+            "resident_target": {"space": space.id(), "agent_session": session, "socket": socket}
+        }))
+    }
+}
+
 pub(super) fn realise(
     service: &Service,
     compose: &Value,

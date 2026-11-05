@@ -460,6 +460,42 @@ impl EncounterService {
     ) -> Result<Option<EncounterAgencyBinding>> {
         read_binding(home, session)
     }
+    /// The session's own Agency, admitted again from the source its owner
+    /// binding pins (its Agent, World and Actuation executable): what a
+    /// realisation on the session stands on. Refused in the owner's words
+    /// when the session has no binding, was withdrawn, or its Agency or
+    /// WorldBinding changed since it was bound. The model-realise authority
+    /// is the resident owner's to check when it opens the model.
+    pub fn admit_own_agency(home: &AikitHome, session: &ResourceRef) -> Result<AdmittedAgency> {
+        let binding = read_binding(home, session)?.ok_or_else(|| {
+            AikitError::new(
+                "encounter.agency_unbound",
+                format!("{session} has no Agency binding: it was never admitted as an Agent's session, so it has no Agency of its own to realise a model on"),
+            )
+        })?;
+        if !binding.active {
+            return Err(AikitError::new(
+                "encounter.participant_withdrawn",
+                "This participant was withdrawn; history remains available but no new effect is permitted",
+            ));
+        }
+        let admitted = admit_agency(
+            &SystemRunner::probe().with_body_free_diagnostics(),
+            &binding.actuation_bin.to_string_lossy(),
+            &binding.agency_source,
+            &binding.agent_ref,
+            &binding.world_ref,
+        )?;
+        if admitted.agency_ref != binding.agency_ref
+            || admitted.world_binding_ref != binding.world_binding_ref
+        {
+            return Err(AikitError::new(
+                "encounter.agency_changed",
+                "The actual native Agency or WorldBinding changed; recompose explicitly",
+            ));
+        }
+        Ok(admitted)
+    }
     /// Reuse the task owner's current native authority/material/placement check.
     pub fn verify_task_admission(home: &AikitHome, session: &ResourceRef) -> Result<()> {
         task::check(home, session)
