@@ -3,7 +3,7 @@
 //! Fill heads).
 //!
 //! The instrument is QL's: AIKit reads the team space whole from the installed
-//! `ql` (`ql context-frame team-space --json`, `ql.vak-team-space/v1`) and
+//! `ql` (`ql context-frame team-space --json`, `ql.vak-team-space/v2`) and
 //! mirrors none of it. A cell names the heads it has chosen (an empty choice
 //! is an abstention, kept as given); every other head of the instrument is
 //! open. Each open head becomes one typed Choice question among the labels
@@ -29,7 +29,7 @@ use std::io::Read;
 
 pub const INSTRUMENT_FILL_REQUEST_SCHEMA: &str = "aikit.instrument-fill-request/v1";
 pub const INSTRUMENT_FILL_SCHEMA: &str = "aikit.instrument-fill/v1";
-const TEAM_SPACE_CONTRACT: &str = "ql.vak-team-space/v1";
+const TEAM_SPACE_CONTRACT: &str = "ql.vak-team-space/v2";
 const MAX_REQUEST_BYTES: usize = 1024 * 1024;
 
 /// What a cell asks: its own words (any object: the unit's key, concern,

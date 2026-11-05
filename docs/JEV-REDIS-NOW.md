@@ -335,7 +335,7 @@ aikit --json decide invoke --instrument vak-block \
 `--instrument ID` fills the open heads of one instrument of QL's team space
 (O-I #843: Factory's Clip view, Generate → Fill heads). AIKit reads the team
 space whole from the installed `ql` (`ql context-frame team-space --json`,
-`ql.vak-team-space/v1`; `--ql` names another executable) and mirrors none of
+`ql.vak-team-space/v2`; `--ql` names another executable) and mirrors none of
 it. The request is `aikit.instrument-fill-request/v1`
 `{schema, subject: {…the cell's own words…}, chosen: {head_id: [label_id…]}}`
 (`--request-file -` reads it from stdin); an empty choice is an abstention,

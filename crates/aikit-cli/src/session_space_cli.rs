@@ -200,6 +200,29 @@ enum Command {
         #[arg(long)]
         expected_revision: String,
     },
+    /// Set how many turns this session's bound task may take, or clear it
+    /// (its Budget), against the task's revision and the Budget's own
+    /// (`--expected-budget-revision`, absent while none was ever written).
+    /// The person sets it: `--by human`. A launch past it is refused.
+    EncounterTaskBudget {
+        #[arg(long)]
+        agent_session: String,
+        #[arg(long)]
+        task_ref: String,
+        #[arg(long)]
+        expected_revision: String,
+        #[arg(long)]
+        expected_budget_revision: Option<String>,
+        /// The turns the task may take (1–1000).
+        #[arg(long, conflicts_with = "clear", required_unless_present = "clear")]
+        turns: Option<u64>,
+        /// Clear the Budget: the task takes turns without one.
+        #[arg(long)]
+        clear: bool,
+        /// Who sets it; only `human` is the person.
+        #[arg(long)]
+        by: String,
+    },
     /// Copy another session's ready task onto this session, which holds
     /// none: the owner's own creation makes it of the task's purpose and
     /// source (the rest derived from this session's standing) under a ref of
@@ -480,6 +503,24 @@ enum Command {
         #[arg(long)]
         label: Option<String>,
     },
+    /// Group chains of --space into a set (O-I manual §19.15, the Agent
+    /// rack: "select agents' chains and choose Group: they become one chain
+    /// that holds an Agent rack of them"): --into, the set's own space in the
+    /// same Project, is made and every --agent-session seated there with its
+    /// Project contexts and its bench; --space holds --into as one chain, and
+    /// each session is detached from --space last. Each step is an ordinary
+    /// stage and apply; answers the receipts in order. A Group that stopped
+    /// partway is finished by the same call.
+    Group {
+        #[arg(long)]
+        space: String,
+        #[arg(long = "agent-session", required = true)]
+        agent_sessions: Vec<String>,
+        #[arg(long)]
+        into: String,
+        #[arg(long)]
+        label: Option<String>,
+    },
     /// Swap a chain's agent for another (O-I manual §19.15, the Agent rack's
     /// Hot-Swap), keeping the rest of its chain: a new, separately attributed
     /// session is minted for --agent-ref and seated in --space with the
@@ -656,12 +697,12 @@ fn run(cli: Cli) -> Result<()> {
                 expected.as_ref(),
             )?)
         }
-        Command::EncounterTaskRead { agent_session } => {
-            emit(&crate::encounter_service::EncounterService::read_task(
+        Command::EncounterTaskRead { agent_session } => emit(
+            &crate::encounter_service::EncounterService::read_task_reading(
                 home,
                 &aikit_core::ResourceRef::parse(agent_session)?,
-            )?)
-        }
+            )?,
+        ),
         Command::EncounterTaskAttempts {
             agent_session,
             request_json,
@@ -771,6 +812,28 @@ fn run(cli: Cli) -> Result<()> {
             &aikit_core::ResourceRef::parse(task_ref)?,
             &aikit_core::SourceRevision::parse(expected_revision)?,
         )?),
+        Command::EncounterTaskBudget {
+            agent_session,
+            task_ref,
+            expected_revision,
+            expected_budget_revision,
+            turns,
+            clear,
+            by,
+        } => emit(
+            &crate::encounter_service::EncounterService::write_task_budget(
+                home,
+                &aikit_core::ResourceRef::parse(agent_session)?,
+                &aikit_core::ResourceRef::parse(task_ref)?,
+                if clear { None } else { turns },
+                &by,
+                &aikit_core::SourceRevision::parse(expected_revision)?,
+                expected_budget_revision
+                    .map(aikit_core::SourceRevision::parse)
+                    .transpose()?
+                    .as_ref(),
+            )?,
+        ),
         Command::EncounterTaskCopy {
             agent_session,
             from_session,
@@ -1477,6 +1540,22 @@ fn run(cli: Cli) -> Result<()> {
             space_ref(&into)?,
             label,
         )?),
+        Command::Group {
+            space,
+            agent_sessions,
+            into,
+            label,
+        } => emit(
+            &SessionSpaceApplicationStore::new(home.clone()).group(
+                &space_ref(&space)?,
+                &agent_sessions
+                    .into_iter()
+                    .map(ResourceRef::parse)
+                    .collect::<Result<Vec<_>>>()?,
+                space_ref(&into)?,
+                label,
+            )?,
+        ),
         Command::HotSwap {
             space,
             agent_session,
@@ -2091,6 +2170,49 @@ mod epi_prime_cli_tests {
             ])
             .is_err(),
             "the session and the space of its own are required"
+        );
+    }
+
+    #[test]
+    fn group_takes_the_space_its_chains_and_the_set_s_own_space() {
+        let cli = Cli::try_parse_from([
+            "aikit-session-space",
+            "group",
+            "--space",
+            "session-space/crew",
+            "--agent-session",
+            "agent-session/ada",
+            "--agent-session",
+            "agent-session/bo",
+            "--into",
+            "session-space/crew-pair",
+        ])
+        .unwrap();
+        match cli.command {
+            Command::Group {
+                space,
+                agent_sessions,
+                into,
+                label,
+            } => {
+                assert_eq!(space, "session-space/crew");
+                assert_eq!(agent_sessions, ["agent-session/ada", "agent-session/bo"]);
+                assert_eq!(into, "session-space/crew-pair");
+                assert_eq!(label, None);
+            }
+            other => panic!("group parsed as {other:?}"),
+        }
+        assert!(
+            Cli::try_parse_from([
+                "aikit-session-space",
+                "group",
+                "--space",
+                "session-space/crew",
+                "--into",
+                "session-space/crew-pair",
+            ])
+            .is_err(),
+            "a Group names at least one chain"
         );
     }
 

@@ -54,7 +54,7 @@ impl QlCliClient {
     }
 
     /// QL's team space as it answers it (`ql context-frame team-space --json`,
-    /// `ql.vak-team-space/v1`): the organs, their instruments with the heads
+    /// `ql.vak-team-space/v2`): the organs, their instruments with the heads
     /// and labels each holds, and the rules a decision answer stands under.
     /// AIKit reads it whole and mirrors none of it.
     pub fn team_space(&self) -> std::result::Result<Value, QlProviderFailure> {

@@ -1,5 +1,5 @@
 //! Fill heads (O-I #843; DLW manual §19.1 Vāk and Generate): `aikit decide invoke --instrument vak-block` reads the instrument
-//! from QL's team space (`ql context-frame team-space`, `ql.vak-team-space/v1`), asks the elected decision model one typed
+//! from QL's team space (`ql context-frame team-space`, `ql.vak-team-space/v2`), asks the elected decision model one typed
 //! question for each head the cell leaves open, among the labels that head holds, and returns the picks as evidence — never a
 //! receipt, never admitted: the engine admits or refuses the block. A cell with no open head makes no call; a chosen label the
 //! head does not hold, an instrument the team space does not hold and an instrument only the person answers are refused in
@@ -78,7 +78,7 @@ fn team_space() -> Value {
             .collect::<Vec<_>>()
     };
     json!({
-        "contract": "ql.vak-team-space/v1",
+        "contract": "ql.vak-team-space/v2",
         "instruments": [
             {"id": "vak-block", "organ": "S4′ Anima", "kind": "vak-block", "source": "ql:skill:vak-evaluate",
              "answerable_by": "model-or-person", "seats": ["agent/anima"], "cells": ["CF5"],
@@ -90,8 +90,8 @@ fn team_space() -> Value {
                 head("vak-cfp", "thread-form", "abstain", 1, labels("thread-form", &["CFP0", "CFP1", "CFP2", "CFP3", "CFP4", "CFP5"])),
                 head("vak-cs", "sequence", "abstain", 1, labels("sequence", &["CS0", "CS1", "CS2", "CS3", "CS4", "CS5"])),
                 head("vak-direction", "direction", "preserve-candidates", 2, vec![
-                    label("forward-synthesis", "Day: the pass forward through the pairs", "ql:mef:cprime-oikonomia:direction", "ql.cprime-oikonomia/v1"),
-                    label("returning-inquiry", "Night′: the pass back through the pairs", "ql:mef:cprime-oikonomia:direction", "ql.cprime-oikonomia/v1")]),
+                    label("forward-synthesis", "Prospective: the pass forward through the pairs", "ql:mef:cprime-oikonomia:direction", "ql.cprime-oikonomia/v1"),
+                    label("returning-inquiry", "Retrospective: the pass back through the pairs", "ql:mef:cprime-oikonomia:direction", "ql.cprime-oikonomia/v1")]),
              ],
              "constraints": [{"id": "vak-z-needs-authorised-undertaking", "kind": "implication"}]},
             {"id": "gate-6", "organ": "S5′ Aletheia", "kind": "gate", "answerable_by": "person", "heads": [
@@ -228,7 +228,7 @@ fn the_open_heads_are_asked_of_the_decision_model_and_come_back_as_evidence() {
     let data = &filled["data"];
     assert_eq!(data["schema"], "aikit.instrument-fill/v1");
     assert_eq!(data["instrument"]["id"], "vak-block");
-    assert_eq!(data["team_space"], "ql.vak-team-space/v1");
+    assert_eq!(data["team_space"], "ql.vak-team-space/v2");
     assert_eq!(data["outcome"], "completed");
     assert_eq!(data["open"], json!(["vak-cs", "vak-direction"]));
     assert_eq!(data["answered_by"], MODEL);

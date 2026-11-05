@@ -36,6 +36,11 @@ const WRITE_ACTION: &str = "action/aikit/encounter-task";
 pub const REMOVAL_SCHEMA: &str = "aikit.encounter-task-removal/v1";
 /// The receipt of a task copied onto another session (`encounter-task-copy`).
 pub const COPY_SCHEMA: &str = "aikit.encounter-task-copy/v1";
+/// The receipt of a task's Budget written (`encounter-task-budget`).
+pub const BUDGET_SCHEMA: &str = "aikit.encounter-task-budget/v1";
+const BUDGET_RECORD_SCHEMA: &str = "aikit.encounter-task-budget-record/v1";
+/// The most turns a task's Budget allows, as Loop's cap bounds its runs.
+pub const MAX_TURN_BUDGET: u64 = 1000;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -996,6 +1001,99 @@ fn check_source(request: &TaskRequest, current: Option<&TaskRequest>) -> Result<
     }
     Ok(())
 }
+/// A task's Budget as the person set it: the turns its task may take, kept
+/// beside the task record (O-I #743).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct BudgetRecord {
+    schema: String,
+    agent_session: ResourceRef,
+    /// The task it was written for: a session bound to another task reads
+    /// no Budget.
+    task_ref: ResourceRef,
+    revision: SourceRevision,
+    /// The turns allowed; `None` once the person cleared it.
+    cap: Option<u64>,
+    written_by: String,
+    written_at_unix_ms: u64,
+}
+fn budget_path(home: &AikitHome, session: &ResourceRef) -> PathBuf {
+    home.state()
+        .join("encounter-tasks")
+        .join("budget")
+        .join(format!(
+            "{}.json",
+            blake3::hash(session.as_str().as_bytes()).to_hex()
+        ))
+}
+fn read_budget(home: &AikitHome, session: &ResourceRef) -> Result<Option<BudgetRecord>> {
+    let path = budget_path(home, session);
+    match fs::symlink_metadata(&path) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(error(e)),
+        Ok(meta) if !meta.is_file() || meta.len() > 64 * 1024 => {
+            return Err(error("A task's Budget must be a bounded native file"))
+        }
+        Ok(_) => {}
+    }
+    if path.canonicalize().map_err(error)? != path {
+        return Err(error("Redirected task Budget"));
+    }
+    let record: BudgetRecord = serde_json::from_slice(&fs::read(&path).map_err(error)?)
+        .map_err(|e| error(format!("Unreadable task Budget: {e}")))?;
+    if record.schema != BUDGET_RECORD_SCHEMA || &record.agent_session != session {
+        return Err(error(
+            "The task Budget belongs to another schema or session",
+        ));
+    }
+    Ok(Some(record))
+}
+/// Publish by atomic replacement, keeping the replaced reading in history.
+fn publish_budget(home: &AikitHome, session: &ResourceRef, record: &BudgetRecord) -> Result<()> {
+    let target = budget_path(home, session);
+    let parent = target.parent().expect("budget parent");
+    fs::create_dir_all(parent).map_err(error)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(parent, fs::Permissions::from_mode(0o700)).map_err(error)?;
+    }
+    if target.exists() {
+        keep_in_history(parent, &fs::read(&target).map_err(error)?)?;
+    }
+    let mut staged = tempfile::NamedTempFile::new_in(parent).map_err(error)?;
+    staged
+        .write_all(&serde_json::to_vec_pretty(record).map_err(error)?)
+        .map_err(error)?;
+    staged.as_file().sync_all().map_err(error)?;
+    staged.persist(&target).map_err(error)?;
+    fs::File::open(parent)
+        .and_then(|f| f.sync_all())
+        .map_err(error)
+}
+/// The task reading's `turns`: the Budget the person set for `task_ref`, its
+/// revision (what a change is written against), and the turns the executor
+/// has seen end since it first saw the task bound.
+fn turns_reading(home: &AikitHome, session: &ResourceRef, task_ref: &ResourceRef) -> Result<Value> {
+    let stored = read_budget(home, session)?;
+    let cap = stored
+        .as_ref()
+        .filter(|budget| &budget.task_ref == task_ref)
+        .and_then(|budget| budget.cap);
+    let used = crate::encounter_task_executor::turns_used(home, session, task_ref.as_str())?;
+    Ok(json!({
+        "cap": cap,
+        "used": used,
+        "revision": stored.as_ref().map(|budget| budget.revision.as_str()),
+        "standing": "The Budget is the person's: the turns the task may take, set against this revision. Used counts the turns AIKit's executor has seen end since it first saw the task bound; a launch past the Budget is refused.",
+    }))
+}
+fn budget_now_unix_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX))
+        .unwrap_or_default()
+}
 impl EncounterService {
     pub fn task_repertoire_session_id(session: &ResourceRef) -> aikit_core::SessionId {
         task_session_id(session)
@@ -1451,6 +1549,140 @@ impl EncounterService {
     }
     pub fn read_task(home: &AikitHome, session: &ResourceRef) -> Result<Value> {
         serde_json::to_value(read(home, session)?).map_err(error)
+    }
+    /// `session-space encounter-task-read`: the task record, and beside it
+    /// the task's Budget as `turns` (the person's cap, its revision and the
+    /// turns taken). The record itself ([`Self::read_task`]) is what every
+    /// launch compares; the Budget is disclosed here only.
+    pub fn read_task_reading(home: &AikitHome, session: &ResourceRef) -> Result<Value> {
+        let record = read(home, session)?;
+        let mut value = serde_json::to_value(&record).map_err(error)?;
+        if let (Some(record), Some(object)) = (&record, value.as_object_mut()) {
+            object.insert(
+                "turns".into(),
+                turns_reading(home, session, &record.request.central.task_ref)?,
+            );
+        }
+        Ok(value)
+    }
+    /// The Budget of the session's bound task, where one is set: the task it
+    /// was written for and the turns it allows. Every launch reads it
+    /// (`encounter_task_executor::launch_gate`).
+    pub fn task_budget(
+        home: &AikitHome,
+        session: &ResourceRef,
+    ) -> Result<Option<(ResourceRef, u64)>> {
+        let Some(record) = read(home, session)? else {
+            return Ok(None);
+        };
+        let task_ref = record.request.central.task_ref;
+        Ok(read_budget(home, session)?
+            .filter(|budget| budget.task_ref == task_ref)
+            .and_then(|budget| budget.cap)
+            .map(|cap| (task_ref, cap)))
+    }
+    /// `session-space encounter-task-budget`: the person sets how many turns
+    /// the session's bound task may take, or clears it (O-I #743, a chain's
+    /// Budget; DLW ruling 2026-11-05: AIKit owns it). A compare-and-swap on
+    /// the task as it was read: its ref and record revision, and the
+    /// Budget's own revision (`None` while none was ever written). The
+    /// person writes it (`by` is `human`); an agent's request is refused.
+    /// The Budget stays beside the record, under its own revision with every
+    /// replaced reading in history, so the admitted record and its launcher
+    /// are never rewritten; the task reading discloses it as `turns`. Every
+    /// launch of the task, a person's own Prompt included, is refused once
+    /// the turns the executor has seen end reach it.
+    pub fn write_task_budget(
+        home: &AikitHome,
+        session: &ResourceRef,
+        task_ref: &ResourceRef,
+        cap: Option<u64>,
+        by: &str,
+        expected: &SourceRevision,
+        expected_budget: Option<&SourceRevision>,
+    ) -> Result<Value> {
+        if by.trim() != "human" {
+            return Err(error(format!(
+                "A task's Budget is the person's to set: `{by}` is not the person (by: human)"
+            )));
+        }
+        if let Some(cap) = cap {
+            if cap == 0 || cap > MAX_TURN_BUDGET {
+                return Err(error(format!(
+                    "A task's Budget allows 1 to {MAX_TURN_BUDGET} turns, not {cap}"
+                )));
+            }
+        }
+        let _lock = ContextLock::acquire(
+            home,
+            &format!(
+                "encounter-agency-{}",
+                blake3::hash(session.as_str().as_bytes()).to_hex()
+            ),
+            LockOptions::default(),
+        )?;
+        Self::new(home.clone())?.require_attached(session)?;
+        let current = read(home, session)?.ok_or_else(|| {
+            error("No task is bound to this session: there is no task to give a Budget")
+        })?;
+        if &current.request.central.task_ref != task_ref {
+            return Err(error(format!(
+                "The session's bound task is {}, not {}; read again",
+                current.request.central.task_ref.as_str(),
+                task_ref.as_str()
+            )));
+        }
+        if &current.revision != expected {
+            return Err(error(
+                "Task revision conflict; read current task before setting its Budget",
+            ));
+        }
+        if !current.ready {
+            return Err(error(
+                "Uncertain preparation must recover the same request before it takes a Budget",
+            ));
+        }
+        let stored = read_budget(home, session)?;
+        if stored.as_ref().map(|budget| &budget.revision) != expected_budget {
+            return Err(error(
+                "Task Budget revision conflict; read the task's Budget again and set it from there",
+            ));
+        }
+        let standing = stored
+            .as_ref()
+            .filter(|budget| &budget.task_ref == task_ref)
+            .and_then(|budget| budget.cap);
+        let outcome = match (standing == cap, cap) {
+            (true, _) => "unchanged",
+            (false, Some(_)) => "set",
+            (false, None) => "cleared",
+        };
+        if outcome != "unchanged" {
+            publish_budget(
+                home,
+                session,
+                &BudgetRecord {
+                    schema: BUDGET_RECORD_SCHEMA.into(),
+                    agent_session: session.clone(),
+                    task_ref: task_ref.clone(),
+                    revision: SourceRevision::parse(format!(
+                        "task-budget/{}",
+                        ulid::Ulid::generate()
+                    ))?,
+                    cap,
+                    written_by: "human".into(),
+                    written_at_unix_ms: budget_now_unix_ms(),
+                },
+            )?;
+        }
+        Ok(json!({
+            "schema": BUDGET_SCHEMA,
+            "agent_session": session.as_str(),
+            "task_ref": task_ref.as_str(),
+            "task_revision": current.revision.as_str(),
+            "outcome": outcome,
+            "turns": turns_reading(home, session, task_ref)?,
+        }))
     }
     /// Native protocol launcher: replace this process under Workcell's actual
     /// stdio-preserving boundary. No wrapper stdout enters the ACP/Pi stream.
@@ -2182,6 +2414,144 @@ mod task_removal_and_copy_tests {
         assert_eq!(settings["task"], Value::Null);
         assert_eq!(settings["previous_task"]["task_ref"], "task:fixtures");
         assert_eq!(settings["previous_task"]["set"]["name"], "Fixtures");
+    }
+
+    #[test]
+    fn the_person_sets_a_task_s_budget_against_its_revisions_and_a_launch_past_it_is_refused() {
+        let (_dir, home) = attached(&["agent-session/one"]);
+        let one = r("agent-session/one");
+        let bound = record("task:fixtures", None, |_| {});
+        publish(&home, &one, &bound).unwrap();
+        // Before any Budget the reading names none, and nothing gates a launch on it.
+        let read = EncounterService::read_task_reading(&home, &one).unwrap();
+        assert_eq!(read["turns"]["cap"], Value::Null);
+        assert_eq!(read["turns"]["revision"], Value::Null);
+        assert_eq!(read["turns"]["used"], Value::Null);
+        crate::encounter_task_executor::launch_gate(&home, &one).unwrap();
+        let budget = |cap: Option<u64>, by: &str, expected: Option<&str>| {
+            EncounterService::write_task_budget(
+                &home,
+                &one,
+                &r("task:fixtures"),
+                cap,
+                by,
+                &bound.revision,
+                expected
+                    .map(|revision| SourceRevision::parse(revision).unwrap())
+                    .as_ref(),
+            )
+        };
+        let set = budget(Some(2), "human", None).unwrap();
+        assert_eq!(set["schema"], "aikit.encounter-task-budget/v1");
+        assert_eq!(set["outcome"], "set");
+        assert_eq!(set["task_revision"], "task-binding/fixture");
+        assert_eq!(set["turns"]["cap"], 2);
+        let first = set["turns"]["revision"].as_str().unwrap().to_owned();
+        assert!(first.starts_with("task-budget/"), "{first}");
+        // The task reading discloses it; the admitted record is not rewritten.
+        let read = EncounterService::read_task_reading(&home, &one).unwrap();
+        assert_eq!(read["turns"]["cap"], 2);
+        assert_eq!(read["revision"], "task-binding/fixture");
+        assert!(history(&home, &one).is_empty());
+        let admitted = EncounterService::read_task(&home, &one).unwrap();
+        assert!(admitted.get("turns").is_none(), "{admitted}");
+        // The same Budget again changes nothing; a stale Budget revision is refused.
+        assert_eq!(
+            budget(Some(2), "human", Some(&first)).unwrap()["outcome"],
+            "unchanged"
+        );
+        let stale = budget(Some(3), "human", None).unwrap_err().to_string();
+        assert!(stale.contains("Task Budget revision conflict"), "{stale}");
+        // Within the Budget a launch goes; at it, every launch is refused in words.
+        crate::encounter_task_executor::seen_turns(&home, &one, "task:fixtures", 1);
+        crate::encounter_task_executor::launch_gate(&home, &one).unwrap();
+        crate::encounter_task_executor::seen_turns(&home, &one, "task:fixtures", 2);
+        let spent = crate::encounter_task_executor::launch_gate(&home, &one)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            spent.contains("has taken 2 of the 2 turns its Budget allows"),
+            "{spent}"
+        );
+        assert_eq!(
+            EncounterService::read_task_reading(&home, &one).unwrap()["turns"]["used"],
+            2
+        );
+        // Raised, the task launches again; the replaced Budget is kept in history.
+        let raised = budget(Some(5), "human", Some(&first)).unwrap();
+        assert_eq!(raised["turns"]["cap"], 5);
+        crate::encounter_task_executor::launch_gate(&home, &one).unwrap();
+        let kept = fs::read_dir(budget_path(&home, &one).parent().unwrap().join("history"))
+            .unwrap()
+            .count();
+        assert_eq!(kept, 1);
+        // Cleared, it names no cap; another task on the session reads none.
+        let second = raised["turns"]["revision"].as_str().unwrap().to_owned();
+        let cleared = budget(None, "human", Some(&second)).unwrap();
+        assert_eq!(cleared["outcome"], "cleared");
+        assert_eq!(cleared["turns"]["cap"], Value::Null);
+        assert_eq!(EncounterService::task_budget(&home, &one).unwrap(), None);
+    }
+
+    #[test]
+    fn a_budget_is_refused_in_words_and_writes_nothing() {
+        let (_dir, home) = attached(&["agent-session/one"]);
+        let one = r("agent-session/one");
+        let revision = SourceRevision::parse("task-binding/fixture").unwrap();
+        let refuse = |session: &ResourceRef,
+                      task: &str,
+                      cap: Option<u64>,
+                      by: &str,
+                      revision: &SourceRevision| {
+            EncounterService::write_task_budget(&home, session, &r(task), cap, by, revision, None)
+                .unwrap_err()
+                .to_string()
+        };
+        let none = refuse(&one, "task:fixtures", Some(3), "human", &revision);
+        assert!(none.contains("No task is bound to this session"), "{none}");
+        let agent = refuse(
+            &one,
+            "task:fixtures",
+            Some(3),
+            "agent-session/one",
+            &revision,
+        );
+        assert!(agent.contains("is not the person"), "{agent}");
+        let zero = refuse(&one, "task:fixtures", Some(0), "human", &revision);
+        assert!(zero.contains("1 to 1000 turns, not 0"), "{zero}");
+        let over = refuse(&one, "task:fixtures", Some(1001), "human", &revision);
+        assert!(over.contains("not 1001"), "{over}");
+        let unattached = refuse(
+            &r("agent-session/elsewhere"),
+            "task:fixtures",
+            Some(3),
+            "human",
+            &revision,
+        );
+        assert!(unattached.contains("not attached"), "{unattached}");
+        let bound = record("task:fixtures", None, |_| {});
+        publish(&home, &one, &bound).unwrap();
+        let other = refuse(&one, "task:other", Some(3), "human", &revision);
+        assert!(
+            other.contains("The session's bound task is task:fixtures, not task:other"),
+            "{other}"
+        );
+        let stale = refuse(
+            &one,
+            "task:fixtures",
+            Some(3),
+            "human",
+            &SourceRevision::parse("task-binding/old").unwrap(),
+        );
+        assert!(stale.contains("Task revision conflict"), "{stale}");
+        let pending = record("task:fixtures", None, |value| value["ready"] = json!(false));
+        publish(&home, &one, &pending).unwrap();
+        let unready = refuse(&one, "task:fixtures", Some(3), "human", &revision);
+        assert!(unready.contains("Uncertain preparation"), "{unready}");
+        assert!(
+            read_budget(&home, &one).unwrap().is_none(),
+            "nothing was written"
+        );
     }
 
     #[test]

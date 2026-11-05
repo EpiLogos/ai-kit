@@ -412,6 +412,52 @@ pub enum StartAction {
     OperatorMustStart(String),
 }
 
+/// A predecessor that drained and closed its carriers but has not exited:
+/// what it still waits on, read from the process table (a drained gateway
+/// answers nothing on its socket, so nothing else can say).
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct Lingering {
+    /// Its live children, the processes its stop is waiting on.
+    pub children: Vec<LingeringChild>,
+}
+
+/// One live child of a lingering predecessor.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LingeringChild {
+    pub pid: u32,
+    pub command: String,
+    /// When it started, as the process table says it.
+    pub since: Option<String>,
+}
+
+impl Lingering {
+    /// "the old gateway (pid N) drained but has not exited: …", naming what
+    /// it waits on.
+    pub fn sentence(&self, pid: u32) -> String {
+        if self.children.is_empty() {
+            return format!(
+                "the old gateway (pid {pid}) drained but has not exited, and it has no child \
+                 process it is waiting on"
+            );
+        }
+        let children = self
+            .children
+            .iter()
+            .map(|child| match &child.since {
+                Some(since) => format!(
+                    "its child pid {}, `{}`, running since {since}",
+                    child.pid, child.command
+                ),
+                None => format!("its child pid {}, `{}`", child.pid, child.command),
+            })
+            .collect::<Vec<_>>()
+            .join("; and on ");
+        format!(
+            "the old gateway (pid {pid}) drained but has not exited: it is waiting on {children}"
+        )
+    }
+}
+
 /// Everything the upgrade machine touches, behind one seam: the real machine
 /// implements it against the gateway's carrier, the installer and the service
 /// manager; the tests implement it as a script.
@@ -447,6 +493,12 @@ pub trait UpgradeEnv {
         grace: Duration,
         exit: bool,
     ) -> Result<DrainRecord>;
+    /// The predecessor `pid` once nothing answers on its socket: `None` when
+    /// the process has exited, otherwise what it still waits on. A drained
+    /// gateway closes its carriers before it exits, and a supervisor does not
+    /// start the next build while the old process lives, so "nothing
+    /// answers" alone cannot tell a stop that finished from one that is held.
+    fn lingering(&self, pid: u32) -> Result<Option<Lingering>>;
     /// Start the gateway when the supervisor has not.
     fn start_service(&self, lifecycle: GatewayLifecycle) -> Result<StartAction>;
     /// Copy the gateway's state somewhere the recovery can find it.
@@ -947,18 +999,48 @@ impl<E: UpgradeEnv> Driver<'_, E> {
             .unwrap_or(GatewayLifecycle::Foreground);
         // 1. The old process ends.
         let deadline = self.env.now_unix_ms() + transaction.plan.exit_wait_ms;
+        let mut lingering: Option<Lingering> = None;
         loop {
             // A reading that times out is not "gone": the old process may be busy
-            // finishing its drain. Only an answer, or nothing listening, ends it.
+            // finishing its drain. Nor is nothing listening: a drained gateway
+            // closes its carriers before it exits, so its pid is asked too.
             let still_there = match self.env.read_running_strict() {
-                Ok(Some(running)) => before_pid == Some(running.pid),
-                Ok(None) => false,
+                Ok(Some(running)) => {
+                    lingering = None;
+                    before_pid == Some(running.pid)
+                }
+                Ok(None) => {
+                    lingering = match before_pid {
+                        Some(pid) => self.env.lingering(pid).unwrap_or(None),
+                        None => None,
+                    };
+                    lingering.is_some()
+                }
                 Err(error) if error.code() == "gateway_upgrade.gateway_unresponsive" => true,
                 Err(error) => return Err(error),
             };
             match (still_there, before_pid) {
                 (true, Some(pid)) => {
                     if self.env.now_unix_ms() >= deadline {
+                        if let Some(lingering) = &lingering {
+                            return self.finalize(
+                                transaction,
+                                Phase::NeedsOperator,
+                                "needs-operator",
+                                format!(
+                                    "{}, {} ms after the drain; the service manager will not \
+                                     start the new build while it lives",
+                                    lingering.sentence(pid),
+                                    transaction.plan.exit_wait_ms
+                                ),
+                                vec![format!(
+                                    "it exits once what it waits on returns; if it does not, \
+                                     end it (`kill -KILL {pid}`; it has already drained), then \
+                                     `aikit gateway upgrade resume {}`",
+                                    transaction.id
+                                )],
+                            );
+                        }
                         return self.finalize(
                             transaction,
                             Phase::NeedsOperator,
@@ -1075,12 +1157,23 @@ impl<E: UpgradeEnv> Driver<'_, E> {
             );
             return self.enter(transaction, Phase::Resuming);
         }
-        let saw = match &last_seen {
-            Some(running) => format!(
+        // Nothing answering is not the same as the old process gone: a
+        // predecessor still alive is named, with what it waits on.
+        let held = match (&last_seen, before_pid) {
+            (None, Some(pid)) => self
+                .env
+                .lingering(pid)
+                .unwrap_or(None)
+                .map(|lingering| lingering.sentence(pid)),
+            _ => None,
+        };
+        let saw = match (&last_seen, held) {
+            (Some(running), _) => format!(
                 "a gateway answers as pid {} revision {}",
                 running.pid, running.identity.revision
             ),
-            None => "nothing answers".into(),
+            (None, Some(held)) => held,
+            (None, None) => "nothing answers".into(),
         };
         self.note(
             transaction,
@@ -1673,6 +1766,10 @@ mod tests {
         die_after_sleeps: Cell<Option<u32>>,
         sleeps: Cell<u32>,
         installer_runs: RefCell<Vec<Vec<String>>>,
+        /// A predecessor (pid) that drains and closes its carriers but does
+        /// not exit, and what it waits on: the supervisor starts nothing
+        /// while it lives.
+        lingering: RefCell<Option<(u32, Lingering)>>,
     }
 
     impl Script {
@@ -1701,11 +1798,15 @@ mod tests {
                 die_after_sleeps: Cell::new(None),
                 sleeps: Cell::new(0),
                 installer_runs: RefCell::new(Vec::new()),
+                lingering: RefCell::new(None),
             }
         }
 
         /// The supervisor brings the next process up `delay` ms after the drain.
         fn settle(&self) {
+            if self.lingering.borrow().is_some() {
+                return;
+            }
             if let (Some(at), Some((process, delay))) =
                 (self.drained_at.get(), self.next.borrow().clone())
             {
@@ -1816,9 +1917,23 @@ mod tests {
                 )),
             }
         }
+        fn lingering(&self, pid: u32) -> Result<Option<Lingering>> {
+            Ok(self
+                .lingering
+                .borrow()
+                .as_ref()
+                .filter(|(held, _)| *held == pid)
+                .map(|(_, lingering)| lingering.clone()))
+        }
         fn start_service(&self, _lifecycle: GatewayLifecycle) -> Result<StartAction> {
             self.start_calls.set(self.start_calls.get() + 1);
-            // Asking the manager brings the next build up at once.
+            // Asking the manager brings the next build up at once — unless
+            // the old process still lives, which the manager counts as running.
+            if self.lingering.borrow().is_some() {
+                return Ok(StartAction::Requested(
+                    "kickstart (the job is still running)".into(),
+                ));
+            }
             if let Some((process, _)) = self.next.borrow().clone() {
                 *self.gateway.borrow_mut() = Some(process);
             }
@@ -1910,6 +2025,62 @@ mod tests {
             "the gateway's state was copied before anything changed"
         );
         transaction
+    }
+
+    #[test]
+    fn a_drained_gateway_that_has_not_exited_is_named_with_what_it_waits_on_not_as_nothing_answering(
+    ) {
+        // 5 Nov 2026: the old gateway drained for stop and closed its socket,
+        // but its stop waited on the tick's `ctrl`, blocked on a stalled File
+        // Provider; launchd still counted it running, and the receipt said
+        // "nothing answers".
+        let script = Script::new(
+            Some(running(
+                5591,
+                "f89f01a6",
+                GatewayLifecycle::SupervisedLaunchd,
+            )),
+            identity("d5a5aa04"),
+        );
+        *script.next.borrow_mut() = Some((
+            running(97240, "d5a5aa04", GatewayLifecycle::SupervisedLaunchd),
+            1_000,
+        ));
+        let command = "ctrl --json --root /Users/person/Central action run \
+                       central.file-map.refresh {\"embeddings\":true,\"federated\":true}";
+        *script.lingering.borrow_mut() = Some((
+            5591,
+            Lingering {
+                children: vec![LingeringChild {
+                    pid: 6010,
+                    command: command.into(),
+                    since: Some("Thu Nov  5 06:10:00 2026".into()),
+                }],
+            },
+        ));
+        let transaction = run(&script, Mode::RestartOnly, None);
+        assert_eq!(
+            transaction.phase,
+            Phase::NeedsOperator,
+            "{:?}",
+            transaction.steps
+        );
+        let outcome = transaction.outcome.as_ref().unwrap();
+        assert!(
+            outcome.summary.starts_with(&format!(
+                "the old gateway (pid 5591) drained but has not exited: it is waiting on its \
+                 child pid 6010, `{command}`, running since Thu Nov  5 06:10:00 2026"
+            )),
+            "{}",
+            outcome.summary
+        );
+        assert!(
+            !outcome.summary.contains("nothing answers"),
+            "{}",
+            outcome.summary
+        );
+        // Nothing was asked of the service manager while the old process lives.
+        assert_eq!(script.start_calls.get(), 0);
     }
 
     #[test]

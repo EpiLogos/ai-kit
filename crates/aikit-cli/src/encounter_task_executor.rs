@@ -185,6 +185,13 @@ struct ExecutorState {
     /// elsewhere; anything but a loop's run counts it over from 0.
     #[serde(default)]
     loop_runs: u32,
+    /// The turns the bound task has taken: each `TurnEnded` past
+    /// `turns_from`, the journal's head when the executor first saw the task
+    /// bound. The task's Budget is read against it (`launch_gate`).
+    #[serde(default)]
+    turns_used: u64,
+    #[serde(default)]
+    turns_from: Option<u64>,
 }
 
 fn state_path(home: &AikitHome, session: &ResourceRef) -> PathBuf {
@@ -483,6 +490,55 @@ fn song_pass(name: &str, song: &Value, verdicts: &dyn LoopVerdicts) -> SongPass 
 
 /// What the executor did with the last pass of `task_ref`'s song loop on `session`, for the settings reading: the take
 /// (`{take, run_ref}`), why none was made (`{refused}`), or null — no song's pass yet, or another task's.
+/// The turns `task_ref` has taken on `session`, as the executor has seen
+/// them end since it first saw the task bound; `None` before it has seen the
+/// task at all (the task reading's `turns.used`).
+pub(crate) fn turns_used(
+    home: &AikitHome,
+    session: &ResourceRef,
+    task_ref: &str,
+) -> Result<Option<u64>> {
+    Ok(read_state(home, session)?
+        .filter(|state| state.task_ref == task_ref && state.turns_from.is_some())
+        .map(|state| state.turns_used))
+}
+
+/// Test support: the executor's record that `task_ref` has taken `used`
+/// turns on `session`, as its sweep would have kept it.
+#[cfg(test)]
+pub(crate) fn seen_turns(home: &AikitHome, session: &ResourceRef, task_ref: &str, used: u64) {
+    let state = ExecutorState {
+        schema: STATE_SCHEMA.into(),
+        agent_session: session.clone(),
+        task_ref: task_ref.into(),
+        started_at_unix_ms: 0,
+        baseline_effort: None,
+        applied_effort: None,
+        tool_calls_play: None,
+        settled_through_cursor: 0,
+        pending_turn_end_cursor: None,
+        loop_runs: 0,
+        song_pass: None,
+        turns_used: used,
+        turns_from: Some(0),
+    };
+    publish_state(home, session, &state).unwrap();
+}
+
+/// Why a launch of `session`'s bound task is refused by its Budget: the
+/// turns it has taken have reached the turns the person allowed.
+fn budget_refusal(home: &AikitHome, session: &ResourceRef) -> Result<Option<String>> {
+    let Some((task_ref, cap)) = EncounterService::task_budget(home, session)? else {
+        return Ok(None);
+    };
+    let used = turns_used(home, session, task_ref.as_str())?.unwrap_or(0);
+    Ok((used >= cap).then(|| {
+        format!(
+            "{session}'s task {task_ref} has taken {used} of the {cap} turns its Budget allows: raise its Budget to give it more"
+        )
+    }))
+}
+
 pub(crate) fn loop_pass(home: &AikitHome, session: &ResourceRef, task_ref: &str) -> Value {
     read_state(home, session)
         .ok()
@@ -713,10 +769,14 @@ fn bench_refusal(home: &AikitHome, session: &ResourceRef) -> Result<Option<Strin
 }
 
 /// Refuse a launch on `session` while it is benched, then while another
-/// session of its SessionSpace is soloed: every launch this executor makes and
-/// a human's own `Prompt` (`encounter_service.rs`) pass this one gate.
+/// session of its SessionSpace is soloed, and once its task has taken the
+/// turns its Budget allows: every launch this executor makes and a human's
+/// own `Prompt` (`encounter_service.rs`) pass this one gate.
 pub fn launch_gate(home: &AikitHome, session: &ResourceRef) -> Result<()> {
     if let Some(reason) = bench_refusal(home, session)? {
+        return Err(error(reason));
+    }
+    if let Some(reason) = budget_refusal(home, session)? {
         return Err(error(reason));
     }
     if let Some(space) = SessionSpaceApplicationStore::new(home.clone())
@@ -1229,6 +1289,8 @@ fn settle_session(
         pending_turn_end_cursor: None,
         loop_runs: 0,
         song_pass: None,
+        turns_used: 0,
+        turns_from: None,
     });
     if state.task_ref != task_ref {
         // A rebound session starts the task's own time over, exactly as its
@@ -1245,9 +1307,16 @@ fn settle_session(
             pending_turn_end_cursor: None,
             loop_runs: 0,
             song_pass: None,
+            turns_used: 0,
+            turns_from: None,
         };
     }
 
+    // The task's turns count from the journal's head when it is first seen
+    // bound (a state kept before the count began starts it here too).
+    if state.turns_from.is_none() {
+        state.turns_from = journal_head(service, session).ok();
+    }
     if active {
         play_envelopes(service, session, task, &identity, &mut state);
     }
@@ -1432,6 +1501,8 @@ struct TurnEnd {
     scanned_through: u64,
     /// The turn completed (`turn_finished`).
     finished: bool,
+    /// The `TurnEnded` events past the scan's `from` (the task's turns).
+    ended: u64,
 }
 
 /// A turn's end scan over this session's own event page, from the cursor the
@@ -1442,16 +1513,21 @@ fn last_turn_end(
     service: &EncounterService,
     session: &ResourceRef,
     after: u64,
+    from: Option<u64>,
 ) -> Result<Option<TurnEnd>> {
     let mut after = after;
     let mut found: Option<(u64, bool)> = None;
+    let mut ended = 0u64;
     loop {
         let page = service.owner_events(session, after, SCAN_LIMIT)?;
         let events = page["events"].as_array().cloned().unwrap_or_default();
         for row in &events {
             let cursor = row["cursor"].as_u64().unwrap_or(after);
-            if let Some(ended) = row["event"].pointer("/event/TurnEnded") {
-                found = Some((cursor, turn_finished(&ended["stop"])));
+            if let Some(turn) = row["event"].pointer("/event/TurnEnded") {
+                found = Some((cursor, turn_finished(&turn["stop"])));
+                if from.is_some_and(|from| cursor > from) {
+                    ended += 1;
+                }
             }
             after = after.max(cursor);
         }
@@ -1460,7 +1536,24 @@ fn last_turn_end(
                 cursor,
                 scanned_through: after,
                 finished,
+                ended,
             }));
+        }
+    }
+}
+
+/// The journal's head: the cursor of the session's latest event, where a
+/// task first seen bound starts counting its turns.
+fn journal_head(service: &EncounterService, session: &ResourceRef) -> Result<u64> {
+    let mut after = 0u64;
+    loop {
+        let page = service.owner_events(session, after, SCAN_LIMIT)?;
+        let events = page["events"].as_array().cloned().unwrap_or_default();
+        for row in &events {
+            after = after.max(row["cursor"].as_u64().unwrap_or(after));
+        }
+        if !page["more"].as_bool().unwrap_or(false) || events.is_empty() {
+            return Ok(after);
         }
     }
 }
@@ -1474,7 +1567,13 @@ fn settle_turn_end(
     verdicts: &dyn LoopVerdicts,
     state: &mut ExecutorState,
 ) -> Result<()> {
-    let Some(turn_end) = last_turn_end(service, session, state.settled_through_cursor)? else {
+    let Some(turn_end) = last_turn_end(
+        service,
+        session,
+        state.settled_through_cursor,
+        state.turns_from,
+    )?
+    else {
         return Ok(());
     };
     let quantize = task["quantize"].as_str().unwrap_or("global");
@@ -1485,6 +1584,7 @@ fn settle_turn_end(
     }
     state.pending_turn_end_cursor = None;
     state.settled_through_cursor = turn_end.scanned_through;
+    state.turns_used = state.turns_used.saturating_add(turn_end.ended);
 
     let name = task["name"].as_str().unwrap_or("this task");
     // Loop's stop condition is read only where it decides anything: a looping
@@ -2214,6 +2314,8 @@ mod tests {
             pending_turn_end_cursor: None,
             loop_runs: 1,
             song_pass: Some(json!({"take": 3, "run_ref": "run:TAKE3"})),
+            turns_used: 0,
+            turns_from: None,
         };
         publish_state(&home, &session, &state).unwrap();
         assert_eq!(
@@ -2321,6 +2423,8 @@ mod tests {
             pending_turn_end_cursor: Some(8),
             loop_runs: 2,
             song_pass: None,
+            turns_used: 0,
+            turns_from: None,
         };
         publish_state(&home, &who, &state).unwrap();
         let back = read_state(&home, &who).unwrap().unwrap();
@@ -2444,7 +2548,7 @@ mod tests {
         assert_eq!(page["events"], json!([]), "a reader hears nothing");
         // The executor's own scan is the owner settling its task, not a
         // reader's poll: a muted track still settles its Loop and Again.
-        let end = last_turn_end(&service, &who, 0)
+        let end = last_turn_end(&service, &who, 0, None)
             .unwrap()
             .expect("the muted session's turn end is seen");
         assert!(end.finished);
@@ -2468,6 +2572,8 @@ mod tests {
             pending_turn_end_cursor: None,
             loop_runs: 0,
             song_pass: None,
+            turns_used: 0,
+            turns_from: None,
         };
         // Published at who's own path despite naming another session.
         let path = state_path(&home, &who);
