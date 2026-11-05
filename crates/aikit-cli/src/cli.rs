@@ -823,6 +823,7 @@ fn praxis_route(command: &PraxisSub) -> &'static str {
     match command {
         PraxisSub::List { .. } => "cmd_praxis_list",
         PraxisSub::Disclose { .. } => "cmd_praxis_disclose",
+        PraxisSub::Activity { .. } => "cmd_praxis_activity",
         PraxisSub::InstantiateCheck { .. } => "cmd_praxis_instantiate_check",
         PraxisSub::Read { .. } => "cmd_praxis_read",
         PraxisSub::Skill(c) => skill_route(&c.command),
@@ -5083,8 +5084,16 @@ pub enum PraxisSub {
         #[arg(long = "profile-json", value_name = "JSON|@FILE")]
         profile_json: String,
         /// `aikit.praxis-activity/v1` evidence of what actually happened.
-        #[arg(long = "activity-json", value_name = "JSON|@FILE")]
+        #[arg(
+            long = "activity-json",
+            value_name = "JSON|@FILE",
+            conflicts_with = "activity_session"
+        )]
         activity_json: Option<String>,
+        /// Take the activity evidence from one session's development-entry
+        /// record instead (`aikit praxis activity --session`).
+        #[arg(long = "activity-session", value_name = "SESSION")]
+        activity_session: Option<String>,
         /// Skills selected for the current act. Repeatable.
         #[arg(long = "select", value_name = "SKILL")]
         select: Vec<String>,
@@ -5108,6 +5117,19 @@ pub enum PraxisSub {
         /// This seat is the project's primary checkout standing on main.
         #[arg(long = "now-primary")]
         now_primary: bool,
+    },
+    /// The practice one session loaded, invoked and relied on
+    /// (`aikit.praxis-session/v1`, its `activity` an
+    /// `aikit.praxis-activity/v1`), read from its development-entry record.
+    /// Open while the session works (loaded and invoked so far), closed once
+    /// its ticket's close named what it relied on, unrecorded where no
+    /// entry is kept.
+    Activity {
+        /// `<client>:<id>` (the harness and its session id, as the entry
+        /// keeps them), an AgentSession ref the body was launched under, or
+        /// that launch's AIKit session id.
+        #[arg(long, value_name = "SESSION")]
+        session: String,
     },
     /// Decide, per carried Methodology, whether this skill invocation should
     /// instantiate (load) it or keep it carried: Jev's standing question of

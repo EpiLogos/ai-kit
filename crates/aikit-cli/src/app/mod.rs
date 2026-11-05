@@ -2558,6 +2558,11 @@ impl Service {
                         let request = crate::development_entry::EntryRequest {
                             event,
                             client: &event.client,
+                            aikit_session: self
+                                .descriptor
+                                .session_id
+                                .as_ref()
+                                .map(|id| id.as_str()),
                             config: &config,
                             state: &state,
                             central: central.as_deref(),
