@@ -32,6 +32,17 @@
 //! What the body receives is references with revisions and reasons, not
 //! bodies: the entry names what to open; the body opens it. Delivery here
 //! means "emitted on the harness's context channel", never "read" or "used".
+//!
+//! A session that works a Wayfinder ticket (O-I 723) is given its practice by
+//! the ticket, not by word-matching: where the concern names an issue, the
+//! forge reads it (`gh api`, bounded); its map's Notes name the skills every
+//! session loads, and its `wayfinder:<type>` selects its Method. Those are
+//! mandatory, beside what the words select. What the session then loads is
+//! read from its own tool events (a skill invoked, a skill file read), and the
+//! close of the ticket is the use check: it is refused until the session has
+//! loaded the type's Method, and the resolution's list of skills is checked
+//! against what the session loaded — the list is the claim, the events are the
+//! evidence.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -322,6 +333,10 @@ pub struct PraxisCandidate {
     pub skill_file: Option<PathBuf>,
     pub score: f64,
     pub mandatory: bool,
+    /// Why the claimed ticket makes it mandatory: its map's Notes, or its
+    /// type's Method. Such practice is kept whole, outside the bounded picks.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub because: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -792,6 +807,7 @@ pub fn collect_inventory(
             skill_file,
             score,
             mandatory,
+            because: None,
         });
     }
     praxis.sort_by(|a, b| b.score.total_cmp(&a.score).then(a.id.cmp(&b.id)));
@@ -814,6 +830,10 @@ pub struct Selection {
     pub methodology: Option<PraxisCandidate>,
     pub method: Option<PraxisCandidate>,
     pub skills: Vec<PraxisCandidate>,
+    /// The Wayfinder ticket the session works, when the forge read one.
+    pub ticket: Option<ClaimedTicket>,
+    /// The practice the claimed ticket makes mandatory, whole and first.
+    pub mandated: Vec<PraxisCandidate>,
     pub decision: Option<Value>,
     pub degradations: Vec<String>,
 }
@@ -834,10 +854,17 @@ pub fn ordinary_selection(inventory: &Inventory, depth: Depth) -> Selection {
     // words with any one concern: it is chosen relative to the other
     // Methodologies, not against an absolute bar. Methods and Skills name a
     // narrower act and must clear one.
+    // What the claimed ticket mandates is kept whole, at any depth: its map's
+    // Notes name it for every session. The bounded picks are the rest.
+    let mandated: Vec<PraxisCandidate> = inventory
+        .praxis
+        .iter()
+        .filter(|p| p.because.is_some())
+        .cloned()
+        .collect();
+    let rest = || inventory.praxis.iter().filter(|p| p.because.is_none());
     let pick = |form: PraxisForm, floor: f64| {
-        inventory
-            .praxis
-            .iter()
+        rest()
             .filter(|p| p.form == form.as_str())
             .find(|p| p.mandatory || p.score >= floor)
             .cloned()
@@ -846,9 +873,7 @@ pub fn ordinary_selection(inventory: &Inventory, depth: Depth) -> Selection {
         Depth::Shallow => (
             None,
             None,
-            inventory
-                .praxis
-                .iter()
+            rest()
                 .filter(|p| p.mandatory)
                 .take(SKILL_LIMIT)
                 .cloned()
@@ -857,9 +882,7 @@ pub fn ordinary_selection(inventory: &Inventory, depth: Depth) -> Selection {
         Depth::Substantial => (
             pick(PraxisForm::Methodology, 0.0),
             pick(PraxisForm::Method, 0.15),
-            inventory
-                .praxis
-                .iter()
+            rest()
                 .filter(|p| p.form == PraxisForm::Skill.as_str())
                 .filter(|p| p.mandatory || p.score >= 0.18)
                 .take(SKILL_LIMIT)
@@ -875,6 +898,8 @@ pub fn ordinary_selection(inventory: &Inventory, depth: Depth) -> Selection {
         methodology,
         method,
         skills,
+        ticket: None,
+        mandated,
         decision: None,
         degradations: Vec::new(),
     }
@@ -1025,6 +1050,8 @@ pub fn provider_selection(
                     .iter()
                     .enumerate()
                     .filter(|(index, p)| p.mandatory || kept(&format!("praxis/{index}")))
+                    // The ticket's own practice stands in `mandated` already.
+                    .filter(|(_, p)| p.because.is_none())
                     .map(|(_, p)| p.clone())
                     .collect();
                 let first = |form: PraxisForm| {
@@ -1106,6 +1133,11 @@ pub fn render(
     for degradation in &selection.degradations {
         lines.push(format!("degraded: {degradation}"));
     }
+    // The claimed ticket's practice is law for the session, so it stands
+    // above the bounded lists, never where the bound cuts.
+    if let Some(ticket) = &selection.ticket {
+        lines.extend(ticket_lines(ticket, &selection.mandated));
+    }
     if !selection.sources.is_empty() {
         lines.push(
             "sources (open exactly these first; revision = content digest at preparation):".into(),
@@ -1154,7 +1186,9 @@ pub fn render(
         .chain(selection.skills.iter())
         .collect();
     if practice.is_empty() {
-        lines.push("practice: none selected".into());
+        if selection.ticket.is_none() {
+            lines.push("practice: none selected".into());
+        }
     } else {
         lines.push("practice (read the file before acting on the form it names):".into());
         for p in practice {
@@ -1208,6 +1242,21 @@ pub struct EntryLedger {
     /// emitted, waiting for the session's next prompt.
     #[serde(default)]
     pub refinement: Option<String>,
+    /// The Wayfinder ticket the session works, as the forge read it.
+    #[serde(default)]
+    pub ticket: Option<ClaimedTicket>,
+    /// The practice this session has loaded, by name, from its own tool
+    /// events (`record_use`): the evidence the use check reads.
+    #[serde(default)]
+    pub loaded: BTreeSet<String>,
+    /// The practice this session invoked by name (a skill call), a subset of
+    /// what it loaded.
+    #[serde(default)]
+    pub invoked: BTreeSet<String>,
+    /// The issue references already read as tickets, so a later prompt
+    /// naming them again costs no forge read.
+    #[serde(default)]
+    pub tickets_read: BTreeSet<String>,
 }
 
 fn ledger_work_owner(
@@ -1332,8 +1381,9 @@ fn selected_keys(selection: &Selection) -> Vec<String> {
         )
         .chain(
             selection
-                .methodology
+                .mandated
                 .iter()
+                .chain(selection.methodology.iter())
                 .chain(selection.method.iter())
                 .chain(selection.skills.iter())
                 .map(|p| format!("praxis:{}", p.id)),
@@ -1483,8 +1533,9 @@ fn publish_view(
         )?);
     }
     let practice_refs = selection
-        .methodology
+        .mandated
         .iter()
+        .chain(selection.methodology.iter())
         .chain(selection.method.iter())
         .chain(selection.skills.iter())
         .map(|p| ResourceRef::parse(&p.id))
@@ -1571,6 +1622,14 @@ pub fn deliver(request: &EntryRequest<'_>) -> Result<Option<String>> {
     let Some(session) = crate::refocus::hook_session(&event.payload) else {
         return Ok(None);
     };
+    // Tool events answer from the session's own record, before any scope is
+    // resolved: they come with every tool call. The use check on PreToolUse
+    // is `check_resolution`, which can refuse; this path only records.
+    match event.kind {
+        HookEventKind::PostToolUse => return observe(request, &session),
+        HookEventKind::PreToolUse => return Ok(None),
+        _ => {}
+    }
     let Some(central) = request.central else {
         return Ok(None);
     };
@@ -1670,15 +1729,60 @@ pub fn deliver(request: &EntryRequest<'_>) -> Result<Option<String>> {
         return Ok(Some(text));
     }
 
-    // A later prompt: announce what changed under the prepared basis, once.
+    let prompt = event
+        .payload
+        .get("prompt")
+        .or_else(|| event.payload.get("user_prompt"))
+        .or_else(|| event.payload.get("text"))
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+
+    // A later prompt: announce what changed under the prepared basis, once,
+    // and the ticket it names when the entry has none.
     if let Some(mut ledger) = ledger {
         if ledger.checkout != scope.checkout {
             // The session moved to another checkout: its entry no longer
             // describes where it stands. Prepare afresh for the new scope.
         } else {
+            let mut ticket_text = None;
+            if ledger.ticket.is_none() {
+                if let Some(concern) = substantive_concern(prompt) {
+                    let catalogue = active_catalogue(request.view, request.capsule_roots);
+                    let read_before = ledger.tickets_read.len();
+                    let mut gaps = Vec::new();
+                    let found = ticket_named(
+                        &SystemRunner::new().with_timeout(FORGE_CALL),
+                        forge_binary().as_deref(),
+                        &scope.checkout,
+                        &concern,
+                        &catalogue,
+                        &mut ledger.tickets_read,
+                        &mut gaps,
+                    );
+                    if let Some(ticket) = found {
+                        let (block, keys) = ticket_block(
+                            "[Development entry: this prompt names a ticket; its practice]",
+                            &ticket,
+                            &catalogue,
+                            &gaps,
+                        );
+                        ticket_text = Some(block);
+                        ledger.selected.extend(keys);
+                        ledger.ticket = Some(ticket);
+                    } else if !gaps.is_empty() {
+                        ticket_text = Some(format!(
+                            "[Development entry: ticket not read] {}",
+                            gaps.join("; ")
+                        ));
+                    }
+                    if ledger.tickets_read.len() != read_before {
+                        store_ledger(request.state, &ledger);
+                    }
+                }
+            }
             let changed = current_ledger_changes(central, &scope, &ledger)?;
             if changed.is_empty() {
-                return Ok(None);
+                return Ok(ticket_text);
             }
             let mut lines = vec!["[Development entry: sources changed since preparation — reopen before relying on what you read]".to_owned()];
             for (path, before, after) in &changed {
@@ -1712,17 +1816,11 @@ pub fn deliver(request: &EntryRequest<'_>) -> Result<Option<String>> {
             }
             ledger.emitted_at_unix_ms = now_ms();
             store_ledger(request.state, &ledger);
+            lines.extend(ticket_text);
             return Ok(Some(lines.join("\n")));
         }
     }
 
-    let prompt = event
-        .payload
-        .get("prompt")
-        .or_else(|| event.payload.get("user_prompt"))
-        .or_else(|| event.payload.get("text"))
-        .and_then(Value::as_str)
-        .unwrap_or_default();
     let Some(concern) = substantive_concern(prompt) else {
         return Ok(None);
     };
@@ -1813,14 +1911,42 @@ fn prepare(
 ) -> Result<String> {
     let central = request.central.unwrap_or_else(|| Path::new("/"));
     let depth = classify_depth(concern);
-    let inventory = collect_inventory(central, scope, concern, request.view, request.capsule_roots);
+    let mut inventory =
+        collect_inventory(central, scope, concern, request.view, request.capsule_roots);
     let inventory_ms = started.elapsed().as_millis() as u64;
+    // The claimed ticket: kept from this session's earlier entry, else read
+    // from the forge when the concern names an issue. What it mandates
+    // stands beside what the words selected.
+    let prior = load_ledger(request.state, request.client, session);
+    let catalogue = active_catalogue(request.view, request.capsule_roots);
+    let mut tickets_read = prior
+        .as_ref()
+        .map(|l| l.tickets_read.clone())
+        .unwrap_or_default();
+    let mut ticket_gaps = Vec::new();
+    let ticket = prior.as_ref().and_then(|l| l.ticket.clone()).or_else(|| {
+        ticket_named(
+            &SystemRunner::new().with_timeout(FORGE_CALL),
+            forge_binary().as_deref(),
+            &scope.checkout,
+            concern,
+            &catalogue,
+            &mut tickets_read,
+            &mut ticket_gaps,
+        )
+    });
+    if let Some(ticket) = &ticket {
+        mandate(&mut inventory, ticket, &catalogue);
+        ticket_gaps.extend(ticket.gaps.iter().cloned());
+    }
     // The provider never runs inside the hook: a decision model on a loaded
     // machine outlasts every harness's hook budget (pi kills at 10 s), and a
     // killed hook delivers nothing at all. The ordinary selection goes out
     // now; the provider refines it in a detached process and the next prompt
     // carries what it changed.
     let mut selection = ordinary_selection(&inventory, depth);
+    selection.ticket = ticket.clone();
+    selection.degradations.extend(ticket_gaps);
     let refine = match request.config.selection.as_deref() {
         Some("provider") => match (
             &request.config.provider_file,
@@ -1925,6 +2051,13 @@ fn prepare(
         redeliver_pending: false,
         selected: selected_keys(&selection),
         refinement: None,
+        ticket,
+        loaded: prior.as_ref().map(|l| l.loaded.clone()).unwrap_or_default(),
+        invoked: prior
+            .as_ref()
+            .map(|l| l.invoked.clone())
+            .unwrap_or_default(),
+        tickets_read,
     };
     store_ledger(request.state, &ledger);
     if refine {
@@ -1963,6 +2096,8 @@ fn prepare(
                 "methodology": selection.methodology.as_ref().map(|p| p.id.clone()),
                 "method": selection.method.as_ref().map(|p| p.id.clone()),
                 "skills": selection.skills.iter().map(|p| p.id.clone()).collect::<Vec<_>>(),
+                "ticket": selection.ticket.as_ref().map(ClaimedTicket::label),
+                "mandated": selection.mandated.iter().map(|p| p.id.clone()).collect::<Vec<_>>(),
             },
             "decision": selection.decision,
             "degradations": selection.degradations,
@@ -2006,21 +2141,33 @@ fn merge_additive(ordinary: &Selection, judged: &Selection) -> Selection {
     merged
 }
 
+/// The refinement's own command line, after the executable: the CLI parses
+/// exactly this (`now-context entry-refine`), and a test holds the two
+/// together — a refinement spawned to a command the CLI no longer has fails
+/// out of sight, and the promised refinement never comes.
+fn refinement_args(client: &str, session: &str, cwd: &Path) -> Vec<std::ffi::OsString> {
+    let mut args: Vec<std::ffi::OsString> = [
+        "--json",
+        "now-context",
+        "entry-refine",
+        "--client",
+        client,
+        "--session",
+        session,
+        "--cwd",
+    ]
+    .into_iter()
+    .map(Into::into)
+    .collect();
+    args.push(cwd.as_os_str().to_owned());
+    args
+}
+
 fn spawn_refinement(client: &str, session: &str, cwd: &Path) -> std::result::Result<(), String> {
     use std::os::unix::process::CommandExt;
     let exe = std::env::current_exe().map_err(|e| e.to_string())?;
     std::process::Command::new(exe)
-        .args([
-            "--json",
-            "now-context",
-            "entry-refine",
-            "--client",
-            client,
-            "--session",
-            session,
-            "--cwd",
-        ])
-        .arg(cwd)
+        .args(refinement_args(client, session, cwd))
         .current_dir(cwd)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
@@ -2077,13 +2224,20 @@ pub fn refine(cwd: &Path, client: &str, session: &str) -> Result<Value> {
     })?;
     let roots = service.snapshot().capsule_roots();
     let depth = classify_depth(&ledger.concern);
-    let inventory = collect_inventory(
+    let mut inventory = collect_inventory(
         &central,
         &scope,
         &ledger.concern,
         service.resolved(),
         &roots,
     );
+    if let Some(ticket) = &ledger.ticket {
+        mandate(
+            &mut inventory,
+            ticket,
+            &active_catalogue(service.resolved(), &roots),
+        );
+    }
     let judged = provider_selection(
         &inventory,
         depth,
@@ -2096,7 +2250,8 @@ pub fn refine(cwd: &Path, client: &str, session: &str) -> Result<Value> {
     // correct capability row and Methodology the ordinary ranking had found;
     // an optional decision service may add what the ranking missed, but what
     // it judges immaterial stays in the entry and is reported as its view.
-    let refined = merge_additive(&ordinary_selection(&inventory, depth), &judged);
+    let mut refined = merge_additive(&ordinary_selection(&inventory, depth), &judged);
+    refined.ticket = ledger.ticket.clone();
     let provider_failed = judged.mode != "provider";
     let mut outcome = json!({
         "schema": ENTRY_SCHEMA, "event": "refinement", "session": session,
@@ -2312,6 +2467,1086 @@ fn unit_field(unit: &serde_json::Value, key: &str) -> Option<String> {
         .filter(|value| !value.trim().is_empty())
 }
 
+// The claimed ticket (O-I 723). A session working a Wayfinder map is given
+// its practice by the map's Notes and its ticket's type, read from the forge,
+// not by shared words; word-matching stays the fallback where the forge
+// cannot be read. What the session loads is read from its own tool events,
+// and the close of the ticket is checked against them.
+
+/// What the Wayfinder resolution owes (TRACKER.md, Resolving, step 1), as the
+/// entry states it to the session.
+const RESOLUTION_WORDS: &str = "the result comment names the skills this session loaded, on a line beginning `Skills:`. Closing the ticket is refused until this session has loaded its type's practice and the Notes' skills, and every skill that line names is checked against what this session loaded";
+
+/// One forge read, and every read the hook makes for one event together:
+/// the hook runs in front of the turn.
+const FORGE_CALL: Duration = Duration::from_secs(3);
+const FORGE_BUDGET: Duration = Duration::from_secs(5);
+/// How many of the issue references a concern names are tried as tickets.
+const TICKET_CANDIDATES: usize = 2;
+
+/// The Wayfinder ticket a session works, as the forge read it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ClaimedTicket {
+    pub repo: String,
+    pub number: u64,
+    pub title: String,
+    /// The type its `wayfinder:<type>` label gives.
+    pub kind: String,
+    /// Its `claim:*` label, when it carries one.
+    pub claim: Option<String>,
+    /// The `wayfinder:map` issue it hangs from.
+    pub map: Option<u64>,
+    /// The active skills the map's Notes name for every session, in order.
+    pub notes: Vec<String>,
+    /// The Notes' further sentences that name skills by the work: the
+    /// session judges which apply, so they are carried, not mandated.
+    pub by_work: Vec<String>,
+    /// The active practice the ticket's type selects.
+    pub method: Option<String>,
+    /// What could not be read or resolved, in words.
+    pub gaps: Vec<String>,
+}
+
+impl ClaimedTicket {
+    fn label(&self) -> String {
+        format!("{}#{}", self.repo, self.number)
+    }
+
+    /// Each mandated practice name with the reason the ticket gives for it.
+    fn mandates(&self) -> Vec<(String, String)> {
+        let map = self
+            .map
+            .map(|n| format!("map #{n}"))
+            .unwrap_or_else(|| "map".into());
+        self.notes
+            .iter()
+            .map(|name| {
+                (
+                    name.clone(),
+                    format!("the {map}'s Notes: every session loads it before its first act"),
+                )
+            })
+            .chain(self.method.iter().map(|name| {
+                (
+                    name.clone(),
+                    format!(
+                        "#{} is `wayfinder:{}`, and its type selects it",
+                        self.number, self.kind
+                    ),
+                )
+            }))
+            .collect()
+    }
+}
+
+/// The active praxis catalogue as candidates, for what a ticket mandates
+/// whether or not the concern's words found it.
+fn active_catalogue(
+    view: &ResolvedView,
+    capsule_roots: &BTreeMap<CapsuleId, PathBuf>,
+) -> Vec<PraxisCandidate> {
+    view.catalog_index
+        .values()
+        .filter(|entry| entry.kind == Kind::Skill && view.is_active(&entry.id))
+        .map(|entry| PraxisCandidate {
+            id: entry.id.to_string(),
+            name: entry.name.clone(),
+            form: praxis_form(&entry.description).as_str().to_owned(),
+            payload: praxis_payload(&entry.description)
+                .chars()
+                .take(220)
+                .collect(),
+            skill_file: capsule_roots
+                .get(&entry.id)
+                .map(|root| root.join("payload/SKILL.md"))
+                .filter(|path| path.is_file()),
+            score: 0.0,
+            mandatory: false,
+            because: None,
+        })
+        .collect()
+}
+
+/// A catalogue entry answers to its name and to its id's last segment.
+fn names_practice(candidate: &PraxisCandidate, name: &str) -> bool {
+    candidate.name == name || candidate.id.rsplit('/').next() == Some(name)
+}
+
+/// The forge repository a remote URL names (`git@github.com:o/r.git`,
+/// `https://github.com/o/r`).
+fn forge_repo(remote: &str) -> Option<String> {
+    let rest = remote
+        .trim()
+        .strip_prefix("git@github.com:")
+        .or_else(|| remote.trim().split_once("github.com/").map(|(_, r)| r))?;
+    let rest = rest.trim_end_matches('/').trim_end_matches(".git");
+    let mut parts = rest.split('/');
+    let (owner, repo) = (parts.next()?, parts.next()?);
+    (!owner.is_empty() && !repo.is_empty()).then(|| format!("{owner}/{repo}"))
+}
+
+fn repo_char(c: char) -> bool {
+    c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.')
+}
+
+/// The issue references a text names, in order and once each: a github.com
+/// issue URL, `owner/repo#n`, or a bare `#n` against `origin`.
+pub fn ticket_references(text: &str, origin: Option<&str>) -> Vec<(String, u64)> {
+    let mut found: Vec<(usize, String, u64)> = Vec::new();
+    let digits = |s: &str| -> Option<u64> {
+        let run: String = s.chars().take_while(char::is_ascii_digit).collect();
+        let after = s[run.len()..].chars().next();
+        (!run.is_empty() && run.len() <= 7 && !after.is_some_and(|c| c.is_ascii_alphanumeric()))
+            .then(|| run.parse().ok())
+            .flatten()
+    };
+    for (at, _) in text.match_indices("github.com/") {
+        let rest = &text[at + "github.com/".len()..];
+        let mut parts = rest.splitn(4, '/');
+        if let (Some(owner), Some(repo), Some("issues"), Some(tail)) =
+            (parts.next(), parts.next(), parts.next(), parts.next())
+        {
+            if let Some(number) = digits(tail) {
+                found.push((at, format!("{owner}/{repo}"), number));
+            }
+        }
+    }
+    for (at, _) in text.match_indices('#') {
+        let Some(number) = digits(&text[at + 1..]) else {
+            continue;
+        };
+        let before = &text[..at];
+        if before.ends_with(|c: char| c.is_ascii_alphanumeric() || c == '/') {
+            // `owner/repo#n`, or a word glued to `#` (an anchor, a colour).
+            let start = before
+                .char_indices()
+                .rev()
+                .find(|(_, c)| !(repo_char(*c) || *c == '/'))
+                .map(|(i, c)| i + c.len_utf8())
+                .unwrap_or(0);
+            let named = &before[start..];
+            let mut parts = named.split('/');
+            if let (Some(owner), Some(repo), None) = (parts.next(), parts.next(), parts.next()) {
+                if !owner.is_empty() && !repo.is_empty() && !named.contains("github.com") {
+                    found.push((start, format!("{owner}/{repo}"), number));
+                }
+            }
+        } else if let Some(origin) = origin {
+            found.push((at, origin.to_owned(), number));
+        }
+    }
+    found.sort_by_key(|(at, _, _)| *at);
+    let mut seen = BTreeSet::new();
+    found
+        .into_iter()
+        .filter(|(_, repo, number)| seen.insert(format!("{}#{number}", repo.to_lowercase())))
+        .map(|(_, repo, number)| (repo, number))
+        .collect()
+}
+
+/// The forge client: `AIKIT_GH_BIN` when set, else `gh` on PATH.
+fn forge_binary() -> Option<PathBuf> {
+    std::env::var_os("AIKIT_GH_BIN")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| crate::probe::which("gh"))
+}
+
+/// The forge's answer to one read, as JSON, inside the remaining budget.
+fn forge_json(
+    runner: &dyn CommandRunner,
+    gh: &Path,
+    args: &[String],
+    deadline: Instant,
+) -> std::result::Result<Value, String> {
+    let left = deadline.saturating_duration_since(Instant::now());
+    if left.is_zero() {
+        return Err("the forge reads ran past their budget".into());
+    }
+    let mut argv = vec![gh.display().to_string()];
+    argv.extend(args.iter().cloned());
+    let shown = format!("gh {}", args.join(" "));
+    let output = runner
+        .run_with_timeout(&argv, left.min(FORGE_CALL))
+        .map_err(|error| format!("`{shown}` did not answer: {}", error.message()))?;
+    if !output.ok() {
+        return Err(format!(
+            "`{shown}` exited with status {}: {}",
+            output.status,
+            bounded(output.stderr.trim(), 160)
+        ));
+    }
+    serde_json::from_str(&output.stdout)
+        .map_err(|error| format!("`{shown}` answered unreadable JSON: {error}"))
+}
+
+fn label_names(issue: &Value) -> Vec<String> {
+    issue["labels"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|label| label["name"].as_str().or_else(|| label.as_str()))
+        .map(str::to_owned)
+        .collect()
+}
+
+/// The skills a map's Notes name: the sentence naming what every session
+/// loads (mandatory), and the further sentences naming skills by the work.
+pub fn notes_skills(body: &str) -> (Vec<String>, Vec<String>) {
+    let mut in_notes = false;
+    for line in body.lines() {
+        if let Some(heading) = line.strip_prefix("## ") {
+            in_notes = heading.trim().eq_ignore_ascii_case("notes");
+            continue;
+        }
+        if !in_notes || !line.to_lowercase().contains("every session") {
+            continue;
+        }
+        let text = line.trim().trim_start_matches(['-', '*', ' ']);
+        let mut every = Vec::new();
+        let mut by_work = Vec::new();
+        for (index, sentence) in text.split(". ").enumerate() {
+            let names: Vec<String> = sentence
+                .split('`')
+                .skip(1)
+                .step_by(2)
+                .filter(|name| {
+                    !name.is_empty()
+                        && name
+                            .chars()
+                            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | ':'))
+                })
+                .map(str::to_owned)
+                .collect();
+            if index == 0 || sentence.to_lowercase().contains("every session") {
+                every.extend(names);
+            } else if !names.is_empty() {
+                by_work.push(sentence.trim().trim_end_matches('.').to_owned());
+            }
+        }
+        return (every, by_work);
+    }
+    (Vec::new(), Vec::new())
+}
+
+/// The practice a ticket's type selects: the active entry named for the type
+/// (`grilling`, `prototype`, `research`), else the one active Method whose
+/// name ends in `-<type>` (`task` → `central-authorised-task`).
+fn type_practice(kind: &str, catalogue: &[PraxisCandidate]) -> std::result::Result<String, String> {
+    if let Some(exact) = catalogue.iter().find(|p| names_practice(p, kind)) {
+        return Ok(exact.name.clone());
+    }
+    let suffix = format!("-{kind}");
+    let methods: Vec<&PraxisCandidate> = catalogue
+        .iter()
+        .filter(|p| p.form == PraxisForm::Method.as_str() && p.name.ends_with(&suffix))
+        .collect();
+    match methods.as_slice() {
+        [one] => Ok(one.name.clone()),
+        [] => Err(format!(
+            "the ticket's type `{kind}` names no active practice here; its Method is not checked"
+        )),
+        many => Err(format!(
+            "the ticket's type `{kind}` matches {} active Methods ({}); none is mandated",
+            many.len(),
+            many.iter()
+                .map(|p| p.name.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        )),
+    }
+}
+
+/// Read one issue as a Wayfinder ticket: `Ok(None)` when it is not one (no
+/// `wayfinder:<type>` label, the map itself, a pull request).
+pub fn read_ticket(
+    runner: &dyn CommandRunner,
+    gh: &Path,
+    repo: &str,
+    number: u64,
+    catalogue: &[PraxisCandidate],
+    deadline: Instant,
+) -> std::result::Result<Option<ClaimedTicket>, String> {
+    let issue = forge_json(
+        runner,
+        gh,
+        &["api".into(), format!("repos/{repo}/issues/{number}")],
+        deadline,
+    )?;
+    let labels = label_names(&issue);
+    let kind = labels
+        .iter()
+        .filter_map(|label| label.strip_prefix("wayfinder:"))
+        .find(|kind| *kind != "map");
+    let (Some(kind), false) = (kind, issue.get("pull_request").is_some()) else {
+        return Ok(None);
+    };
+    let mut ticket = ClaimedTicket {
+        repo: repo.to_owned(),
+        number,
+        title: issue["title"].as_str().unwrap_or_default().to_owned(),
+        kind: kind.to_owned(),
+        claim: labels.iter().find(|l| l.starts_with("claim:")).cloned(),
+        map: None,
+        notes: Vec::new(),
+        by_work: Vec::new(),
+        method: None,
+        gaps: Vec::new(),
+    };
+    match type_practice(kind, catalogue) {
+        Ok(name) => ticket.method = Some(name),
+        Err(gap) => ticket.gaps.push(gap),
+    }
+    match forge_json(
+        runner,
+        gh,
+        &["api".into(), format!("repos/{repo}/issues/{number}/parent")],
+        deadline,
+    ) {
+        Ok(parent) if label_names(&parent).iter().any(|l| l == "wayfinder:map") => {
+            ticket.map = parent["number"].as_u64();
+            let (every, by_work) = notes_skills(parent["body"].as_str().unwrap_or_default());
+            if every.is_empty() {
+                ticket.gaps.push(format!(
+                    "map #{} has no Notes line naming what every session loads",
+                    ticket.map.unwrap_or_default()
+                ));
+            }
+            for name in every {
+                match catalogue.iter().find(|p| names_practice(p, &name)) {
+                    Some(found) if !ticket.notes.contains(&found.name) => {
+                        ticket.notes.push(found.name.clone())
+                    }
+                    Some(_) => {}
+                    None => ticket.gaps.push(format!(
+                        "the map's Notes name `{name}`, which no active skill here carries"
+                    )),
+                }
+            }
+            ticket.by_work = by_work;
+        }
+        Ok(_) => ticket
+            .gaps
+            .push("its parent is not a `wayfinder:map`; no Notes were read".into()),
+        Err(error) => ticket
+            .gaps
+            .push(format!("its map could not be read ({error})")),
+    }
+    Ok(Some(ticket))
+}
+
+/// The forge repository of a checkout, from its `origin` remote.
+fn checkout_repo(runner: &dyn CommandRunner, checkout: &Path) -> Option<String> {
+    let argv = [
+        "git".to_owned(),
+        "-C".to_owned(),
+        checkout.display().to_string(),
+        "remote".to_owned(),
+        "get-url".to_owned(),
+        "origin".to_owned(),
+    ];
+    let output = runner
+        .run_with_timeout(&argv, Duration::from_secs(2))
+        .ok()?;
+    output.ok().then(|| forge_repo(&output.stdout)).flatten()
+}
+
+/// The first of a text's issue references that is a Wayfinder ticket.
+/// References already tried are not read again; what failed is in `gaps`.
+pub fn ticket_named(
+    runner: &dyn CommandRunner,
+    gh: Option<&Path>,
+    checkout: &Path,
+    text: &str,
+    catalogue: &[PraxisCandidate],
+    tried: &mut BTreeSet<String>,
+    gaps: &mut Vec<String>,
+) -> Option<ClaimedTicket> {
+    if !text.contains('#') && !text.contains("github.com/") {
+        return None;
+    }
+    let origin = text
+        .contains('#')
+        .then(|| checkout_repo(runner, checkout))
+        .flatten();
+    let candidates: Vec<(String, u64)> = ticket_references(text, origin.as_deref())
+        .into_iter()
+        .filter(|(repo, number)| !tried.contains(&format!("{}#{number}", repo.to_lowercase())))
+        .take(TICKET_CANDIDATES)
+        .collect();
+    if candidates.is_empty() {
+        return None;
+    }
+    for (repo, number) in &candidates {
+        tried.insert(format!("{}#{number}", repo.to_lowercase()));
+    }
+    let Some(gh) = gh else {
+        gaps.push("the concern names an issue, but no `gh` is on PATH (or AIKIT_GH_BIN); its ticket was not read, and practice is word-matched".into());
+        return None;
+    };
+    let deadline = Instant::now() + FORGE_BUDGET;
+    for (repo, number) in candidates {
+        match read_ticket(runner, gh, &repo, number, catalogue, deadline) {
+            Ok(Some(ticket)) => return Some(ticket),
+            Ok(None) => {}
+            Err(error) => gaps.push(format!(
+                "{repo}#{number} could not be read as a ticket ({error}); practice is word-matched"
+            )),
+        }
+    }
+    None
+}
+
+/// Make the ticket's practice mandatory in the inventory, first and in the
+/// ticket's order, whether or not the concern's words found it.
+pub fn mandate(inventory: &mut Inventory, ticket: &ClaimedTicket, catalogue: &[PraxisCandidate]) {
+    let mut mandated = Vec::new();
+    for (name, because) in ticket.mandates() {
+        if mandated
+            .iter()
+            .any(|p: &PraxisCandidate| names_practice(p, &name))
+        {
+            continue;
+        }
+        let found = match inventory
+            .praxis
+            .iter()
+            .position(|p| names_practice(p, &name))
+        {
+            Some(index) => Some(inventory.praxis.remove(index)),
+            None => catalogue.iter().find(|p| names_practice(p, &name)).cloned(),
+        };
+        if let Some(mut practice) = found {
+            practice.mandatory = true;
+            practice.because = Some(because);
+            mandated.push(practice);
+        }
+    }
+    inventory.praxis.splice(0..0, mandated);
+}
+
+/// The ticket's lines in an entry: what it is, the practice it mandates, and
+/// what its resolution owes.
+fn ticket_lines(ticket: &ClaimedTicket, mandated: &[PraxisCandidate]) -> Vec<String> {
+    let mut lines = vec![format!(
+        "ticket: {} `wayfinder:{}` · {} · {} — {}",
+        ticket.label(),
+        ticket.kind,
+        ticket
+            .claim
+            .clone()
+            .unwrap_or_else(|| "unclaimed: claim it before any work".into()),
+        ticket
+            .map
+            .map(|n| format!("map #{n}"))
+            .unwrap_or_else(|| "no map read".into()),
+        bounded(&ticket.title, 100)
+    )];
+    if !mandated.is_empty() {
+        lines.push("practice the ticket names (mandatory: load each before the first act):".into());
+        for p in mandated {
+            lines.push(format!(
+                "  - {} {} — {} {}",
+                p.form.to_uppercase(),
+                p.id,
+                p.because.as_deref().unwrap_or_default(),
+                p.skill_file
+                    .as_ref()
+                    .map(|f| format!("(read: {})", f.display()))
+                    .unwrap_or_default()
+            ));
+        }
+    }
+    if !ticket.by_work.is_empty() {
+        lines.push(format!(
+            "the map's Notes add, by the work: {}",
+            bounded(&ticket.by_work.join("; "), 300)
+        ));
+    }
+    lines.push(format!("resolution: {RESOLUTION_WORDS}"));
+    lines
+}
+
+/// The block a session receives when a ticket is read after its entry went
+/// out (a later prompt names it, or the session claims it), and the keys of
+/// what it mandates.
+fn ticket_block(
+    heading: &str,
+    ticket: &ClaimedTicket,
+    catalogue: &[PraxisCandidate],
+    gaps: &[String],
+) -> (String, Vec<String>) {
+    let mut inventory = Inventory {
+        sources: Vec::new(),
+        capabilities: Vec::new(),
+        praxis: Vec::new(),
+        matrix: None,
+        absences: Vec::new(),
+    };
+    mandate(&mut inventory, ticket, catalogue);
+    let mut lines = vec![heading.to_owned()];
+    lines.extend(
+        gaps.iter()
+            .chain(&ticket.gaps)
+            .map(|gap| format!("degraded: {gap}")),
+    );
+    lines.extend(ticket_lines(ticket, &inventory.praxis));
+    let keys = inventory
+        .praxis
+        .iter()
+        .map(|p| format!("praxis:{}", p.id))
+        .collect();
+    (bounded(&lines.join("\n"), MAX_RENDERED_CHARS), keys)
+}
+
+/// A practice name as a harness reports it: a plugin prefix and a leading
+/// slash dropped.
+fn practice_name(raw: &str) -> String {
+    let name = raw.trim().trim_matches(['`', '"', '\'', '/']);
+    name.rsplit(':').next().unwrap_or(name).to_owned()
+}
+
+/// The practice a skill file's path names: `<name>/SKILL.md`, or an AIKit
+/// capsule's `<name>/payload/SKILL.md`.
+fn skill_file_name(path: &str) -> Option<String> {
+    let dir = path.strip_suffix("/SKILL.md")?;
+    let dir = dir.strip_suffix("/payload").unwrap_or(dir);
+    let name = dir.rsplit('/').next()?;
+    (!name.is_empty() && name != "payload").then(|| name.to_owned())
+}
+
+/// The command a tool call runs, whichever harness raised it.
+fn tool_command(payload: &Value) -> Option<String> {
+    let input = payload
+        .get("tool_input")
+        .or_else(|| payload.get("input"))
+        .or_else(|| payload.get("arguments"))?;
+    let command = input.get("command").or_else(|| input.get("cmd"))?;
+    match command {
+        Value::String(text) => Some(text.clone()),
+        Value::Array(words) => Some(
+            words
+                .iter()
+                .filter_map(Value::as_str)
+                .collect::<Vec<_>>()
+                .join(" "),
+        ),
+        _ => None,
+    }
+}
+
+/// The practice one finished tool call invoked by name: a skill call.
+pub fn practice_invoked(event: &HookEvent) -> Option<String> {
+    let payload = &event.payload;
+    let input = payload
+        .get("tool_input")
+        .or_else(|| payload.get("input"))
+        .or_else(|| payload.get("arguments"))?;
+    event
+        .tool_name
+        .as_deref()
+        .filter(|tool| tool.eq_ignore_ascii_case("skill"))?;
+    input
+        .get("skill")
+        .or_else(|| input.get("name"))
+        .and_then(Value::as_str)
+        .map(practice_name)
+}
+
+/// The practice one finished tool call loaded: a skill invoked by name, or a
+/// skill file read or printed.
+pub fn practice_loaded(event: &HookEvent) -> Vec<String> {
+    let payload = &event.payload;
+    let input = payload
+        .get("tool_input")
+        .or_else(|| payload.get("input"))
+        .or_else(|| payload.get("arguments"));
+    let mut names: Vec<String> = practice_invoked(event).into_iter().collect();
+    let mut texts: Vec<String> = ["file_path", "path", "filePath"]
+        .iter()
+        .filter_map(|key| input.and_then(|i| i.get(*key)).and_then(Value::as_str))
+        .map(str::to_owned)
+        .collect();
+    texts.extend(tool_command(payload));
+    for text in texts {
+        for (at, _) in text.match_indices("SKILL.md") {
+            let start = text[..at]
+                .rfind(|c: char| c.is_whitespace() || matches!(c, '"' | '\'' | '=' | '(' | '<'))
+                .map(|i| i + 1)
+                .unwrap_or(0);
+            if let Some(name) = skill_file_name(&text[start..at + "SKILL.md".len()]) {
+                if !names.contains(&name) {
+                    names.push(name);
+                }
+            }
+        }
+    }
+    names
+}
+
+/// Shell words of a command line, enough to read a `gh` invocation: quotes
+/// group, a backslash escapes, and a control operator ends one command.
+fn shell_commands(line: &str) -> Vec<Vec<String>> {
+    let mut commands: Vec<Vec<String>> = vec![Vec::new()];
+    let mut word = String::new();
+    let mut open = false;
+    let mut quote: Option<char> = None;
+    let mut chars = line.chars();
+    fn flush(word: &mut String, open: &mut bool, commands: &mut [Vec<String>]) {
+        if *open {
+            if let Some(last) = commands.last_mut() {
+                last.push(std::mem::take(word));
+            }
+            *open = false;
+        }
+    }
+    while let Some(c) = chars.next() {
+        match quote {
+            Some('\'') if c == '\'' => quote = None,
+            Some('\'') => word.push(c),
+            Some(_) if c == '"' => quote = None,
+            Some(_) if c == '\\' => word.extend(chars.next()),
+            Some(_) => word.push(c),
+            None => match c {
+                '\'' | '"' => {
+                    quote = Some(c);
+                    open = true;
+                }
+                '\\' => {
+                    if let Some(next) = chars.next().filter(|n| *n != '\n') {
+                        word.push(next);
+                        open = true;
+                    }
+                }
+                ' ' | '\t' => flush(&mut word, &mut open, &mut commands),
+                '\n' | ';' | '|' | '&' => {
+                    flush(&mut word, &mut open, &mut commands);
+                    if commands.last().is_some_and(|last| !last.is_empty()) {
+                        commands.push(Vec::new());
+                    }
+                }
+                _ => {
+                    word.push(c);
+                    open = true;
+                }
+            },
+        }
+    }
+    flush(&mut word, &mut open, &mut commands);
+    commands.retain(|command| !command.is_empty());
+    commands
+}
+
+/// The issue a `gh` command acts on, with the repository its `--repo` names:
+/// `gh issue <verb> <n|url>`, or `gh api repos/o/r/issues/<n> … state=closed`
+/// for the close.
+/// The value a command's flag carries (`--repo x`, `--repo=x`).
+fn flag_value(words: &[String], names: &[&str]) -> Option<String> {
+    words.iter().enumerate().find_map(|(i, word)| {
+        names.iter().find_map(|name| {
+            if word == name {
+                words.get(i + 1).cloned()
+            } else {
+                word.strip_prefix(&format!("{name}=")).map(str::to_owned)
+            }
+        })
+    })
+}
+
+fn gh_issue_target(words: &[String], verb: &str) -> Option<(Option<String>, u64)> {
+    let gh = words.iter().position(|w| w == "gh" || w.ends_with("/gh"))?;
+    let rest = &words[gh + 1..];
+    let repo = flag_value(rest, &["--repo", "-R"]);
+    if rest.first().map(String::as_str) == Some("issue")
+        && rest.get(1).map(String::as_str) == Some(verb)
+    {
+        // The issue is the first word that is a number or an issue URL; a
+        // flag's value (`--comment "…"`) is neither.
+        return rest[2..].iter().find_map(|word| {
+            if let Ok(number) = word.parse::<u64>() {
+                return Some((repo.clone(), number));
+            }
+            word.contains("/issues/")
+                .then(|| ticket_references(word, None).into_iter().next())
+                .flatten()
+                .map(|(url_repo, number)| (Some(url_repo), number))
+        });
+    }
+    if verb == "close"
+        && rest.first().map(String::as_str) == Some("api")
+        && rest.iter().any(|w| w.ends_with("state=closed"))
+    {
+        return rest.iter().find_map(|w| {
+            let path = w.trim_start_matches('/').strip_prefix("repos/")?;
+            let mut parts = path.split('/');
+            let (owner, name, issues, number) =
+                (parts.next()?, parts.next()?, parts.next()?, parts.next()?);
+            (issues == "issues" && parts.next().is_none())
+                .then(|| {
+                    number
+                        .parse()
+                        .ok()
+                        .map(|n| (Some(format!("{owner}/{name}")), n))
+                })
+                .flatten()
+        });
+    }
+    None
+}
+
+/// The skills a resolution claims: the names on its line beginning
+/// `Skills` (`Skills loaded: a, b`, `**Skills:** `a`, `b``).
+pub fn claimed_skills(text: &str) -> Option<Vec<String>> {
+    for raw in text.lines() {
+        let line = raw.trim().trim_start_matches(['-', '*', '>', ' ']);
+        if !line.to_lowercase().starts_with("skills") {
+            continue;
+        }
+        let Some((_, rest)) = line.split_once(':') else {
+            continue;
+        };
+        let rest = rest.trim().trim_start_matches('*').trim();
+        let names: Vec<String> = if rest.contains('`') {
+            rest.split('`')
+                .skip(1)
+                .step_by(2)
+                .map(practice_name)
+                .collect()
+        } else {
+            rest.replace(" and ", ",")
+                .split([',', ';'])
+                .filter_map(|part| part.split_whitespace().next())
+                .map(|word| practice_name(word.trim_end_matches(['.', ')'])))
+                .collect()
+        };
+        return Some(names.into_iter().filter(|n| !n.is_empty()).collect());
+    }
+    None
+}
+
+/// Why the close a command makes must be refused, or `None` when the
+/// command closes nothing this session claimed. The close's own `--comment`
+/// is the resolution when it carries the skills line; otherwise
+/// `latest_comment` reads the ticket's latest comment from the forge.
+pub fn resolution_refusal(
+    command: &str,
+    ledger: &EntryLedger,
+    latest_comment: impl FnOnce(&ClaimedTicket) -> std::result::Result<Option<String>, String>,
+) -> Option<String> {
+    resolution_check(command, ledger, latest_comment).and_then(|check| check.refusal)
+}
+
+/// A close of the session's claimed ticket, as the use check read it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolutionCheck {
+    /// Why the close is refused; `None` lets it through.
+    pub refusal: Option<String>,
+    /// The practice the resolution names as loaded: what it relied on.
+    pub relied_upon: Vec<String>,
+}
+
+/// The use check over one command: `None` when it closes nothing this
+/// session claimed (see [`resolution_refusal`]).
+pub fn resolution_check(
+    command: &str,
+    ledger: &EntryLedger,
+    latest_comment: impl FnOnce(&ClaimedTicket) -> std::result::Result<Option<String>, String>,
+) -> Option<ResolutionCheck> {
+    let ticket = ledger.ticket.as_ref()?;
+    let close = shell_commands(command).into_iter().find(|words| {
+        gh_issue_target(words, "close").is_some_and(|(repo, number)| {
+            number == ticket.number
+                && repo.is_none_or(|repo| repo.eq_ignore_ascii_case(&ticket.repo))
+        })
+    })?;
+    let comment = flag_value(&close, &["--comment", "-c"]);
+    let loaded = |name: &str| ledger.loaded.contains(name);
+    let mut reasons = Vec::new();
+    if let Some(method) = ticket.method.as_deref().filter(|m| !loaded(m)) {
+        reasons.push(format!(
+            "its type `{}` selects `{method}`, and this session has not loaded it",
+            ticket.kind
+        ));
+    }
+    let unloaded: Vec<&str> = ticket
+        .notes
+        .iter()
+        .map(String::as_str)
+        .filter(|name| !loaded(name))
+        .collect();
+    if !unloaded.is_empty() {
+        reasons.push(format!(
+            "the map's Notes have every session load {}, and this session has not",
+            unloaded
+                .iter()
+                .map(|n| format!("`{n}`"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+    }
+    let claimed = match comment.as_deref().and_then(claimed_skills) {
+        Some(names) => Ok(Some(names)),
+        None => latest_comment(ticket).map(|text| text.as_deref().and_then(claimed_skills)),
+    };
+    let mut relied_upon = Vec::new();
+    match claimed {
+        Ok(Some(names)) => {
+            relied_upon = names.iter().filter(|n| loaded(n)).cloned().collect();
+            let unfounded: Vec<String> = names
+                .into_iter()
+                .filter(|name| !loaded(name))
+                .map(|name| format!("`{name}`"))
+                .collect();
+            if !unfounded.is_empty() {
+                reasons.push(format!(
+                    "the result names {} as loaded, and this session never loaded {} (no skill call or skill-file read was recorded)",
+                    unfounded.join(", "),
+                    if unfounded.len() == 1 { "it" } else { "them" }
+                ));
+            }
+        }
+        Ok(None) => reasons.push(
+            "the result names no skills: add a line `Skills: …` naming what this session loaded (TRACKER.md, Resolving, step 1)".into(),
+        ),
+        Err(error) => reasons.push(format!(
+            "the result comment could not be read ({error}); put the `Skills: …` line in the close's --comment"
+        )),
+    }
+    let refusal = (!reasons.is_empty()).then(|| {
+        format!(
+            "closing {} is refused: {}. This session has loaded: {}.",
+            ticket.label(),
+            reasons.join("; "),
+            if ledger.loaded.is_empty() {
+                "nothing recorded".to_owned()
+            } else {
+                ledger.loaded.iter().cloned().collect::<Vec<_>>().join(", ")
+            }
+        )
+    });
+    Some(ResolutionCheck {
+        refusal,
+        relied_upon,
+    })
+}
+
+/// What a session's close says it did with its practice, as AIKit's
+/// operative evidence (`aikit.praxis-activity/v1`, which `aikit praxis
+/// disclose --activity` reads; O-I 745's Skillset rack): Loaded and Invoked
+/// from the session's own tool events, Relied on from the resolution naming
+/// it. Where the two disagree — a loaded practice the resolution leaves out,
+/// a name no active entry carries — it is a finding, beside the evidence.
+pub fn session_activity(
+    ledger: &EntryLedger,
+    relied_upon: &[String],
+    catalogue: &[PraxisCandidate],
+) -> (aikit_core::agent_praxis::PraxisActivity, Vec<String>) {
+    let mut findings: Vec<String> = Vec::new();
+    let mut ids = |names: &mut dyn Iterator<Item = &String>| -> Vec<String> {
+        let mut out: Vec<String> = Vec::new();
+        for name in names {
+            match catalogue.iter().find(|p| names_practice(p, name)) {
+                Some(found) if !out.contains(&found.id) => out.push(found.id.clone()),
+                Some(_) => {}
+                None => {
+                    let finding =
+                        format!("`{name}` was used, and no active entry here carries that name");
+                    if !findings.contains(&finding) {
+                        findings.push(finding);
+                    }
+                }
+            }
+        }
+        out
+    };
+    let loaded = ids(&mut ledger.loaded.iter());
+    let invoked = ids(&mut ledger.invoked.iter());
+    let relied = ids(&mut relied_upon.iter());
+    for name in &ledger.loaded {
+        if !relied_upon.contains(name) {
+            findings.push(format!(
+                "`{name}` was loaded, and the resolution does not name it as relied on"
+            ));
+        }
+    }
+    let ticket = ledger.ticket.as_ref();
+    let activity = aikit_core::agent_praxis::PraxisActivity {
+        schema: aikit_core::agent_praxis::PRAXIS_ACTIVITY_SCHEMA.into(),
+        loaded,
+        invoked,
+        relied_upon: relied,
+        succeeded: Vec::new(),
+        verified: Vec::new(),
+        evidence_refs: ticket
+            .map(|t| format!("https://github.com/{}/issues/{}", t.repo, t.number))
+            .into_iter()
+            .collect(),
+        return_destinations: ticket.map(ClaimedTicket::label).into_iter().collect(),
+        activity_refs: vec![format!(
+            "aikit:development-entry:{}:{}",
+            ledger.client, ledger.session
+        )],
+    };
+    (activity, findings)
+}
+
+/// Where a session's closing evidence is kept, beside its ledger.
+pub fn activity_path(state: &Path, client: &str, session: &str) -> PathBuf {
+    ledger_path(state, client, session).with_extension("activity.json")
+}
+
+/// The use check, on a PreToolUse: why this tool call's close of the
+/// session's claimed ticket must be refused, or `None`. Every other call
+/// answers from the command text alone, before any file is read.
+pub fn check_resolution(request: &EntryRequest<'_>) -> Result<Option<String>> {
+    let event = request.event;
+    let Some(command) = tool_command(&event.payload) else {
+        return Ok(None);
+    };
+    if !(command.contains("gh") && command.contains("close")) {
+        return Ok(None);
+    }
+    let Some(session) = crate::refocus::hook_session(&event.payload) else {
+        return Ok(None);
+    };
+    let Some(ledger) = load_ledger(request.state, request.client, &session) else {
+        return Ok(None);
+    };
+    let runner = SystemRunner::new().with_timeout(FORGE_CALL);
+    let check = resolution_check(&command, &ledger, |ticket| {
+        let gh = forge_binary().ok_or_else(|| "no `gh` is on PATH".to_owned())?;
+        let comments = forge_json(
+            &runner,
+            &gh,
+            &[
+                "api".into(),
+                format!(
+                    "repos/{}/issues/{}/comments?per_page=100",
+                    ticket.repo, ticket.number
+                ),
+            ],
+            Instant::now() + FORGE_BUDGET,
+        )?;
+        Ok(comments
+            .as_array()
+            .and_then(|all| all.last())
+            .and_then(|last| last["body"].as_str())
+            .map(str::to_owned))
+    });
+    let Some(check) = check else {
+        return Ok(None);
+    };
+    // A close that goes through leaves the session's evidence of its
+    // practice; a refused one leaves only the refusal.
+    let mut findings = Vec::new();
+    if check.refusal.is_none() {
+        let catalogue = active_catalogue(request.view, request.capsule_roots);
+        let (activity, found) = session_activity(&ledger, &check.relied_upon, &catalogue);
+        findings = found;
+        if let Ok(body) = serde_json::to_vec_pretty(&activity) {
+            let _ = std::fs::write(activity_path(request.state, request.client, &session), body);
+        }
+    }
+    store_receipt(
+        request.state,
+        request.client,
+        &session,
+        &json!({
+            "schema": ENTRY_SCHEMA, "event": "PreToolUse", "check": "resolution",
+            "ticket": ledger.ticket.as_ref().map(ClaimedTicket::label),
+            "loaded": ledger.loaded, "invoked": ledger.invoked,
+            "relied_upon": check.relied_upon, "findings": findings,
+            "refused": check.refusal,
+        }),
+    );
+    Ok(check.refusal)
+}
+
+/// A finished tool call, on a PostToolUse: record the practice it loaded,
+/// and when it claimed a ticket the session's entry has not read, read that
+/// ticket and return its block. No ledger, no record.
+fn observe(request: &EntryRequest<'_>, session: &str) -> Result<Option<String>> {
+    let event = request.event;
+    let command = tool_command(&event.payload);
+    let used = practice_loaded(event);
+    let claim = command
+        .as_deref()
+        .filter(|c| c.contains("claim:"))
+        .and_then(|c| {
+            shell_commands(c)
+                .iter()
+                .filter(|words| words.iter().any(|w| w.contains("claim:")))
+                .find_map(|words| gh_issue_target(words, "edit"))
+        });
+    if used.is_empty() && claim.is_none() {
+        return Ok(None);
+    }
+    let Some(mut ledger) = load_ledger(request.state, request.client, session) else {
+        return Ok(None);
+    };
+    let before = ledger.loaded.len() + ledger.invoked.len();
+    ledger.loaded.extend(used);
+    ledger.invoked.extend(practice_invoked(event));
+    let mut text = None;
+    if let Some((repo, number)) = claim {
+        let held = ledger.ticket.as_ref().is_some_and(|t| t.number == number);
+        if !held {
+            let runner = SystemRunner::new().with_timeout(FORGE_CALL);
+            let catalogue = active_catalogue(request.view, request.capsule_roots);
+            let repo = repo.or_else(|| checkout_repo(&runner, &ledger.checkout));
+            let mut gaps = Vec::new();
+            let ticket = match (repo, forge_binary()) {
+                (Some(repo), Some(gh)) => {
+                    match read_ticket(
+                        &runner,
+                        &gh,
+                        &repo,
+                        number,
+                        &catalogue,
+                        Instant::now() + FORGE_BUDGET,
+                    ) {
+                        Ok(ticket) => ticket,
+                        Err(error) => {
+                            gaps.push(format!("#{number} could not be read as a ticket ({error})"));
+                            None
+                        }
+                    }
+                }
+                (None, _) => {
+                    gaps.push(format!(
+                        "#{number}'s repository could not be told from this checkout"
+                    ));
+                    None
+                }
+                (_, None) => {
+                    gaps.push("no `gh` is on PATH (or AIKIT_GH_BIN)".into());
+                    None
+                }
+            };
+            if let Some(ticket) = ticket {
+                let (block, keys) = ticket_block(
+                    "[Development entry: the ticket this session claimed names its practice]",
+                    &ticket,
+                    &catalogue,
+                    &[],
+                );
+                text = Some(block);
+                ledger.selected.extend(keys);
+                ledger.ticket = Some(ticket);
+            } else if !gaps.is_empty() {
+                text = Some(format!(
+                    "[Development entry: claimed ticket not read] {}; practice stays as the entry selected it.",
+                    gaps.join("; ")
+                ));
+            }
+        }
+    }
+    if ledger.loaded.len() + ledger.invoked.len() != before || text.is_some() {
+        store_ledger(request.state, &ledger);
+    }
+    Ok(text)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2364,6 +3599,7 @@ mod tests {
             skill_file: None,
             score,
             mandatory: false,
+            because: None,
         };
         Inventory {
             sources: vec![],
@@ -2447,6 +3683,10 @@ mod tests {
             redeliver_pending: false,
             selected: vec![],
             refinement: None,
+            ticket: None,
+            loaded: BTreeSet::new(),
+            invoked: BTreeSet::new(),
+            tickets_read: BTreeSet::new(),
         };
         store_ledger(temp.path(), &ledger);
         assert_eq!(load_ledger(temp.path(), "claude", "s1"), Some(ledger));
@@ -2512,6 +3752,7 @@ mod tests {
             skill_file: None,
             score: 0.1,
             mandatory: false,
+            because: None,
         };
         judged.skills.push(PraxisCandidate {
             id: "skill/x/added".into(),
@@ -2528,6 +3769,608 @@ mod tests {
             .any(|p| p.id == "skill/aikit/verification"));
         assert!(merged.skills.iter().any(|p| p.id == "skill/x/added"));
         assert_eq!(merged.mode, "provider");
+    }
+
+    /// Map O-I 706 as the forge answers it, trimmed to its Destination, its
+    /// Notes' first two lines and its next heading; the Notes line is verbatim.
+    const MAP_706_BODY: &str = "## Destination\n\nThe DLW as the manual describes it, built across O:I and its six products, with every story walked to its declared grade on the native app from its starting world: from a bare machine through Setup to each mode's work on a focused constellation, and on your own world.\n\n## Notes\n\n- **This map carries execution.** A task ticket builds, verifies and lands its change; it does not stop at a decision.\n- **Skills every session loads before its first act:** `wayfinder` (read `Control/user/skills/wayfinder/SKILL.md` until \"Switch on every skill set and project the missing skills\" lands), `agent-worktree-lifecycle`, `engineering-methodology`, `collaboration-methodology`. Documentation tickets add `docs-methodology` and `authorship-methodology`; walks add `experience-campaign`; matrix work adds `capability-matrices`; landing adds `central-git-convergence`. A ticket's type selects its Method: grilling, prototype, research or task.\n\n## Decisions so far\n";
+
+    fn catalogue() -> Vec<PraxisCandidate> {
+        let entry = |id: &str, form: PraxisForm| PraxisCandidate {
+            id: id.into(),
+            name: id.rsplit('/').next().unwrap().into(),
+            form: form.as_str().into(),
+            payload: String::new(),
+            skill_file: None,
+            score: 0.0,
+            mandatory: false,
+            because: None,
+        };
+        vec![
+            entry("skill/central/wayfinder", PraxisForm::Methodology),
+            entry("skill/central/agent-worktree-lifecycle", PraxisForm::Skill),
+            entry(
+                "skill/central/engineering-methodology",
+                PraxisForm::Methodology,
+            ),
+            entry(
+                "skill/central/collaboration-methodology",
+                PraxisForm::Methodology,
+            ),
+            entry("skill/central/central-authorised-task", PraxisForm::Method),
+            entry("skill/central/grilling", PraxisForm::Method),
+            entry("skill/central/docs-methodology", PraxisForm::Methodology),
+        ]
+    }
+
+    /// The forge as `gh` answers for O-I 723 under map 706, and the
+    /// checkout's origin.
+    fn forge() -> aikit_adapters::runner::ScriptedRunner {
+        aikit_adapters::runner::ScriptedRunner::new()
+            .on(
+                "remote get-url origin",
+                "https://github.com/EpiLogos/O-I.git\n",
+            )
+            .on(
+                "repos/EpiLogos/O-I/issues/706",
+                &json!({"number": 706, "title": "[MAP] The DLW", "labels": [{"name": "wayfinder:map"}], "body": MAP_706_BODY}).to_string(),
+            )
+            .on(
+                "repos/EpiLogos/O-I/issues/723",
+                &json!({"number": 723, "title": "Let the map and the claimed ticket name each session's skills", "labels": [{"name": "wayfinder:task"}, {"name": "claim:account-2"}]}).to_string(),
+            )
+            .on(
+                "repos/EpiLogos/O-I/issues/723/parent",
+                &json!({"number": 706, "labels": [{"name": "wayfinder:map"}], "body": MAP_706_BODY}).to_string(),
+            )
+    }
+
+    fn claimed_723() -> ClaimedTicket {
+        let mut tried = BTreeSet::new();
+        let mut gaps = Vec::new();
+        let ticket = ticket_named(
+            &forge(),
+            Some(Path::new("/usr/bin/gh")),
+            Path::new("/c/worktrees/env-1/o-i"),
+            "work ticket #723",
+            &catalogue(),
+            &mut tried,
+            &mut gaps,
+        )
+        .expect("723 is a Wayfinder ticket");
+        assert!(gaps.is_empty(), "{gaps:?}");
+        ticket
+    }
+
+    #[test]
+    fn issue_references_are_urls_owner_repo_and_bare_numbers() {
+        assert_eq!(
+            ticket_references(
+                "see https://github.com/EpiLogos/O-I/issues/723, EpiLogos/ai-kit#590 and #724; not colour#123 or a#b",
+                Some("EpiLogos/O-I"),
+            ),
+            vec![
+                ("EpiLogos/O-I".to_owned(), 723),
+                ("EpiLogos/ai-kit".to_owned(), 590),
+                ("EpiLogos/O-I".to_owned(), 724),
+            ]
+        );
+        assert!(
+            ticket_references("#723", None).is_empty(),
+            "a bare number needs the checkout's forge"
+        );
+        assert_eq!(
+            forge_repo("git@github.com:EpiLogos/O-I.git\n").as_deref(),
+            Some("EpiLogos/O-I")
+        );
+    }
+
+    #[test]
+    fn the_map_notes_name_what_every_session_loads_and_what_the_work_adds() {
+        let (every, by_work) = notes_skills(MAP_706_BODY);
+        assert_eq!(
+            every,
+            [
+                "wayfinder",
+                "agent-worktree-lifecycle",
+                "engineering-methodology",
+                "collaboration-methodology"
+            ],
+            "the skill file's path is not a skill name"
+        );
+        assert_eq!(by_work.len(), 1, "{by_work:?}");
+        assert!(by_work[0].starts_with("Documentation tickets add `docs-methodology`"));
+    }
+
+    #[test]
+    fn a_claimed_ticket_makes_the_notes_skills_and_its_type_method_mandatory() {
+        // The map itself is not a ticket: the first reference is skipped and
+        // the second read.
+        let runner = forge();
+        let mut tried = BTreeSet::new();
+        let mut gaps = Vec::new();
+        let ticket = ticket_named(
+            &runner,
+            Some(Path::new("/usr/bin/gh")),
+            Path::new("/c/worktrees/env-1/o-i"),
+            "the map #706 names it; work ticket #723 now",
+            &catalogue(),
+            &mut tried,
+            &mut gaps,
+        )
+        .unwrap();
+        assert_eq!(ticket.number, 723);
+        assert_eq!(ticket.kind, "task");
+        assert_eq!(ticket.claim.as_deref(), Some("claim:account-2"));
+        assert_eq!(ticket.map, Some(706));
+        assert_eq!(
+            ticket.method.as_deref(),
+            Some("central-authorised-task"),
+            "a task ticket's Method is the one active Method ending in -task"
+        );
+        assert!(ticket.gaps.is_empty(), "{:?}", ticket.gaps);
+        assert_eq!(
+            tried,
+            BTreeSet::from(["epilogos/o-i#706".to_owned(), "epilogos/o-i#723".to_owned()])
+        );
+        assert!(runner
+            .call_lines()
+            .iter()
+            .all(|line| line.starts_with("git -C") || line.starts_with("/usr/bin/gh api repos/")));
+
+        let mut inventory = inventory();
+        mandate(&mut inventory, &ticket, &catalogue());
+        let mut selection = ordinary_selection(&inventory, Depth::Shallow);
+        selection.ticket = Some(ticket);
+        assert_eq!(
+            selection
+                .mandated
+                .iter()
+                .map(|p| p.name.as_str())
+                .collect::<Vec<_>>(),
+            [
+                "wayfinder",
+                "agent-worktree-lifecycle",
+                "engineering-methodology",
+                "collaboration-methodology",
+                "central-authorised-task"
+            ],
+            "mandatory at any depth, in the ticket's order"
+        );
+        assert!(selection.mandated.iter().all(|p| p.mandatory));
+        let keys = selected_keys(&selection);
+        assert!(keys.contains(&"praxis:skill/central/central-authorised-task".to_owned()));
+        let rendered = render(
+            &EntryScope {
+                project: "O-I".into(),
+                project_id: "O-I".into(),
+                primary: "/c/Work/O-I".into(),
+                checkout: "/c/worktrees/env-1/o-i".into(),
+                branch: Some("main".into()),
+                head: Some("abc".into()),
+            },
+            "work ticket #723",
+            &selection,
+            None,
+        );
+        assert!(
+            rendered
+                .contains("ticket: EpiLogos/O-I#723 `wayfinder:task` · claim:account-2 · map #706"),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains("practice the ticket names (mandatory"),
+            "{rendered}"
+        );
+        assert!(rendered.contains("SKILL skill/central/agent-worktree-lifecycle — the map #706's Notes: every session loads it"), "{rendered}");
+        assert!(rendered.contains("METHOD skill/central/central-authorised-task — #723 is `wayfinder:task`, and its type selects it"), "{rendered}");
+        assert!(
+            rendered.contains("the map's Notes add, by the work: Documentation tickets add"),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains("resolution: the result comment names the skills"),
+            "{rendered}"
+        );
+        assert!(!rendered.contains("practice: none selected"), "{rendered}");
+
+        // Substantial: the bounded picks are what the words chose beside it.
+        let mut substantial = ordinary_selection(&inventory, Depth::Substantial);
+        substantial.ticket = selection.ticket.clone();
+        assert_eq!(substantial.mandated.len(), 5);
+        assert_eq!(
+            substantial.methodology.unwrap().id,
+            "skill/central/docs-methodology"
+        );
+    }
+
+    #[test]
+    fn a_ticket_the_forge_cannot_read_leaves_word_matching_and_says_why() {
+        let mut gaps = Vec::new();
+        let none = ticket_named(
+            &forge(),
+            None,
+            Path::new("/c/o-i"),
+            "work ticket #723",
+            &catalogue(),
+            &mut BTreeSet::new(),
+            &mut gaps,
+        );
+        assert!(none.is_none());
+        assert!(gaps[0].contains("no `gh` is on PATH"), "{gaps:?}");
+
+        let refused = aikit_adapters::runner::ScriptedRunner::new()
+            .on("remote get-url origin", "git@github.com:EpiLogos/O-I.git\n")
+            .failing(
+                "repos/EpiLogos/O-I/issues/723",
+                1,
+                "HTTP 401: Bad credentials",
+            );
+        let mut gaps = Vec::new();
+        assert!(ticket_named(
+            &refused,
+            Some(Path::new("gh")),
+            Path::new("/c/o-i"),
+            "work ticket #723",
+            &catalogue(),
+            &mut BTreeSet::new(),
+            &mut gaps,
+        )
+        .is_none());
+        assert!(
+            gaps[0].contains("EpiLogos/O-I#723 could not be read as a ticket")
+                && gaps[0].contains("Bad credentials"),
+            "{gaps:?}"
+        );
+
+        // No map parent, and a type with no practice: the ticket still stands,
+        // with each gap in words.
+        let orphan = aikit_adapters::runner::ScriptedRunner::new()
+            .on("remote get-url origin", "git@github.com:EpiLogos/O-I.git\n")
+            .on(
+                "repos/EpiLogos/O-I/issues/9",
+                &json!({"title": "t", "labels": [{"name": "wayfinder:spike"}]}).to_string(),
+            )
+            .failing(
+                "repos/EpiLogos/O-I/issues/9/parent",
+                1,
+                "Not Found (HTTP 404)",
+            );
+        let ticket = ticket_named(
+            &orphan,
+            Some(Path::new("gh")),
+            Path::new("/c/o-i"),
+            "do #9",
+            &catalogue(),
+            &mut BTreeSet::new(),
+            &mut Vec::new(),
+        )
+        .unwrap();
+        assert!(ticket.method.is_none() && ticket.notes.is_empty());
+        assert_eq!(ticket.gaps.len(), 2, "{:?}", ticket.gaps);
+        assert!(ticket.gaps[0].contains("type `spike` names no active practice"));
+        assert!(ticket.gaps[1].contains("its map could not be read"));
+    }
+
+    #[test]
+    fn the_practice_a_session_loads_is_read_from_its_tool_events() {
+        let event = |tool: &str, input: Value| {
+            HookEvent::new(
+                "claude",
+                HookEventKind::PostToolUse,
+                json!({"tool_input": input}),
+            )
+            .with_tool_name(tool)
+        };
+        assert_eq!(
+            practice_loaded(&event(
+                "Skill",
+                json!({"skill": "anthropic-skills:wayfinder"})
+            )),
+            ["wayfinder"]
+        );
+        assert_eq!(
+            practice_loaded(&event(
+                "Read",
+                json!({"file_path": "/Users/admin/Central/Control/user/skills/engineering-methodology/SKILL.md"})
+            )),
+            ["engineering-methodology"]
+        );
+        assert_eq!(
+            practice_loaded(&event(
+                "Bash",
+                json!({"command": "sed -n 1,80p \"/r/registry/capsules/skill/central/central-authorised-task/payload/SKILL.md\" && cat ~/.claude/skills/grilling/SKILL.md"})
+            )),
+            ["central-authorised-task", "grilling"]
+        );
+        assert_eq!(
+            practice_loaded(&event(
+                "shell",
+                json!({"command": ["cat", "/x/agent-worktree-lifecycle/SKILL.md"]})
+            )),
+            ["agent-worktree-lifecycle"]
+        );
+        assert!(
+            practice_loaded(&event("Read", json!({"file_path": "/x/NOT_SKILL.md"}))).is_empty()
+        );
+        assert!(practice_loaded(&event("Bash", json!({"command": "cargo test"}))).is_empty());
+    }
+
+    fn ledger_with(ticket: ClaimedTicket, loaded: &[&str]) -> EntryLedger {
+        EntryLedger {
+            schema: ENTRY_SCHEMA.into(),
+            client: "claude".into(),
+            session: "s-723".into(),
+            concern: "work ticket #723".into(),
+            project: "O-I".into(),
+            checkout: "/c/worktrees/env-1/o-i".into(),
+            rendered_digest: String::new(),
+            prepared_version: None,
+            source_revisions: BTreeMap::new(),
+            source_refs: BTreeMap::new(),
+            emitted_at_unix_ms: 0,
+            redeliver_pending: false,
+            selected: vec![],
+            refinement: None,
+            ticket: Some(ticket),
+            loaded: loaded.iter().map(|n| (*n).to_owned()).collect(),
+            invoked: BTreeSet::new(),
+            tickets_read: BTreeSet::new(),
+        }
+    }
+
+    const EVERY: [&str; 5] = [
+        "wayfinder",
+        "agent-worktree-lifecycle",
+        "engineering-methodology",
+        "collaboration-methodology",
+        "central-authorised-task",
+    ];
+
+    #[test]
+    fn closing_the_ticket_is_refused_until_its_method_is_loaded_and_the_claim_holds() {
+        let unread = |_: &ClaimedTicket| -> std::result::Result<Option<String>, String> {
+            panic!("the close's own comment is the resolution")
+        };
+        let close = "gh issue close 723 --comment \"Landed in ai-kit.\nSkills: wayfinder, agent-worktree-lifecycle, engineering-methodology, collaboration-methodology and central-authorised-task\"";
+
+        // Nothing loaded: the Method, the Notes and the claim all fail.
+        let refused = resolution_refusal(close, &ledger_with(claimed_723(), &[]), unread).unwrap();
+        assert!(refused.starts_with("closing EpiLogos/O-I#723 is refused: its type `task` selects `central-authorised-task`, and this session has not loaded it"), "{refused}");
+        assert!(
+            refused.contains("the map's Notes have every session load `wayfinder`"),
+            "{refused}"
+        );
+        assert!(refused.contains("never loaded them"), "{refused}");
+        assert!(
+            refused.ends_with("This session has loaded: nothing recorded."),
+            "{refused}"
+        );
+
+        // Everything loaded and claimed truly: the close goes ahead.
+        let ready = ledger_with(claimed_723(), &EVERY);
+        assert_eq!(resolution_refusal(close, &ready, unread), None);
+
+        // A claim of practice never loaded is refused even with all loaded.
+        let overclaim = "gh issue close 723 -c '**Skills loaded:** `wayfinder`, `prototype`'";
+        let refused = resolution_refusal(overclaim, &ready, unread).unwrap();
+        assert!(
+            refused.contains(
+                "the result names `prototype` as loaded, and this session never loaded it"
+            ),
+            "{refused}"
+        );
+
+        // Without a --comment the ticket's latest comment is the resolution.
+        let bare = "cd /c/o-i && gh issue close 723";
+        let mut asked = 0;
+        assert_eq!(
+            resolution_refusal(bare, &ready, |ticket| {
+                asked += 1;
+                assert_eq!(ticket.number, 723);
+                Ok(Some(
+                    "Result: landed.\n- Skills: `wayfinder`, `central-authorised-task`".into(),
+                ))
+            }),
+            None
+        );
+        assert_eq!(asked, 1);
+        let refused =
+            resolution_refusal(bare, &ready, |_| Ok(Some("Result: landed.".into()))).unwrap();
+        assert!(refused.contains("the result names no skills"), "{refused}");
+        let refused = resolution_refusal(bare, &ready, |_| Err("HTTP 502".into())).unwrap();
+        assert!(
+            refused.contains("could not be read (HTTP 502)"),
+            "{refused}"
+        );
+
+        // The REST close is the same close.
+        assert!(resolution_refusal(
+            "gh api -X PATCH repos/EpiLogos/O-I/issues/723 -f state=closed",
+            &ledger_with(claimed_723(), &[]),
+            |_| Ok(None),
+        )
+        .is_some());
+
+        // Other issues, other repositories and other commands are not checked.
+        let fresh = ledger_with(claimed_723(), &[]);
+        for other in [
+            "gh issue close 724 --comment 'Skills: x'",
+            "gh issue close 723 -R EpiLogos/ai-kit",
+            "gh issue view 723",
+            "git commit -m 'close the gap'",
+        ] {
+            assert_eq!(resolution_refusal(other, &fresh, unread), None, "{other}");
+        }
+    }
+
+    #[test]
+    fn a_close_leaves_loaded_invoked_and_relied_on_with_the_disagreements() {
+        let mut ledger = ledger_with(claimed_723(), &EVERY);
+        ledger.loaded.insert("grilling".into());
+        ledger.loaded.insert("no-such-skill".into());
+        ledger.invoked.insert("central-authorised-task".into());
+        let relied = vec!["wayfinder".to_owned(), "central-authorised-task".to_owned()];
+        let check = resolution_check(
+            "gh issue close 723 -c 'Skills: wayfinder, central-authorised-task'",
+            &ledger,
+            |_| Ok(None),
+        )
+        .unwrap();
+        assert_eq!(check.refusal, None);
+        assert_eq!(check.relied_upon, relied);
+        let (activity, findings) = session_activity(&ledger, &check.relied_upon, &catalogue());
+        assert_eq!(activity.loaded.len(), 6, "{:?}", activity.loaded);
+        assert_eq!(activity.invoked, ["skill/central/central-authorised-task"]);
+        assert_eq!(
+            activity.relied_upon,
+            [
+                "skill/central/wayfinder",
+                "skill/central/central-authorised-task"
+            ]
+        );
+        assert_eq!(
+            activity.evidence_refs,
+            ["https://github.com/EpiLogos/O-I/issues/723"]
+        );
+        assert!(findings.contains(
+            &"`no-such-skill` was used, and no active entry here carries that name".to_owned()
+        ));
+        assert!(findings.contains(
+            &"`grilling` was loaded, and the resolution does not name it as relied on".to_owned()
+        ));
+        assert!(
+            !findings.iter().any(|f| f.starts_with("`wayfinder`")),
+            "{findings:?}"
+        );
+    }
+
+    #[test]
+    fn the_refinement_the_hook_spawns_is_a_command_the_cli_parses() {
+        use clap::Parser;
+        let mut argv = vec![std::ffi::OsString::from("aikit")];
+        argv.extend(refinement_args(
+            "claude",
+            "s-1",
+            Path::new("/c/worktrees/env-2/o-i"),
+        ));
+        let parsed = crate::cli::Cli::try_parse_from(argv);
+        assert!(parsed.is_ok(), "{:?}", parsed.err().map(|e| e.to_string()));
+    }
+
+    fn empty_view() -> ResolvedView {
+        ResolvedView {
+            context: aikit_core::context::ContextDescriptor::for_project("/entry-723-test"),
+            policy: Default::default(),
+            active: BTreeMap::new(),
+            declared: BTreeMap::new(),
+            unavailable: BTreeMap::new(),
+            selection_log: Vec::new(),
+            catalog_index: BTreeMap::new(),
+            skill_usage_overlays: BTreeMap::new(),
+            warnings: Vec::new(),
+            hash: serde_json::from_value(json!("0".repeat(64))).unwrap(),
+            catalog_revision: "entry-723-r1".into(),
+            properties: BTreeMap::new(),
+        }
+    }
+
+    #[test]
+    fn a_session_records_what_it_loads_and_the_close_is_checked_against_it() {
+        let temp = tempfile::tempdir().unwrap();
+        store_ledger(temp.path(), &ledger_with(claimed_723(), &[]));
+        let view = empty_view();
+        let roots = BTreeMap::new();
+        let config = EntryConfig::default();
+        let tool = |kind: HookEventKind, tool: &str, input: Value| {
+            HookEvent::new(
+                "claude",
+                kind,
+                json!({"session_id": "s-723", "tool_input": input}),
+            )
+            .with_tool_name(tool)
+        };
+        fn on<'a>(
+            event: &'a HookEvent,
+            config: &'a EntryConfig,
+            state: &'a Path,
+            view: &'a ResolvedView,
+            roots: &'a BTreeMap<CapsuleId, PathBuf>,
+        ) -> EntryRequest<'a> {
+            EntryRequest {
+                event,
+                client: "claude",
+                config,
+                state,
+                central: None,
+                view,
+                capsule_roots: roots,
+            }
+        }
+        macro_rules! run {
+            ($event:expr) => {
+                on($event, &config, temp.path(), &view, &roots)
+            };
+        }
+        let close = tool(
+            HookEventKind::PreToolUse,
+            "Bash",
+            json!({"command": "gh issue close 723 --comment 'Skills: wayfinder, central-authorised-task'"}),
+        );
+        let refused = check_resolution(&run!(&close)).unwrap().unwrap();
+        assert!(
+            refused.contains("selects `central-authorised-task`"),
+            "{refused}"
+        );
+
+        for (name, input) in [
+            ("Skill", json!({"skill": "central-authorised-task"})),
+            (
+                "Read",
+                json!({"file_path": "/c/Control/user/skills/wayfinder/SKILL.md"}),
+            ),
+            (
+                "Bash",
+                json!({"command": "cat /s/agent-worktree-lifecycle/SKILL.md /s/engineering-methodology/SKILL.md /s/collaboration-methodology/SKILL.md"}),
+            ),
+        ] {
+            let used = tool(HookEventKind::PostToolUse, name, input);
+            assert_eq!(
+                deliver(&run!(&used)).unwrap(),
+                None,
+                "recording injects nothing"
+            );
+        }
+        let ledger = load_ledger(temp.path(), "claude", "s-723").unwrap();
+        assert_eq!(
+            ledger.loaded,
+            EVERY
+                .iter()
+                .map(|n| (*n).to_owned())
+                .collect::<BTreeSet<_>>()
+        );
+        assert_eq!(
+            ledger.invoked,
+            BTreeSet::from(["central-authorised-task".to_owned()]),
+            "only the skill call is an invocation"
+        );
+        assert!(!activity_path(temp.path(), "claude", "s-723").exists());
+        assert_eq!(check_resolution(&run!(&close)).unwrap(), None);
+        // The close that went through left the session's evidence, in the
+        // shape `aikit praxis disclose --activity` reads.
+        let activity: aikit_core::agent_praxis::PraxisActivity = serde_json::from_slice(
+            &std::fs::read(activity_path(temp.path(), "claude", "s-723")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(activity.schema, "aikit.praxis-activity/v1");
+        assert_eq!(activity.return_destinations, ["EpiLogos/O-I#723"]);
+        // A tool call that closes nothing is answered from its text alone.
+        let other = tool(
+            HookEventKind::PreToolUse,
+            "Bash",
+            json!({"command": "cargo test"}),
+        );
+        assert_eq!(check_resolution(&run!(&other)).unwrap(), None);
     }
 
     fn native_work_scratch() -> tempfile::TempDir {
@@ -2638,6 +4481,10 @@ mod tests {
             redeliver_pending: false,
             selected: vec![reference.as_str().into()],
             refinement: None,
+            ticket: None,
+            loaded: BTreeSet::new(),
+            invoked: BTreeSet::new(),
+            tickets_read: BTreeSet::new(),
         };
         let state = world.join("owned-entry-state");
         store_ledger(&state, &ledger);
