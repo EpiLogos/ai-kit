@@ -346,6 +346,18 @@ fn validate_source_hit_basis(
     }
 }
 
+/// A faculty a search can be told to leave unasked: its caller's own route switched off (an agent session's Sources, O-I manual
+/// §19.9), not a provider missing. Each is a route an address is read through.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SearchFaculty {
+    /// The Wiki: its curated objects and the sources it cites.
+    Wiki,
+    /// The project's own sources: every SourcePool, the sources the Wiki cites, and the ProjectMap.
+    Project,
+    /// The code indexes, and the ProjectMap's code endpoints.
+    Code,
+}
+
 /// One project-scoped application field over independent Knowledge providers.
 ///
 /// This is federation, not a universal graph: providers retain their relation,
@@ -369,6 +381,8 @@ pub struct KnowledgeApplication<'a> {
     /// absence — sibling carrier paths must not re-enter a scoped reply
     /// through the diagnostic door after the hits are filtered.
     project_attribution: Option<ScopedAttribution<'a>>,
+    /// What a search leaves unasked on its caller's word (`leaving_unasked`).
+    unasked: Vec<SearchFaculty>,
 }
 
 /// The attribution maps a scoped application consults, borrowed from the
@@ -758,7 +772,34 @@ impl<'a> KnowledgeApplication<'a> {
             code: Vec::new(),
             project_map: None,
             project_attribution: None,
+            unasked: Vec::new(),
         }
+    }
+
+    /// Leave a faculty unasked by this application's searches: none of its providers is asked, so a hit on it takes no place in
+    /// the answer's limit, and the search does not call it absent — saying why is the caller's. Reads, walks and status are not
+    /// bound by it.
+    #[must_use]
+    pub fn leaving_unasked(mut self, faculty: SearchFaculty) -> Self {
+        if !self.unasked.contains(&faculty) {
+            self.unasked.push(faculty);
+        }
+        self
+    }
+
+    fn asks(&self, faculty: SearchFaculty) -> bool {
+        !self.unasked.contains(&faculty)
+    }
+
+    /// Whether a search asks the ProjectMap for this endpoint: the map is the project's, and an endpoint that projects a Wiki or
+    /// code resource is that faculty's too.
+    fn asks_endpoint(&self, endpoint: &ProjectMapEndpoint) -> bool {
+        self.asks(SearchFaculty::Project)
+            && match endpoint.lens {
+                ProjectLens::SemanticWiki => self.asks(SearchFaculty::Wiki),
+                ProjectLens::Code => self.asks(SearchFaculty::Code),
+                _ => true,
+            }
     }
 
     /// This operation's actual delivery target; no reusable audience grant.
@@ -1045,7 +1086,9 @@ impl<'a> KnowledgeApplication<'a> {
         let mut hits = Vec::new();
 
         let mut unreadable: Vec<SourceRef> = Vec::new();
-        if let Some(wiki) = &self.wiki {
+        if !self.asks(SearchFaculty::Wiki) {
+            // Left unasked on the caller's word: not absent, and the caller says so.
+        } else if let Some(wiki) = &self.wiki {
             hits.extend(wiki.search(query, limit).into_iter().filter_map(|hit| {
                 match &hit.address {
                     // A curated Wiki object keeps the Wiki address and the
@@ -1083,8 +1126,12 @@ impl<'a> KnowledgeApplication<'a> {
                         // raw filesystem path — produces neither a hit nor
                         // the unreadable-source absence below, so sibling
                         // carriers cannot re-enter a scoped reply through
-                        // the diagnostic door.
-                        if self.source_suppressed_in_scope(source.as_str()) {
+                        // the diagnostic door. A cited source is the
+                        // project's: with that faculty left unasked, the
+                        // Wiki names it neither as a hit nor as an absence.
+                        if !self.asks(SearchFaculty::Project)
+                            || self.source_suppressed_in_scope(source.as_str())
+                        {
                             return None;
                         }
                         // Findability must not outrun openability in silence.
@@ -1137,7 +1184,17 @@ impl<'a> KnowledgeApplication<'a> {
         // order, so hits and absences are exactly those of asking one
         // provider after another.
         let target = self.retrieval_target;
-        let codes = &self.code;
+        // A faculty left unasked brings none of its providers into the scope.
+        let codes: &[&(dyn CodeIndexProvider + Sync)] = if self.asks(SearchFaculty::Code) {
+            &self.code
+        } else {
+            &[]
+        };
+        let pools: &[SourcePoolBinding<'_>] = if self.asks(SearchFaculty::Project) {
+            &self.sources
+        } else {
+            &[]
+        };
         let code_slots: Vec<std::sync::Mutex<Option<ProviderOutcome>>> =
             codes.iter().map(|_| std::sync::Mutex::new(None)).collect();
         let next_code = std::sync::atomic::AtomicUsize::new(0);
@@ -1154,8 +1211,7 @@ impl<'a> KnowledgeApplication<'a> {
                         .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(outcome);
                 });
             }
-            let pools: Vec<_> = self
-                .sources
+            let pools: Vec<_> = pools
                 .iter()
                 .map(|binding| {
                     let (source_query, tag_filter) = (source_query.as_str(), tag_filter.as_slice());
@@ -1185,13 +1241,18 @@ impl<'a> KnowledgeApplication<'a> {
                 }
             }
         }
-        if self.code.is_empty() {
+        if self.code.is_empty() && self.asks(SearchFaculty::Code) {
             absences.push("ProjectMap code search unavailable: provider absent".into());
         }
 
-        if let Some(project_map) = self.project_map {
+        if !self.asks(SearchFaculty::Project) {
+            // Left unasked on the caller's word: not absent, and the caller says so.
+        } else if let Some(project_map) = self.project_map {
             let needle = query.to_lowercase();
             hits.extend(project_map.endpoints().filter_map(|endpoint| {
+                if !self.asks_endpoint(endpoint) {
+                    return None;
+                }
                 let label = endpoint
                     .label
                     .clone()
@@ -3261,6 +3322,122 @@ mod tests {
         assert_eq!(selection.content.chars().count(), 12);
         assert_eq!(selection.remaining, vec![SpanRange { start: 12, end: 24 }]);
     }
+
+    /// A faculty left unasked (an agent session's Sources route switched off, O-I manual §19.9) is not asked: none of its
+    /// providers answers, the Wiki names no source with the project left unasked, the ProjectMap projects nothing of a faculty
+    /// left unasked, and nothing calls it absent.
+    #[test]
+    fn a_faculty_left_unasked_is_not_asked_and_not_called_absent() {
+        let index = wiki();
+        let material = vec![material()];
+        let mut native = NativeSourcePoolProvider::new();
+        native.rebuild(&material).unwrap();
+        let code = FakeCodeIndex {
+            count: 1,
+            score: 0.9,
+        };
+        let mut project_map = ProjectMap::new();
+        project_map
+            .add_endpoint(endpoint(
+                "wiki:node:auth",
+                ProjectLens::SemanticWiki,
+                ResourceKind::KnowledgeNode,
+                SourceAuthority::Authored,
+            ))
+            .unwrap();
+        let search = |unasked: &[SearchFaculty]| {
+            let mut app = KnowledgeApplication::new(FamiliarityContext::default())
+                .with_wiki(SemanticWikiProvider::new(&index))
+                .with_source_pool(&native, &material)
+                .with_code(&code)
+                .with_project_map(&project_map);
+            for faculty in unasked {
+                app = app.leaving_unasked(*faculty);
+            }
+            app.search("auth", 10)
+        };
+        let found =
+            |result: &KnowledgeSearchResult| -> Vec<(String, &'static str, SourceAuthority)> {
+                result
+                    .hits
+                    .iter()
+                    .map(|hit| {
+                        let address = match hit.address {
+                            KnowledgeAddress::Wiki(_) => "wiki",
+                            KnowledgeAddress::Source(_) => "source",
+                            KnowledgeAddress::ProjectMap(_) => "map",
+                            KnowledgeAddress::Code(_) => "code",
+                        };
+                        (hit.resource.to_string(), address, hit.authority)
+                    })
+                    .collect()
+            };
+        let says = |result: &KnowledgeSearchResult, words: &str| {
+            result
+                .absences
+                .iter()
+                .any(|absence| absence.contains(words))
+        };
+
+        let all = search(&[]);
+        let hits = found(&all);
+        assert!(hits.contains(&("wiki:node:auth".into(), "wiki", SourceAuthority::Authored)));
+        assert!(
+            hits.contains(&("source:spec".into(), "source", SourceAuthority::Authored)),
+            "{hits:?}"
+        );
+        assert!(
+            hits.iter().any(|(_, address, _)| *address == "code"),
+            "{hits:?}"
+        );
+
+        let wiki_off = search(&[SearchFaculty::Wiki]);
+        let hits = found(&wiki_off);
+        assert!(
+            hits.iter()
+                .all(|(resource, _, _)| resource != "wiki:node:auth"),
+            "neither the Wiki nor the ProjectMap's projection of it answers: {hits:?}"
+        );
+        assert!(
+            hits.contains(&("source:spec".into(), "source", SourceAuthority::Observed)),
+            "the project's own pool answers for the source, not the Wiki that cites it: {hits:?}"
+        );
+        assert!(!says(&wiki_off, "SemanticWiki"), "{:?}", wiki_off.absences);
+
+        let project_off = search(&[SearchFaculty::Project]);
+        let hits = found(&project_off);
+        assert!(
+            hits.iter()
+                .all(|(resource, address, _)| resource != "source:spec" && *address != "map"),
+            "no source, the Wiki's citation included, and no ProjectMap: {hits:?}"
+        );
+        assert!(hits.contains(&("wiki:node:auth".into(), "wiki", SourceAuthority::Authored)));
+        assert!(
+            !says(&project_off, "ProjectMap endpoint"),
+            "{:?}",
+            project_off.absences
+        );
+
+        let code_off = search(&[SearchFaculty::Code]);
+        assert!(found(&code_off)
+            .iter()
+            .all(|(_, address, _)| *address != "code"));
+        let none_attached = |unasked: &[SearchFaculty]| {
+            let mut app = KnowledgeApplication::new(FamiliarityContext::default());
+            for faculty in unasked {
+                app = app.leaving_unasked(*faculty);
+            }
+            app.search("auth", 10)
+        };
+        assert!(says(&none_attached(&[]), "code search unavailable"));
+        assert!(
+            !says(
+                &none_attached(&[SearchFaculty::Code]),
+                "code search unavailable"
+            ),
+            "a faculty left unasked is not called absent"
+        );
+    }
 }
 
 #[cfg(test)]
@@ -3708,6 +3885,25 @@ mod admission_page_tests {
         let result = search(&pool, 50);
         assert_eq!(pool.asked.load(Ordering::Relaxed), 5);
         assert_eq!(result.hits.len(), 5);
+    }
+
+    #[test]
+    fn a_pool_is_not_searched_with_the_project_left_unasked() {
+        let pool = HybridPool {
+            searches: AtomicUsize::new(0),
+        };
+        let unasked = KnowledgeApplication::new(FamiliarityContext::default())
+            .with_source_pool(&pool, &[])
+            .leaving_unasked(SearchFaculty::Project)
+            .search("auth", 10);
+        assert_eq!(pool.searches.load(Ordering::Relaxed), 0);
+        assert!(unasked.hits.is_empty());
+        KnowledgeApplication::new(FamiliarityContext::default())
+            .with_source_pool(&pool, &[])
+            .leaving_unasked(SearchFaculty::Wiki)
+            .leaving_unasked(SearchFaculty::Code)
+            .search("auth", 10);
+        assert_eq!(pool.searches.load(Ordering::Relaxed), 1);
     }
 }
 

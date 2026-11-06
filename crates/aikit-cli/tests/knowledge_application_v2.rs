@@ -1134,3 +1134,169 @@ fn an_agent_reads_only_the_routes_its_sources_leave_on_and_a_relations_batch_wal
     );
     assert!(said(&none).contains("every route is off"), "{none}");
 }
+
+/// O-I #745 (DLW §19.9 Sources; BD round 27's proposal, lane BA r879): a route its Sources switched off is not asked at all, where
+/// before it was asked and its hits filtered after. So a hit on it takes no place in the answer's limit, nothing found through it
+/// reaches the agent on another route, and the search does not call its provider absent: it says the route is off.
+/// `knowledge resolve`, the same search by its expression, reads under the same routes.
+#[test]
+fn a_route_that_is_off_is_not_asked_so_it_takes_no_place_in_the_answer() {
+    use aikit_cli::encounter_service::EncounterService;
+
+    let world = sources_world("agent-session/routes-unasked");
+    // Alpha on the Wiki and in the project's own sources; Beta on the Wiki alone, citing a paper the project holds no copy of.
+    fs::write(
+        world.project.join("semantic-wiki.json"),
+        serde_json::json!({"objects": [
+            {"profile":"okf-wiki/v1","object":"node","ref":"wiki:node:alpha","revision":1,"provenance":[],"type":"Concept",
+             "title":"Alpha","space_refs":[],"source_refs":[]},
+            {"profile":"okf-wiki/v1","object":"node","ref":"wiki:node:beta","revision":1,
+             "provenance":[{"source_ref":"source:paper:unheld","source_revision":"rev-1"}],"type":"Concept",
+             "title":"Beta","space_refs":[],"source_refs":["source:paper:unheld"]}
+        ]})
+        .to_string(),
+    )
+    .unwrap();
+    fs::write(
+        world.project.join("source-material.json"),
+        serde_json::json!({
+            "binding": {"source": "source:notes:alpha", "revision": "rev-1", "title": "Alpha field notes", "tags": [],
+                        "visibility": "public", "owners": [], "media_type": "text/markdown", "metadata": {}},
+            "body": "Alpha is observed in the field notes."
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let agent_does =
+        |args: &[&str]| aikit_as(&world.project, &world.root, Some(&world.agent), args);
+    let write = |change: serde_json::Value| {
+        let settings =
+            EncounterService::read_session_settings(&world.home, &world.session).unwrap();
+        let revision = settings["revision"]
+            .as_str()
+            .map(|revision| aikit_core::SourceRevision::parse(revision).unwrap());
+        EncounterService::write_session_settings(
+            &world.home,
+            &world.session,
+            change,
+            revision.as_ref(),
+        )
+        .unwrap()
+    };
+    let hits = |reply: &serde_json::Value| -> Vec<String> {
+        assert_eq!(reply["ok"], true, "{reply}");
+        reply["data"]["hits"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|hit| hit["resource"].as_str().map(str::to_owned))
+            .collect()
+    };
+    let said = |reply: &serde_json::Value, words: &str| {
+        reply["data"]["absences"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .any(|line| line.as_str().is_some_and(|line| line.contains(words)))
+    };
+
+    // The rack's reading with the Wiki off (Code off, as the manual gives it).
+    write(serde_json::json!({"track": {"rack_sources": true, "rack_route_wiki": false}}));
+    let one = agent_does(&["knowledge", "search", "Alpha", "--limit", "1"]);
+    assert_eq!(
+        hits(&one),
+        ["source:notes:alpha"],
+        "the Wiki's Alpha takes no place in the one hit asked for: {one}"
+    );
+    let resolved = agent_does(&["knowledge", "resolve", "Alpha", "--limit", "1"]);
+    assert_eq!(
+        hits(&resolved),
+        ["source:notes:alpha"],
+        "resolve reads under the same routes: {resolved}"
+    );
+    assert!(said(&resolved, "Wiki route is off"), "{resolved}");
+    let beta = agent_does(&["knowledge", "search", "Beta"]);
+    assert!(
+        hits(&beta).is_empty(),
+        "nothing is found through the Wiki, though what it cites stands on the project route: {beta}"
+    );
+    assert!(!said(&beta, "source:paper:unheld"), "{beta}");
+    assert!(said(&beta, "Code route is off"), "{beta}");
+    assert!(
+        !said(&beta, "code search unavailable"),
+        "a route that is off is not called absent: {beta}"
+    );
+
+    // The agent's own chain with Project knowledge off and the Wiki on: Beta answers, and the paper it cites is not named.
+    write(serde_json::json!({"track": {"sources": true, "route_project": false}}));
+    let beta = agent_does(&["knowledge", "search", "Beta"]);
+    assert_eq!(hits(&beta), ["wiki:node:beta"], "{beta}");
+    assert!(!said(&beta, "source:paper:unheld"), "{beta}");
+    assert!(said(&beta, "Project knowledge route is off"), "{beta}");
+}
+
+/// O-I #745 (DLW §19.9 Sources; DLW build ruling 2026-11-06, from the Sources ruling on #745): a resolve is a search by its
+/// expression, so under the same gate it counts for Search first. What a resolve found reads, as what a search found does, and the
+/// resolve stands in the agent's record as its search.
+#[test]
+fn a_resolve_is_a_search_by_its_expression_so_what_it_found_reads_under_search_first() {
+    use aikit_cli::encounter_service::EncounterService;
+
+    let world = sources_world("agent-session/resolves-first");
+    let agent_does =
+        |args: &[&str]| aikit_as(&world.project, &world.root, Some(&world.agent), args);
+    let address =
+        |reference: &str| serde_json::json!({"kind": "wiki", "value": reference}).to_string();
+    let refusal = |reply: &serde_json::Value| {
+        (reply["ok"] == false).then(|| {
+            reply["error"]["code"]
+                .as_str()
+                .unwrap_or_default()
+                .to_string()
+        })
+    };
+    // Sources placed on the agent's own chain, Search first on (its default).
+    let written = EncounterService::write_session_settings(
+        &world.home,
+        &world.session,
+        serde_json::json!({"track": {"sources": true}}),
+        None,
+    )
+    .unwrap();
+    assert_eq!(written["sources"]["chain"]["search_first"], true);
+
+    assert_eq!(
+        refusal(&agent_does(&[
+            "knowledge",
+            "read",
+            "--",
+            &address("wiki:node:alpha")
+        ]))
+        .as_deref(),
+        Some("knowledge.sources_search_first"),
+        "nothing found yet, nothing reads"
+    );
+    let resolved = agent_does(&["knowledge", "resolve", "Alpha"]);
+    assert_eq!(resolved["ok"], true, "{resolved}");
+    assert!(
+        resolved["data"]["hits"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .any(|hit| hit["resource"] == "wiki:node:alpha"),
+        "the resolve finds Alpha: {resolved}"
+    );
+    let read = agent_does(&["knowledge", "read", "--", &address("wiki:node:alpha")]);
+    assert_eq!(read["ok"], true, "a page the resolve found reads: {read}");
+    assert_eq!(
+        refusal(&agent_does(&[
+            "knowledge",
+            "read",
+            "--",
+            &address("wiki:node:beta")
+        ]))
+        .as_deref(),
+        Some("knowledge.sources_search_first"),
+        "a page the resolve did not find, and no link from one, still waits for a search"
+    );
+}

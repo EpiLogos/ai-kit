@@ -17,7 +17,7 @@ use aikit_adapters::work_repos::{
 };
 use aikit_core::knowledge::{KnowledgeContextPack, KnowledgeRelationView, KnowledgeRoute};
 use aikit_core::knowledge_code::CodeIndexProvider;
-use aikit_core::knowledge_navigation::ProjectAuthoredPending;
+use aikit_core::knowledge_navigation::{ProjectAuthoredPending, SearchFaculty};
 use aikit_core::knowledge_source_pool::{
     material_for_actor, NativeSourcePoolProvider, SourceMaterial, SourcePool, SourcePoolProvider,
 };
@@ -1038,11 +1038,21 @@ impl Service {
     }
 
     pub fn knowledge_search(&self, query: &str, limit: usize) -> Result<KnowledgeSearchResult> {
+        self.knowledge_search_within(query, limit, &[])
+    }
+
+    /// `knowledge_search` leaving these faculties unasked: an agent session's Sources routes that are off (`SearchGate::unasked`).
+    pub fn knowledge_search_within(
+        &self,
+        query: &str,
+        limit: usize,
+        unasked: &[SearchFaculty],
+    ) -> Result<KnowledgeSearchResult> {
         // A query asked inside a project stands in that project's world
         // through the grammar itself (`: demo (@# @ text)`) — never a flag.
         let expression =
             parse_or_search_expression_in_scope(query, self.knowledge_scope_project().as_deref())?;
-        let mut result = self.knowledge_resolve(&expression, limit)?;
+        let mut result = self.knowledge_resolve_within(&expression, limit, unasked)?;
         result.query = query.into();
         Ok(result)
     }
@@ -1066,6 +1076,16 @@ impl Service {
         expression: &ResolveExpression,
         limit: usize,
     ) -> Result<KnowledgeSearchResult> {
+        self.knowledge_resolve_within(expression, limit, &[])
+    }
+
+    /// `knowledge_resolve` leaving these faculties unasked (`knowledge_search_within`).
+    pub fn knowledge_resolve_within(
+        &self,
+        expression: &ResolveExpression,
+        limit: usize,
+        unasked: &[SearchFaculty],
+    ) -> Result<KnowledgeSearchResult> {
         let candidate_limit = if limit == 0 { 0 } else { limit.max(256) };
         // The scope that governs this reply's disclosure: an explicit `:`
         // scope in the expression, else the invocation's own project.
@@ -1086,6 +1106,7 @@ impl Service {
                     candidate_limit,
                     explicit_scope.as_deref(),
                     deadline,
+                    unasked,
                 )
             },
         )?;
@@ -1114,7 +1135,8 @@ impl Service {
     /// One resolve against an already materialised runtime. `deadline` bounds
     /// only the owners this resolve connects to itself (a Project-scoped NOW
     /// pool and Work repo); the runtime's own providers carry whatever bound
-    /// it was materialised with.
+    /// it was materialised with. A faculty in `unasked` is never asked: its
+    /// providers, and the owners a scoped reply would connect for it.
     fn resolve_in_runtime(
         &self,
         runtime: &KnowledgeRuntime,
@@ -1122,7 +1144,9 @@ impl Service {
         candidate_limit: usize,
         explicit_scope: Option<&str>,
         deadline: SearchDeadline,
+        unasked: &[SearchFaculty],
     ) -> Result<KnowledgeSearchResult> {
+        let asks = |faculty| !unasked.contains(&faculty);
         let scoped_display = runtime.scoped_project_display(explicit_scope);
         if explicit_scope.is_some() && scoped_display.is_none() {
             return Err(aikit_core::AikitError::new(
@@ -1148,7 +1172,7 @@ impl Service {
             runtime.now_field.as_ref(),
             runtime.central.as_ref(),
         ) {
-            (Some(_), Some(provider), Some(owner)) => {
+            (Some(_), Some(provider), Some(owner)) if asks(SearchFaculty::Project) => {
                 let scope = provider
                     .scope()
                     .for_project(discovered_project.map(|p| p.name.as_str()));
@@ -1202,17 +1226,19 @@ impl Service {
         // only the resolved Project at the provider boundary so another
         // repo's ripgrep failure cannot appear in this reply's absences.
         // The root World deliberately retains the broad native provider.
-        let scoped_work_repos = discovered_project.and_then(|project| {
-            let owner = runtime.work_repos.as_ref()?;
-            match owner.for_project(&project.project_id) {
-                Ok(provider) => Some(provider),
-                Err(error) => {
-                    scoped_provider_absences
-                        .push(format!("Work source scope unavailable: {error}"));
-                    None
+        let scoped_work_repos = discovered_project
+            .filter(|_| asks(SearchFaculty::Project))
+            .and_then(|project| {
+                let owner = runtime.work_repos.as_ref()?;
+                match owner.for_project(&project.project_id) {
+                    Ok(provider) => Some(provider),
+                    Err(error) => {
+                        scoped_provider_absences
+                            .push(format!("Work source scope unavailable: {error}"));
+                        None
+                    }
                 }
-            }
-        });
+            });
         let work_repos: Option<&(dyn SourcePoolProvider + Sync)> = if scoped_display.is_some() {
             scoped_work_repos
                 .as_ref()
@@ -1223,14 +1249,16 @@ impl Service {
                 .as_ref()
                 .map(|provider| provider as &(dyn SourcePoolProvider + Sync))
         };
-        let mut result = runtime
-            .application_with_project_scope(
-                self.knowledge_context()?,
-                scoped_display.as_deref(),
-                now_field,
-                work_repos,
-            )
-            .resolve(expression, candidate_limit);
+        let mut application = runtime.application_with_project_scope(
+            self.knowledge_context()?,
+            scoped_display.as_deref(),
+            now_field,
+            work_repos,
+        );
+        for faculty in unasked {
+            application = application.leaving_unasked(*faculty);
+        }
+        let mut result = application.resolve(expression, candidate_limit);
         result.absences.extend(scoped_provider_absences);
         result.absences.extend(runtime.absences.clone());
         result.absences.extend(
@@ -1259,7 +1287,10 @@ impl Service {
         // only its own scope's line, never another project's — the leak
         // this fix closes. Every project's degradation stays in
         // `knowledge status`.
-        if let Some(display) = scoped_display.as_deref() {
+        if let Some(display) = scoped_display
+            .as_deref()
+            .filter(|_| asks(SearchFaculty::Code))
+        {
             for degradation in &runtime.code_degradations {
                 if degradation.project == display {
                     result.absences.push(degradation.message.clone());
@@ -1711,6 +1742,7 @@ impl Service {
                 hit_limit.max(256),
                 explicit_scope.as_deref(),
                 SearchDeadline::starting_now(),
+                &[],
             )?;
             self.finish_resolved(&expression, hit_limit, &mut found)?;
             found.query = query.into();
@@ -5425,6 +5457,25 @@ const SESSION_READS_CHECKED: usize = 32;
 #[derive(Debug, Clone)]
 pub struct SearchGate {
     sources: Option<crate::encounter_service::SourcesInEffect>,
+}
+
+impl SearchGate {
+    /// The faculties a search under this gate leaves unasked: each route its Sources switched off, so that route is never queried
+    /// (not only filtered after) and its hits take no place in the answer's limit. None where the gate bounds nothing.
+    pub fn unasked(&self) -> Vec<SearchFaculty> {
+        let Some(bound) = &self.sources else {
+            return Vec::new();
+        };
+        [
+            ("wiki", SearchFaculty::Wiki),
+            ("project", SearchFaculty::Project),
+            ("code", SearchFaculty::Code),
+        ]
+        .into_iter()
+        .filter(|(route, _)| !bound.routes.on(route))
+        .map(|(_, faculty)| faculty)
+        .collect()
+    }
 }
 
 /// What a gate found before the agent's read or walk, carried to the record after it.
