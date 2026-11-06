@@ -4152,9 +4152,10 @@ fn cmd_knowledge(cwd: &std::path::Path, c: KnowledgeCmd) -> Result<Reply> {
     let mut warnings = diagnostic_warnings(&service);
     let data = match command {
         KnowledgeSub::Search(a) => {
-            // An agent session searches only the routes its Sources leaves on (O-I manual §19.9): every route off, no search runs.
+            // An agent session searches only the routes its Sources leaves on (O-I manual §19.9): every route off, no search runs;
+            // a route that is off is never asked.
             let gate = service.knowledge_session_gate_search()?;
-            let mut result = service.knowledge_search(&a.query, a.limit)?;
+            let mut result = service.knowledge_search_within(&a.query, a.limit, &gate.unasked())?;
             service.jev_rerank_result(&mut result, a.limit);
             Service::knowledge_session_keep_routes(&gate, &mut result);
             warnings.extend(result.absences.clone());
@@ -4166,8 +4167,12 @@ fn cmd_knowledge(cwd: &std::path::Path, c: KnowledgeCmd) -> Result<Reply> {
             // One query path: a plain typed string is legitimate input and is
             // lowered into the Vāk resolver contract before resolution.
             let expression = aikit_core::resource::parse_or_search_expression(&a.query)?;
-            let mut resolution = service.knowledge_resolve(&expression, a.limit)?;
+            // The same search by its expression, under the same Sources routes as `knowledge search`.
+            let gate = service.knowledge_session_gate_search()?;
+            let mut resolution =
+                service.knowledge_resolve_within(&expression, a.limit, &gate.unasked())?;
             service.jev_rerank_result(&mut resolution, a.limit);
+            Service::knowledge_session_keep_routes(&gate, &mut resolution);
             warnings.extend(resolution.absences.clone());
             jval!(resolution)
         }
