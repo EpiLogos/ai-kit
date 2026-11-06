@@ -4174,6 +4174,9 @@ fn cmd_knowledge(cwd: &std::path::Path, c: KnowledgeCmd) -> Result<Reply> {
             service.jev_rerank_result(&mut resolution, a.limit);
             Service::knowledge_session_keep_routes(&gate, &mut resolution);
             warnings.extend(resolution.absences.clone());
+            // A resolve is a search by its expression: kept in the agent's record as its search, so it counts for Search first
+            // (DLW build ruling 2026-11-06, from the Sources ruling on O-I #745).
+            service.knowledge_session_searched(&resolution)?;
             jval!(resolution)
         }
         KnowledgeSub::Open(a) => {

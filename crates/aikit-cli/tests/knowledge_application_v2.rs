@@ -1234,3 +1234,69 @@ fn a_route_that_is_off_is_not_asked_so_it_takes_no_place_in_the_answer() {
     assert!(!said(&beta, "source:paper:unheld"), "{beta}");
     assert!(said(&beta, "Project knowledge route is off"), "{beta}");
 }
+
+/// O-I #745 (DLW §19.9 Sources; DLW build ruling 2026-11-06, from the Sources ruling on #745): a resolve is a search by its
+/// expression, so under the same gate it counts for Search first. What a resolve found reads, as what a search found does, and the
+/// resolve stands in the agent's record as its search.
+#[test]
+fn a_resolve_is_a_search_by_its_expression_so_what_it_found_reads_under_search_first() {
+    use aikit_cli::encounter_service::EncounterService;
+
+    let world = sources_world("agent-session/resolves-first");
+    let agent_does =
+        |args: &[&str]| aikit_as(&world.project, &world.root, Some(&world.agent), args);
+    let address =
+        |reference: &str| serde_json::json!({"kind": "wiki", "value": reference}).to_string();
+    let refusal = |reply: &serde_json::Value| {
+        (reply["ok"] == false).then(|| {
+            reply["error"]["code"]
+                .as_str()
+                .unwrap_or_default()
+                .to_string()
+        })
+    };
+    // Sources placed on the agent's own chain, Search first on (its default).
+    let written = EncounterService::write_session_settings(
+        &world.home,
+        &world.session,
+        serde_json::json!({"track": {"sources": true}}),
+        None,
+    )
+    .unwrap();
+    assert_eq!(written["sources"]["chain"]["search_first"], true);
+
+    assert_eq!(
+        refusal(&agent_does(&[
+            "knowledge",
+            "read",
+            "--",
+            &address("wiki:node:alpha")
+        ]))
+        .as_deref(),
+        Some("knowledge.sources_search_first"),
+        "nothing found yet, nothing reads"
+    );
+    let resolved = agent_does(&["knowledge", "resolve", "Alpha"]);
+    assert_eq!(resolved["ok"], true, "{resolved}");
+    assert!(
+        resolved["data"]["hits"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .any(|hit| hit["resource"] == "wiki:node:alpha"),
+        "the resolve finds Alpha: {resolved}"
+    );
+    let read = agent_does(&["knowledge", "read", "--", &address("wiki:node:alpha")]);
+    assert_eq!(read["ok"], true, "a page the resolve found reads: {read}");
+    assert_eq!(
+        refusal(&agent_does(&[
+            "knowledge",
+            "read",
+            "--",
+            &address("wiki:node:beta")
+        ]))
+        .as_deref(),
+        Some("knowledge.sources_search_first"),
+        "a page the resolve did not find, and no link from one, still waits for a search"
+    );
+}
