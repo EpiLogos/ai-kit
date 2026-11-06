@@ -784,6 +784,8 @@ fn knowledge_route(command: &KnowledgeSub) -> &'static str {
         KnowledgeSub::Sources(_) => "cmd_knowledge_sources",
         KnowledgeSub::Explain(_) => "cmd_knowledge_explain",
         KnowledgeSub::History(_) => "cmd_knowledge_history",
+        KnowledgeSub::Reads(_) => "cmd_knowledge_reads",
+        KnowledgeSub::ReadAgain(_) => "cmd_knowledge_read_again",
         KnowledgeSub::Status(_) => "cmd_knowledge_status",
         KnowledgeSub::Impact(_) => "cmd_knowledge_impact",
         KnowledgeSub::Reflection(c) => match &c.command {
@@ -796,6 +798,7 @@ fn knowledge_route(command: &KnowledgeSub) -> &'static str {
             KnowledgeForgetSub::Project(_) => "cmd_knowledge_forget_project",
             KnowledgeForgetSub::Here(_) => "cmd_knowledge_forget_here",
             KnowledgeForgetSub::All(_) => "cmd_knowledge_forget_all",
+            KnowledgeForgetSub::Reading(_) => "cmd_knowledge_forget_reading",
         },
         KnowledgeSub::Code(c) => knowledge_code_route(&c.command),
         KnowledgeSub::Flow(c) => flow_route(&c.command),
@@ -3886,6 +3889,11 @@ pub enum KnowledgeSub {
     Explain(KnowledgeAddressArgs),
     History(KnowledgeHistoryArgs),
     Status(KnowledgeStatusArgs),
+    /// What an agent session's agent read in its run (O-I manual §19.9 Sources' Read): each passage with its source and the
+    /// revision it read, a passage whose source moved since marked, with the Sources its reads were bounded by. Records nothing.
+    Reads(KnowledgeReadsArgs),
+    /// Read one of a session's readings again at its source's current revision, and record the use (Sources' Read again).
+    ReadAgain(KnowledgeReadingArgs),
     /// Living Knowledge impact of an owner change horizon over the
     /// dependency manifests this project's Semantic Wiki carries, for every
     /// reading the closure reaches or for the named readings. Deterministic;
@@ -4162,6 +4170,25 @@ pub enum KnowledgeForgetSub {
     /// destination in another world, and the operation history, stay.
     Here(KnowledgeForgetResourceArgs),
     All(KnowledgeForgetAllArgs),
+    /// Forget one of an agent session's readings (O-I manual §19.9 Sources' Forget): AIKit's learned use of its page in this world,
+    /// so the route no longer ranks it from memory, and the reading in the session's record. The source is untouched.
+    Reading(KnowledgeReadingArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct KnowledgeReadsArgs {
+    /// The AgentSession whose run's readings are listed (`agent-session/…`).
+    #[arg(long = "agent-session", value_name = "AGENT_SESSION")]
+    pub agent_session: String,
+}
+
+#[derive(Debug, Args)]
+pub struct KnowledgeReadingArgs {
+    #[arg(long = "agent-session", value_name = "AGENT_SESSION")]
+    pub agent_session: String,
+    /// The reading's id, as `knowledge reads` lists it.
+    #[arg(long, value_name = "READING")]
+    pub reading: String,
 }
 
 #[derive(Debug, Args)]
