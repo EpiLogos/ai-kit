@@ -2017,6 +2017,7 @@ impl Service {
         let hops = walk.hops.get(resource.as_str()).copied();
         if let Some(bound) = &sources {
             let at = sources_at(bound);
+            route_open(bound, route_of_address(address), &resource, "reads")?;
             if walk.reads >= bound.read_budget {
                 return Err(aikit_core::AikitError::new(
                     "knowledge.sources_read_budget",
@@ -2067,6 +2068,46 @@ impl Service {
         )
     }
 
+    /// Before the agent's `knowledge search`: the Sources its session reads under, refused in words where every route is off, so no
+    /// search runs. Bounds nothing when this process runs as no agent session, or its Sources stands nowhere.
+    pub fn knowledge_session_gate_search(&self) -> Result<SearchGate> {
+        let Some(session) = self.descriptor.session_id.clone() else {
+            return Ok(SearchGate { sources: None });
+        };
+        let sources = crate::encounter_service::sources_in_effect(&self.home, &session)?;
+        if let Some(bound) = &sources {
+            if !SESSION_ROUTES.iter().any(|route| bound.routes.on(route)) {
+                return Err(aikit_core::AikitError::new(
+                    "knowledge.sources_routes_off",
+                    format!(
+                        "Sources: every route is off ({}), so the agent searches nowhere; switch on Wiki, Project knowledge or Code to search.",
+                        sources_at(bound)
+                    ),
+                ));
+            }
+        }
+        Ok(SearchGate { sources })
+    }
+
+    /// After the search, before the agent sees it: the hits on a route its Sources switched off are left out, and the search says
+    /// in words which route it did not look in.
+    pub fn knowledge_session_keep_routes(gate: &SearchGate, result: &mut KnowledgeSearchResult) {
+        let Some(bound) = &gate.sources else { return };
+        let at = sources_at(bound);
+        result
+            .hits
+            .retain(|hit| bound.routes.on(route_of_address(&hit.address)));
+        for route in SESSION_ROUTES
+            .iter()
+            .filter(|route| !bound.routes.on(route))
+        {
+            result.absences.push(format!(
+                "The {} route is off ({at}): this search did not look there, and the agent reads nothing from it.",
+                crate::encounter_service::SourcesRoutes::word(route)
+            ));
+        }
+    }
+
     /// After the agent's search: the pages it found, each a hit (no links from one), kept in its session's record.
     pub fn knowledge_session_searched(&self, result: &KnowledgeSearchResult) -> Result<()> {
         let Some(session) = self.descriptor.session_id.clone() else {
@@ -2101,6 +2142,12 @@ impl Service {
         let mut depth = depth;
         if let Some(bound) = &sources {
             let at = sources_at(bound);
+            route_open(
+                bound,
+                route_of_address(address),
+                &resource,
+                "follows links from",
+            )?;
             if bound.search_first && hops.is_none() {
                 return Err(aikit_core::AikitError::new(
                     "knowledge.sources_search_first",
@@ -2127,15 +2174,43 @@ impl Service {
         ))
     }
 
-    /// After the walk: each page it reached, at the links it stands from a hit, kept in the session's record.
+    /// After the walk: the pages on a route its Sources switched off are left out of the view (the walk says so), and each page
+    /// it reached, at the links it stands from a hit, is kept in the session's record.
     pub fn knowledge_session_related(
         &self,
         gate: Option<SessionGate>,
         address: &KnowledgeAddress,
-        view: &KnowledgeRelationView,
+        view: &mut KnowledgeRelationView,
     ) -> Result<()> {
         let Some(gate) = gate else { return Ok(()) };
         let focus = address.resource_ref();
+        if let Some(bound) = &gate.sources {
+            let off: Vec<_> = SESSION_ROUTES
+                .iter()
+                .copied()
+                .filter(|route| !bound.routes.on(route))
+                .collect();
+            let kept = |resource: &ResourceRef| {
+                *resource == focus || !off.contains(&route_of_ref(resource.as_str()))
+            };
+            let before = view.nodes.len();
+            view.nodes.retain(|node| kept(&node.resource));
+            view.edges.retain(|edge| kept(&edge.from) && kept(&edge.to));
+            if view.nodes.len() < before {
+                let words: Vec<_> = off
+                    .iter()
+                    .copied()
+                    .map(crate::encounter_service::SourcesRoutes::word)
+                    .collect();
+                view.warnings.push(format!(
+                    "{} left out of this walk: the {} route{} off ({}).",
+                    before - view.nodes.len(),
+                    words.join(" and "),
+                    if words.len() == 1 { " is" } else { "s are" },
+                    sources_at(bound)
+                ));
+            }
+        }
         let mut distance: BTreeMap<String, u64> = BTreeMap::from([(focus.as_str().to_string(), 0)]);
         let mut frontier = vec![focus.as_str().to_string()];
         while !frontier.is_empty() {
@@ -5346,6 +5421,12 @@ const SESSION_USE_BYTES: u64 = 16 * 1024 * 1024;
 /// The readings whose sources a listing reads again for moved: the latest.
 const SESSION_READS_CHECKED: usize = 32;
 
+/// What the search gate found, carried to the hits after the search.
+#[derive(Debug, Clone)]
+pub struct SearchGate {
+    sources: Option<crate::encounter_service::SourcesInEffect>,
+}
+
 /// What a gate found before the agent's read or walk, carried to the record after it.
 #[derive(Debug, Clone)]
 pub struct SessionGate {
@@ -5353,6 +5434,49 @@ pub struct SessionGate {
     sources: Option<crate::encounter_service::SourcesInEffect>,
     hops: u64,
     label: Option<String>,
+}
+
+/// Sources' three routes (O-I manual §19.9 Routes), by their ids.
+const SESSION_ROUTES: [&str; 3] = ["wiki", "project", "code"];
+
+/// The route an address is read through: the wiki, the code index, or the project's sources and map.
+fn route_of_address(address: &KnowledgeAddress) -> &'static str {
+    match address {
+        KnowledgeAddress::Wiki(_) => "wiki",
+        KnowledgeAddress::Code(_) => "code",
+        KnowledgeAddress::Source(_) | KnowledgeAddress::ProjectMap(_) => "project",
+    }
+}
+
+/// The route a page of a walk stands on, by its ref: `wiki:` the wiki's, `code:` the code index's, any other the project's.
+fn route_of_ref(resource: &str) -> &'static str {
+    if resource.starts_with("wiki:") {
+        "wiki"
+    } else if resource.starts_with("code:") {
+        "code"
+    } else {
+        "project"
+    }
+}
+
+/// A read or a walk on a route the Sources in effect switched off is refused, in words.
+fn route_open(
+    bound: &crate::encounter_service::SourcesInEffect,
+    route: &str,
+    resource: &ResourceRef,
+    act: &str,
+) -> Result<()> {
+    if bound.routes.on(route) {
+        return Ok(());
+    }
+    Err(aikit_core::AikitError::new(
+        "knowledge.sources_route_off",
+        format!(
+            "The {} route is off ({}): the agent neither searches it nor {act} {resource}; switch it on in Sources to read there.",
+            crate::encounter_service::SourcesRoutes::word(route),
+            sources_at(bound)
+        ),
+    ))
 }
 
 /// Where the Sources in effect is held, in words.

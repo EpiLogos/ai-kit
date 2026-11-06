@@ -932,6 +932,27 @@ fn claude_validate(target: &dyn PackageTarget, dir: &Path) -> NativeValidation {
                 .map(|r| r["manifest"]["warnings"].clone())
                 .unwrap_or(Value::Null);
             let passed = output.status.success() && success;
+            // No report on stdout: the validator said why on its own channel (a Claude Code without `plugin validate --json
+            // --strict` refuses the flag on stderr), so its words are the summary, never an empty stdout.
+            let summary = match report {
+                Some(_) => format!("success={success} errors={errors} warnings={warnings}"),
+                None => {
+                    let stderr = String::from_utf8_lossy(&output.stderr);
+                    let said = [stderr.trim(), stdout.trim()]
+                        .into_iter()
+                        .find(|said| !said.is_empty())
+                        .map(|said| said.chars().take(600).collect::<String>())
+                        .unwrap_or_else(|| "it printed nothing on stdout or stderr".into());
+                    format!(
+                        "`{}` printed no JSON report (exit {}): {said}",
+                        cmd.display(),
+                        output
+                            .status
+                            .code()
+                            .map_or_else(|| "by signal".into(), |code| code.to_string())
+                    )
+                }
+            };
             NativeValidation {
                 status: if passed {
                     CheckStatus::Passed
@@ -940,14 +961,7 @@ fn claude_validate(target: &dyn PackageTarget, dir: &Path) -> NativeValidation {
                 },
                 command: Some(cmd.display()),
                 exit: output.status.code(),
-                summary: format!(
-                    "success={success} errors={errors} warnings={warnings}{}",
-                    if report.is_none() {
-                        format!(" stdout={}", stdout.trim())
-                    } else {
-                        String::new()
-                    }
-                ),
+                summary,
             }
         }
         Err(e) => unavailable(Some(cmd.display()), format!("could not run: {e}")),

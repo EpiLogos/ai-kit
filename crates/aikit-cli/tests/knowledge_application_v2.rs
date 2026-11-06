@@ -583,14 +583,30 @@ fn aikit_as(
     })
 }
 
-/// O-I #745 (DLW §19.9 Sources, BD round 25): Search first, Link depth and Read budget are AIKit's settings on the placement
-/// (encounter-session-settings `sources`), and AIKit's knowledge navigation honours them when the session's agent reads — it
-/// searches before it reads, follows at most Link depth links from a hit, and reads no more than its budget, each refused in words.
-/// What it read is AIKit's record of its run: each passage with its source and the revision it read, a moved one marked; Read
-/// again reads it at the new revision and records the use; Forget drops AIKit's learned use of it, and the source stays as it was.
-#[test]
-fn an_agent_reads_under_its_sources_and_its_run_reads_back_again_and_forgotten() {
-    use aikit_cli::encounter_service::EncounterService;
+/// The Sources tests' world: a project whose wiki holds a space Need with the nodes Alpha and Beta (Alpha at `alpha_revision`), and
+/// one agent session attached to a SessionSpace in an isolated AIKit home.
+struct SourcesWorld {
+    _temp: TempDir,
+    root: std::path::PathBuf,
+    project: std::path::PathBuf,
+    home: AikitHome,
+    session: ResourceRef,
+    agent: String,
+}
+
+fn sources_wiki(alpha_revision: u64) -> String {
+    serde_json::json!({"objects": [
+        {"profile":"okf-wiki/v1","object":"space","ref":"wiki:space:need","revision":1,"provenance":[],"title":"Need",
+         "parent_space_refs":[],"child_space_refs":[],"node_refs":["wiki:node:alpha","wiki:node:beta"]},
+        {"profile":"okf-wiki/v1","object":"node","ref":"wiki:node:alpha","revision":alpha_revision,"provenance":[],"type":"Concept",
+         "title":"Alpha","space_refs":["wiki:space:need"],"source_refs":[]},
+        {"profile":"okf-wiki/v1","object":"node","ref":"wiki:node:beta","revision":1,"provenance":[],"type":"Concept",
+         "title":"Beta","space_refs":["wiki:space:need"],"source_refs":[]}
+    ]})
+    .to_string()
+}
+
+fn sources_world(session: &str) -> SourcesWorld {
     use aikit_core::session_space::SessionSpaceRef;
     use aikit_core::session_space_application::{
         SessionSpaceAgentAttachmentIntent, SessionSpaceMutation,
@@ -601,18 +617,7 @@ fn an_agent_reads_under_its_sources_and_its_run_reads_back_again_and_forgotten()
     let root = temp.path().canonicalize().unwrap();
     let project = root.join("project");
     fs::create_dir_all(&project).unwrap();
-    let wiki = |alpha_revision: u64| {
-        serde_json::json!({"objects": [
-            {"profile":"okf-wiki/v1","object":"space","ref":"wiki:space:need","revision":1,"provenance":[],"title":"Need",
-             "parent_space_refs":[],"child_space_refs":[],"node_refs":["wiki:node:alpha","wiki:node:beta"]},
-            {"profile":"okf-wiki/v1","object":"node","ref":"wiki:node:alpha","revision":alpha_revision,"provenance":[],"type":"Concept",
-             "title":"Alpha","space_refs":["wiki:space:need"],"source_refs":[]},
-            {"profile":"okf-wiki/v1","object":"node","ref":"wiki:node:beta","revision":1,"provenance":[],"type":"Concept",
-             "title":"Beta","space_refs":["wiki:space:need"],"source_refs":[]}
-        ]})
-        .to_string()
-    };
-    fs::write(project.join("semantic-wiki.json"), wiki(1)).unwrap();
+    fs::write(project.join("semantic-wiki.json"), sources_wiki(1)).unwrap();
     let home = AikitHome::at(root.join("aikit-home"));
     home.ensure_layout().unwrap();
     let spaces = SessionSpaceApplicationStore::new(home.clone());
@@ -630,7 +635,7 @@ fn an_agent_reads_under_its_sources_and_its_run_reads_back_again_and_forgotten()
                 .unwrap(),
         )
         .unwrap();
-    let session = ResourceRef::parse("agent-session/sources-reader").unwrap();
+    let session = ResourceRef::parse(session).unwrap();
     spaces
         .apply(
             &spaces
@@ -648,6 +653,34 @@ fn an_agent_reads_under_its_sources_and_its_run_reads_back_again_and_forgotten()
         )
         .unwrap();
     let agent = aikit_core::SessionId::of_agent_session(&session).to_string();
+    SourcesWorld {
+        _temp: temp,
+        root,
+        project,
+        home,
+        session,
+        agent,
+    }
+}
+
+/// O-I #745 (DLW §19.9 Sources, BD round 25): Search first, Link depth and Read budget are AIKit's settings on the placement
+/// (encounter-session-settings `sources`), and AIKit's knowledge navigation honours them when the session's agent reads — it
+/// searches before it reads, follows at most Link depth links from a hit, and reads no more than its budget, each refused in words.
+/// What it read is AIKit's record of its run: each passage with its source and the revision it read, a moved one marked; Read
+/// again reads it at the new revision and records the use; Forget drops AIKit's learned use of it, and the source stays as it was.
+#[test]
+fn an_agent_reads_under_its_sources_and_its_run_reads_back_again_and_forgotten() {
+    use aikit_cli::encounter_service::EncounterService;
+
+    let world = sources_world("agent-session/sources-reader");
+    let (root, project, home, session, agent) = (
+        world.root.clone(),
+        world.project.clone(),
+        world.home.clone(),
+        world.session.clone(),
+        world.agent.clone(),
+    );
+    let wiki = sources_wiki;
     let address =
         |reference: &str| serde_json::json!({"kind": "wiki", "value": reference}).to_string();
     let agent_does = |args: &[&str]| aikit_as(&project, &root, Some(&agent), args);
@@ -695,6 +728,7 @@ fn an_agent_reads_under_its_sources_and_its_run_reads_back_again_and_forgotten()
     assert_eq!(
         written["sources"]["chain"],
         serde_json::json!({"placed": true, "search_first": true, "link_depth": 1, "read_budget": 2,
+        "routes": {"wiki": true, "project": true, "code": false},
         "set": ["sources", "link_depth", "read_budget"]})
     );
     assert_eq!(
@@ -881,4 +915,222 @@ fn an_agent_reads_under_its_sources_and_its_run_reads_back_again_and_forgotten()
         refusal(&gone).as_deref(),
         Some("knowledge.session_reading_absent")
     );
+}
+
+/// O-I #745 (DLW §19.9 Sources, BD round 27; DLW build ruling 2026-11-06): the Routes are switches AIKit keeps on the placement beside
+/// Search first, Link depth and Read budget — Wiki and Project knowledge on and Code off, as the manual's table gives them — and the
+/// agent's own chain's stand over the rack's. A route switched off is not searched or read for the agent: its pages leave the search's
+/// answer, and a read or a walk from one is refused, each in words. `knowledge relations-batch` walks under the same Search first and
+/// Link depth as `knowledge relations`, item by item.
+#[test]
+fn an_agent_reads_only_the_routes_its_sources_leave_on_and_a_relations_batch_walks_under_them() {
+    use aikit_cli::encounter_service::EncounterService;
+    use std::io::Write as _;
+
+    let world = sources_world("agent-session/routes-reader");
+    let agent_does =
+        |args: &[&str]| aikit_as(&world.project, &world.root, Some(&world.agent), args);
+    let address =
+        |reference: &str| serde_json::json!({"kind": "wiki", "value": reference}).to_string();
+    let refusal = |reply: &serde_json::Value| {
+        (reply["ok"] == false).then(|| {
+            reply["error"]["code"]
+                .as_str()
+                .unwrap_or_default()
+                .to_string()
+        })
+    };
+    let said = |reply: &serde_json::Value| {
+        reply["error"]["message"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string()
+    };
+    let write = |change: serde_json::Value| {
+        let settings =
+            EncounterService::read_session_settings(&world.home, &world.session).unwrap();
+        let revision = settings["revision"]
+            .as_str()
+            .map(|revision| aikit_core::SourceRevision::parse(revision).unwrap());
+        EncounterService::write_session_settings(
+            &world.home,
+            &world.session,
+            change,
+            revision.as_ref(),
+        )
+    };
+    let hits = |reply: &serde_json::Value| -> Vec<String> {
+        reply["data"]["hits"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|hit| hit["resource"].as_str().map(str::to_owned))
+            .collect()
+    };
+    let nodes = |reply: &serde_json::Value| -> Vec<String> {
+        reply["data"]["nodes"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|node| node["resource"].as_str().map(str::to_owned))
+            .collect()
+    };
+    let batch = |items: serde_json::Value| -> Vec<serde_json::Value> {
+        let mut child = std::process::Command::new(assert_cmd::cargo::cargo_bin("aikit"))
+            .arg("--json")
+            .arg("-C")
+            .arg(&world.project)
+            .args(["knowledge", "relations-batch"])
+            .env_clear()
+            .env("PATH", std::env::var_os("PATH").unwrap_or_default())
+            .env("HOME", world.root.join("home"))
+            .env("AIKIT_HOME", world.root.join("aikit-home"))
+            .env("AIKIT_SESSION_ID", &world.agent)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(
+                serde_json::json!({"schema": "aikit.knowledge-relations-batch/v1", "items": items})
+                    .to_string()
+                    .as_bytes(),
+            )
+            .unwrap();
+        let output = child.wait_with_output().unwrap();
+        let reply: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        reply["data"]["answers"]
+            .as_array()
+            .cloned()
+            .unwrap_or_else(|| panic!("{reply}"))
+    };
+
+    // The rack's shared reading with Wiki off, the agent's own chain unplaced: the routes as the reading states them.
+    let written =
+        write(serde_json::json!({"track": {"rack_sources": true, "rack_route_wiki": false}}))
+            .unwrap();
+    assert_eq!(
+        written["sources"]["rack"]["routes"],
+        serde_json::json!({"wiki": false, "project": true, "code": false})
+    );
+    assert_eq!(
+        written["sources"]["chain"]["routes"],
+        serde_json::json!({"wiki": true, "project": true, "code": false}),
+        "the manual's defaults"
+    );
+    let found = agent_does(&["knowledge", "search", "Alpha"]);
+    assert_eq!(found["ok"], true, "{found}");
+    assert!(
+        hits(&found).iter().all(|hit| !hit.starts_with("wiki:")),
+        "the Wiki route is not searched: {found}"
+    );
+    assert!(
+        found["data"]["absences"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .any(|line| line
+                .as_str()
+                .is_some_and(|line| line.contains("Wiki") && line.contains("off"))),
+        "the search says the Wiki route is off: {found}"
+    );
+    let read = agent_does(&["knowledge", "read", "--", &address("wiki:node:alpha")]);
+    assert_eq!(
+        refusal(&read).as_deref(),
+        Some("knowledge.sources_route_off"),
+        "{read}"
+    );
+    assert!(said(&read).contains("Wiki route is off"), "{read}");
+    let walk = agent_does(&["knowledge", "relations", "--", &address("wiki:node:alpha")]);
+    assert_eq!(
+        refusal(&walk).as_deref(),
+        Some("knowledge.sources_route_off"),
+        "{walk}"
+    );
+
+    // The agent's own chain placed, its Wiki on by default: the chain's stand over the rack's, and the Wiki answers.
+    write(serde_json::json!({"track": {"sources": true, "link_depth": 1}})).unwrap();
+    let found = agent_does(&["knowledge", "search", "Alpha"]);
+    assert!(
+        hits(&found).contains(&"wiki:node:alpha".to_string()),
+        "{found}"
+    );
+    assert!(
+        !hits(&found).contains(&"wiki:node:beta".to_string()),
+        "the search finds Alpha alone: {found}"
+    );
+    assert_eq!(
+        agent_does(&["knowledge", "read", "--", &address("wiki:node:alpha")])["ok"],
+        true
+    );
+
+    // relations-batch, item by item under Search first and Link depth: a walk from the hit stops one link out; one from a page no search
+    // found is refused in that item's own envelope, and sinks no other.
+    let answers = batch(serde_json::json!([
+        {"address": {"kind": "wiki", "value": "wiki:node:alpha"}, "depth": 2},
+        {"address": {"kind": "wiki", "value": "wiki:node:beta"}, "depth": 2}
+    ]));
+    assert_eq!(answers[0]["ok"], true, "{}", answers[0]);
+    assert!(
+        nodes(&answers[0]).contains(&"wiki:space:need".to_string()),
+        "{}",
+        answers[0]
+    );
+    assert!(
+        !nodes(&answers[0]).contains(&"wiki:node:beta".to_string()),
+        "the batch walk stops at Link depth: {}",
+        answers[0]
+    );
+    assert_eq!(
+        refusal(&answers[1]).as_deref(),
+        Some("knowledge.sources_search_first"),
+        "{}",
+        answers[1]
+    );
+    let answers =
+        batch(serde_json::json!([{"address": {"kind": "wiki", "value": "wiki:space:need"}}]));
+    assert_eq!(
+        refusal(&answers[0]).as_deref(),
+        Some("knowledge.sources_link_depth"),
+        "a page one link out walks no further: {}",
+        answers[0]
+    );
+
+    // Each switch is on or off, and only the three routes are switches.
+    let written =
+        write(serde_json::json!({"track": {"route_code": true, "route_project": false}})).unwrap();
+    assert_eq!(
+        written["sources"]["chain"]["routes"],
+        serde_json::json!({"wiki": true, "project": false, "code": true})
+    );
+    assert!(write(serde_json::json!({"track": {"route_web": true}}))
+        .unwrap_err()
+        .to_string()
+        .contains("A track has no setting route_web"));
+    assert!(write(serde_json::json!({"track": {"route_code": 1}}))
+        .unwrap_err()
+        .to_string()
+        .contains("Code is on or off"));
+
+    // The Wiki switched off on the agent's own chain: its walk from Alpha, in a batch too, is refused; every route off, no search runs.
+    write(serde_json::json!({"track": {"route_wiki": false}})).unwrap();
+    let answers =
+        batch(serde_json::json!([{"address": {"kind": "wiki", "value": "wiki:node:alpha"}}]));
+    assert_eq!(
+        refusal(&answers[0]).as_deref(),
+        Some("knowledge.sources_route_off"),
+        "{}",
+        answers[0]
+    );
+    write(serde_json::json!({"track": {"route_code": false}})).unwrap();
+    let none = agent_does(&["knowledge", "search", "Alpha"]);
+    assert_eq!(
+        refusal(&none).as_deref(),
+        Some("knowledge.sources_routes_off"),
+        "{none}"
+    );
+    assert!(said(&none).contains("every route is off"), "{none}");
 }

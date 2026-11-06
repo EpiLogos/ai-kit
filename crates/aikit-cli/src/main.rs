@@ -4152,8 +4152,11 @@ fn cmd_knowledge(cwd: &std::path::Path, c: KnowledgeCmd) -> Result<Reply> {
     let mut warnings = diagnostic_warnings(&service);
     let data = match command {
         KnowledgeSub::Search(a) => {
+            // An agent session searches only the routes its Sources leaves on (O-I manual §19.9): every route off, no search runs.
+            let gate = service.knowledge_session_gate_search()?;
             let mut result = service.knowledge_search(&a.query, a.limit)?;
             service.jev_rerank_result(&mut result, a.limit);
+            Service::knowledge_session_keep_routes(&gate, &mut result);
             warnings.extend(result.absences.clone());
             // An agent session's search is kept in its record: what it found is where its Sources' bounds count from.
             service.knowledge_session_searched(&result)?;
@@ -4232,8 +4235,9 @@ fn cmd_knowledge(cwd: &std::path::Path, c: KnowledgeCmd) -> Result<Reply> {
             let address = parse_knowledge_address(&a.address)?;
             // An agent session follows at most its Sources' Link depth from a hit.
             let (gate, depth) = service.knowledge_session_gate_relations(&address, a.depth)?;
-            let view = service.knowledge_relations(&address, depth, a.max_nodes, a.max_edges)?;
-            service.knowledge_session_related(gate, &address, &view)?;
+            let mut view =
+                service.knowledge_relations(&address, depth, a.max_nodes, a.max_edges)?;
+            service.knowledge_session_related(gate, &address, &mut view)?;
             jval!(view)
         }
         KnowledgeSub::Graph(a) => {
@@ -4553,13 +4557,17 @@ fn relations_batch_answer(
             other => other.to_string(),
         };
         let address = parse_knowledge_address(&raw)?;
-        let data = jval!(service.knowledge_relations_shared(
+        // Each item walks under its session's Sources as its single invocation does: the route, Search first and Link depth.
+        let (gate, depth) = service.knowledge_session_gate_relations(&address, item.depth)?;
+        let mut view = service.knowledge_relations_shared(
             &address,
-            item.depth,
+            depth,
             item.max_nodes,
             item.max_edges,
             Some(share),
-        )?);
+        )?;
+        service.knowledge_session_related(gate, &address, &mut view)?;
+        let data = jval!(view);
         Ok(json::success(
             &EnvelopeContext::from_descriptor(service.descriptor()),
             data,

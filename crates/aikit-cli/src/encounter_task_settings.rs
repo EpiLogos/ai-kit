@@ -492,8 +492,23 @@ fn flag(field: &str, value: &Value) -> Result<Value> {
         .ok_or_else(|| error(format!("{field} is on or off (true or false)")))
 }
 
-/// Sources' fields on a placement (O-I manual §19.9's table): placed, Search first, Link depth and Read budget.
-const SOURCES_FIELDS: &[&str] = &["sources", "search_first", "link_depth", "read_budget"];
+/// Sources' fields on a placement (O-I manual §19.9's table): placed, Search first, Link depth, Read budget, and a switch on each
+/// of its Routes — the wiki, the project's sources and map, and the code index.
+const SOURCES_FIELDS: &[&str] = &[
+    "sources",
+    "search_first",
+    "link_depth",
+    "read_budget",
+    "route_wiki",
+    "route_project",
+    "route_code",
+];
+/// The Routes, as the manual names them, each with its default (§19.9 "Wiki, Project knowledge"): `route_<id>` on the track.
+pub(crate) const SOURCES_ROUTES: [(&str, &str, bool); 3] = [
+    ("wiki", "Wiki", true),
+    ("project", "Project knowledge", true),
+    ("code", "Code", false),
+];
 /// The rack's shared reading keeps the same fields under this prefix.
 const RACK_PREFIX: &str = "rack_";
 /// Link depth: the links the agent follows from a hit, 0–4 (2); Read budget: the pages it reads in one task, 1–200 (40).
@@ -524,7 +539,34 @@ fn sources_value(field: &str, value: &Value) -> Result<Value> {
         "sources" => flag("Sources", value),
         "search_first" => flag("Search first", value),
         "link_depth" => within("Link depth", &LINK_DEPTHS),
-        _ => within("Read budget", &READ_BUDGETS),
+        "read_budget" => within("Read budget", &READ_BUDGETS),
+        route => {
+            let id = route.trim_start_matches("route_");
+            let (_, word, _) = SOURCES_ROUTES
+                .iter()
+                .find(|(each, _, _)| *each == id)
+                .ok_or_else(|| error(format!("A track has no setting {route}")))?;
+            flag(word, value)
+        }
+    }
+}
+
+/// Which routes a placement leaves on: each `route_<id>`, else its default.
+fn routes_at(track: &Map<String, Value>, prefix: &str) -> SourcesRoutes {
+    let on = |id: &str| {
+        track
+            .get(&format!("{prefix}route_{id}"))
+            .and_then(Value::as_bool)
+            .unwrap_or_else(|| {
+                SOURCES_ROUTES
+                    .iter()
+                    .any(|(each, _, default)| *each == id && *default)
+            })
+    };
+    SourcesRoutes {
+        wiki: on("wiki"),
+        project: on("project"),
+        code: on("code"),
     }
 }
 
@@ -536,6 +578,7 @@ fn sources_placement(track: &Map<String, Value>, prefix: &str) -> Value {
         "search_first": at("search_first").cloned().unwrap_or(json!(true)),
         "link_depth": at("link_depth").cloned().unwrap_or(json!(LINK_DEPTH_DEFAULT)),
         "read_budget": at("read_budget").cloned().unwrap_or(json!(READ_BUDGET_DEFAULT)),
+        "routes": routes_at(track, prefix),
         "set": SOURCES_FIELDS.iter().filter(|field| at(field).is_some()).collect::<Vec<_>>(),
     })
 }
@@ -553,6 +596,35 @@ pub(crate) struct SourcesInEffect {
     pub search_first: bool,
     pub link_depth: u64,
     pub read_budget: u64,
+    /// The routes it leaves on: a route switched off is neither searched nor read.
+    pub routes: SourcesRoutes,
+}
+
+/// Sources' Routes on one placement (O-I manual §19.9): the wiki, the project's sources and map, and the code index, each on or off.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub(crate) struct SourcesRoutes {
+    pub wiki: bool,
+    pub project: bool,
+    pub code: bool,
+}
+
+impl SourcesRoutes {
+    /// Whether the route of this id (`wiki`, `project`, `code`) is on.
+    pub fn on(&self, route: &str) -> bool {
+        match route {
+            "wiki" => self.wiki,
+            "code" => self.code,
+            _ => self.project,
+        }
+    }
+
+    /// The manual's word for a route.
+    pub fn word(route: &str) -> &'static str {
+        SOURCES_ROUTES
+            .iter()
+            .find(|(id, _, _)| *id == route)
+            .map_or("Project knowledge", |(_, word, _)| word)
+    }
 }
 
 fn placed(track: &Map<String, Value>, prefix: &str) -> bool {
@@ -575,6 +647,7 @@ fn in_effect(record: &SettingsRecord, prefix: &str) -> SourcesInEffect {
         read_budget: at("read_budget")
             .and_then(Value::as_u64)
             .unwrap_or(READ_BUDGET_DEFAULT),
+        routes: routes_at(&record.track, prefix),
     }
 }
 
@@ -792,7 +865,7 @@ fn validate_track(changes: &Map<String, Value>) -> Result<Map<String, Value>> {
             }
             (other, _) => {
                 return Err(error(format!(
-                    "A track has no setting {other}; it takes name, telemetry, solo, wait and no_answer, and for Sources sources, search_first, link_depth and read_budget (each with rack_ before it for the rack's shared reading)"
+                    "A track has no setting {other}; it takes name, telemetry, solo, wait and no_answer, and for Sources sources, search_first, link_depth, read_budget, route_wiki, route_project and route_code (each with rack_ before it for the rack's shared reading)"
                 )))
             }
         };
