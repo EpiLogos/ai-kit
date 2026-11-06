@@ -4155,6 +4155,8 @@ fn cmd_knowledge(cwd: &std::path::Path, c: KnowledgeCmd) -> Result<Reply> {
             let mut result = service.knowledge_search(&a.query, a.limit)?;
             service.jev_rerank_result(&mut result, a.limit);
             warnings.extend(result.absences.clone());
+            // An agent session's search is kept in its record: what it found is where its Sources' bounds count from.
+            service.knowledge_session_searched(&result)?;
             jval!(result)
         }
         KnowledgeSub::Resolve(a) => {
@@ -4172,7 +4174,9 @@ fn cmd_knowledge(cwd: &std::path::Path, c: KnowledgeCmd) -> Result<Reply> {
         }
         KnowledgeSub::Read(a) => {
             let address = parse_knowledge_address(&a.address)?;
-            match &a.span {
+            // An agent session reads under its Sources (O-I manual §19.9): refused in words past them, kept in its record after.
+            let gate = service.knowledge_session_gate_read(&address)?;
+            let reply = match &a.span {
                 Some(raw) => {
                     let (start, end) = parse_span(raw)?;
                     jval!(service.knowledge_read_span(
@@ -4185,7 +4189,9 @@ fn cmd_knowledge(cwd: &std::path::Path, c: KnowledgeCmd) -> Result<Reply> {
                     )?)
                 }
                 None => jval!(service.knowledge_read_document(&address)?),
-            }
+            };
+            service.knowledge_session_read(gate, &address, &reply)?;
+            reply
         }
         KnowledgeSub::Coverage(a) => match &a.command {
             KnowledgeCoverageSub::Show { sources } => {
@@ -4224,7 +4230,11 @@ fn cmd_knowledge(cwd: &std::path::Path, c: KnowledgeCmd) -> Result<Reply> {
         },
         KnowledgeSub::Relations(a) => {
             let address = parse_knowledge_address(&a.address)?;
-            jval!(service.knowledge_relations(&address, a.depth, a.max_nodes, a.max_edges)?)
+            // An agent session follows at most its Sources' Link depth from a hit.
+            let (gate, depth) = service.knowledge_session_gate_relations(&address, a.depth)?;
+            let view = service.knowledge_relations(&address, depth, a.max_nodes, a.max_edges)?;
+            service.knowledge_session_related(gate, &address, &view)?;
+            jval!(view)
         }
         KnowledgeSub::Graph(a) => {
             jval!(service.knowledge_graph(&a.query, a.max_nodes, a.max_edges)?)
@@ -4258,6 +4268,13 @@ fn cmd_knowledge(cwd: &std::path::Path, c: KnowledgeCmd) -> Result<Reply> {
         KnowledgeSub::History(a) => {
             let resource = a.resource.as_deref().map(ResourceRef::parse).transpose()?;
             jval!(service.knowledge_history(resource.as_ref())?)
+        }
+        KnowledgeSub::Reads(a) => {
+            jval!(service.knowledge_session_reads(&ResourceRef::parse(&a.agent_session)?)?)
+        }
+        KnowledgeSub::ReadAgain(a) => {
+            jval!(service
+                .knowledge_session_read_again(&ResourceRef::parse(&a.agent_session)?, &a.reading)?)
         }
         KnowledgeSub::Status(_) => {
             let status = service.knowledge_status()?;
@@ -4293,6 +4310,12 @@ fn cmd_knowledge(cwd: &std::path::Path, c: KnowledgeCmd) -> Result<Reply> {
             KnowledgeReflectionSub::Laws => jval!(service.reflection_laws()?),
         },
         KnowledgeSub::Forget(KnowledgeForgetCmd {
+            command: KnowledgeForgetSub::Reading(a),
+        }) => {
+            jval!(service
+                .knowledge_session_forget(&ResourceRef::parse(&a.agent_session)?, &a.reading)?)
+        }
+        KnowledgeSub::Forget(KnowledgeForgetCmd {
             command: KnowledgeForgetSub::Here(a),
         }) => {
             let scope = service.knowledge_forget_here(ResourceRef::parse(&a.resource)?)?;
@@ -4314,6 +4337,7 @@ fn cmd_knowledge(cwd: &std::path::Path, c: KnowledgeCmd) -> Result<Reply> {
                 }
                 KnowledgeForgetSub::All(_) => ForgetScope::All,
                 KnowledgeForgetSub::Here(_) => unreachable!("forget here is answered above"),
+                KnowledgeForgetSub::Reading(_) => unreachable!("forget reading is answered above"),
             };
             service.knowledge_forget(scope.clone())?;
             jval!({

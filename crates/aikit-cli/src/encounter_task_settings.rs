@@ -492,6 +492,175 @@ fn flag(field: &str, value: &Value) -> Result<Value> {
         .ok_or_else(|| error(format!("{field} is on or off (true or false)")))
 }
 
+/// Sources' fields on a placement (O-I manual §19.9's table): placed, Search first, Link depth and Read budget.
+const SOURCES_FIELDS: &[&str] = &["sources", "search_first", "link_depth", "read_budget"];
+/// The rack's shared reading keeps the same fields under this prefix.
+const RACK_PREFIX: &str = "rack_";
+/// Link depth: the links the agent follows from a hit, 0–4 (2); Read budget: the pages it reads in one task, 1–200 (40).
+const LINK_DEPTHS: std::ops::RangeInclusive<u64> = 0..=4;
+const READ_BUDGETS: std::ops::RangeInclusive<u64> = 1..=200;
+const LINK_DEPTH_DEFAULT: u64 = 2;
+const READ_BUDGET_DEFAULT: u64 = 40;
+
+fn sources_key(key: &str, field: &str) -> bool {
+    key == field || key.strip_prefix(RACK_PREFIX) == Some(field)
+}
+
+fn sources_value(field: &str, value: &Value) -> Result<Value> {
+    let within = |what: &str, range: &std::ops::RangeInclusive<u64>| {
+        value
+            .as_u64()
+            .filter(|n| range.contains(n))
+            .map(|n| json!(n))
+            .ok_or_else(|| {
+                error(format!(
+                    "{what} is a whole number from {} to {}",
+                    range.start(),
+                    range.end()
+                ))
+            })
+    };
+    match field {
+        "sources" => flag("Sources", value),
+        "search_first" => flag("Search first", value),
+        "link_depth" => within("Link depth", &LINK_DEPTHS),
+        _ => within("Read budget", &READ_BUDGETS),
+    }
+}
+
+/// One placement of Sources as it stands, defaults stated: whether it is placed, and its Search first, Link depth and Read budget.
+fn sources_placement(track: &Map<String, Value>, prefix: &str) -> Value {
+    let at = |field: &str| track.get(&format!("{prefix}{field}"));
+    json!({
+        "placed": at("sources").cloned().unwrap_or(json!(false)),
+        "search_first": at("search_first").cloned().unwrap_or(json!(true)),
+        "link_depth": at("link_depth").cloned().unwrap_or(json!(LINK_DEPTH_DEFAULT)),
+        "read_budget": at("read_budget").cloned().unwrap_or(json!(READ_BUDGET_DEFAULT)),
+        "set": SOURCES_FIELDS.iter().filter(|field| at(field).is_some()).collect::<Vec<_>>(),
+    })
+}
+
+/// The Sources an agent session's own process reads under (O-I manual §19.9), as AIKit's knowledge navigation honours them: the
+/// session's own chain's where it is placed, else the shared reading ahead of its Agent rack — on its own record (a lone session's
+/// rack), or on the record of a session it shares a SessionSpace with (the rack's lead). Placed nowhere, the navigation is unbounded.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub(crate) struct SourcesInEffect {
+    /// `chain` (the agent's own) or `rack` (the shared reading).
+    pub placement: &'static str,
+    /// The session whose settings hold it.
+    pub held_by: ResourceRef,
+    pub revision: String,
+    pub search_first: bool,
+    pub link_depth: u64,
+    pub read_budget: u64,
+}
+
+fn placed(track: &Map<String, Value>, prefix: &str) -> bool {
+    track
+        .get(&format!("{prefix}sources"))
+        .and_then(Value::as_bool)
+        == Some(true)
+}
+
+fn in_effect(record: &SettingsRecord, prefix: &str) -> SourcesInEffect {
+    let at = |field: &str| record.track.get(&format!("{prefix}{field}"));
+    SourcesInEffect {
+        placement: if prefix.is_empty() { "chain" } else { "rack" },
+        held_by: record.agent_session.clone(),
+        revision: record.revision.as_str().to_string(),
+        search_first: at("search_first").and_then(Value::as_bool).unwrap_or(true),
+        link_depth: at("link_depth")
+            .and_then(Value::as_u64)
+            .unwrap_or(LINK_DEPTH_DEFAULT),
+        read_budget: at("read_budget")
+            .and_then(Value::as_u64)
+            .unwrap_or(READ_BUDGET_DEFAULT),
+    }
+}
+
+/// The session whose process runs as `session_id` (`AIKIT_SESSION_ID`, `SessionId::of_agent_session`): its settings file is named by
+/// the same digest of its ref (`path`), so it is found by that name and checked against its own ref, never guessed.
+fn record_of_process(
+    home: &AikitHome,
+    session_id: &aikit_core::SessionId,
+) -> Result<Option<SettingsRecord>> {
+    let Some(digest) = session_id.as_str().strip_prefix("ses_") else {
+        return Ok(None);
+    };
+    let directory = home.state().join("encounter-tasks").join("settings");
+    let entries = match fs::read_dir(&directory) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(error(e)),
+        Ok(entries) => entries,
+    };
+    for entry in entries {
+        let name = entry.map_err(error)?.file_name();
+        let Some(name) = name.to_str() else { continue };
+        if !(name.starts_with(digest) && name.ends_with(".json")) {
+            continue;
+        }
+        let Some(hex) = name.strip_suffix(".json") else {
+            continue;
+        };
+        let Ok(body) = fs::read(directory.join(name)) else {
+            continue;
+        };
+        let Ok(record) = serde_json::from_slice::<SettingsRecord>(&body) else {
+            continue;
+        };
+        if record.schema == RECORD_SCHEMA
+            && blake3::hash(record.agent_session.as_str().as_bytes())
+                .to_hex()
+                .as_str()
+                == hex
+            && aikit_core::SessionId::of_agent_session(&record.agent_session) == *session_id
+        {
+            return Ok(Some(record));
+        }
+    }
+    Ok(None)
+}
+
+/// The Sources in effect for the process that runs as `session_id`, or none where Sources is placed on neither of its placements.
+pub(crate) fn sources_in_effect(
+    home: &AikitHome,
+    session_id: &aikit_core::SessionId,
+) -> Result<Option<SourcesInEffect>> {
+    let Some(own) = record_of_process(home, session_id)? else {
+        return Ok(None);
+    };
+    if placed(&own.track, "") {
+        return Ok(Some(in_effect(&own, "")));
+    }
+    if placed(&own.track, RACK_PREFIX) {
+        return Ok(Some(in_effect(&own, RACK_PREFIX)));
+    }
+    // The rack's lead holds the shared reading for every session of its SessionSpace: the newest placement among them stands.
+    let mut rack: Option<SourcesInEffect> = None;
+    for space in SessionSpaceApplicationStore::new(home.clone()).list()? {
+        if !space.agent_sessions.contains_key(&own.agent_session) {
+            continue;
+        }
+        for other in space
+            .agent_sessions
+            .keys()
+            .filter(|other| **other != own.agent_session)
+        {
+            let Ok(Some(record)) = read_record(home, other) else {
+                continue;
+            };
+            if placed(&record.track, RACK_PREFIX)
+                && rack
+                    .as_ref()
+                    .is_none_or(|held| held.revision.as_str() < record.revision.as_str())
+            {
+                rack = Some(in_effect(&record, RACK_PREFIX));
+            }
+        }
+    }
+    Ok(rack)
+}
+
 /// The task's Success conditions: a list of the person's own words, each
 /// distinct, at most 32.
 fn success_conditions(value: &Value) -> Result<Value> {
@@ -616,9 +785,14 @@ fn validate_track(changes: &Map<String, Value>) -> Result<Map<String, Value>> {
                     error("Wait is a whole number of seconds from 900 (15 min) to 86400 (24 h)")
                 })?,
             ("no_answer", value) => one_of("On no answer", value, NO_ANSWERS)?,
+            // Sources (O-I manual §19.9), on the placement it stands at: `sources` the session's own agent's chain, `rack_sources`
+            // the shared reading ahead of the session's Agent rack. Each is placed, and its bounds are kept beside it.
+            (key, value) if SOURCES_FIELDS.iter().any(|field| sources_key(key, field)) => {
+                sources_value(key.trim_start_matches(RACK_PREFIX), value)?
+            }
             (other, _) => {
                 return Err(error(format!(
-                    "A track has no setting {other}; it takes name, telemetry, solo, wait and no_answer"
+                    "A track has no setting {other}; it takes name, telemetry, solo, wait and no_answer, and for Sources sources, search_first, link_depth and read_budget (each with rack_ before it for the rack's shared reading)"
                 )))
             }
         };
@@ -868,6 +1042,9 @@ fn reading(
         "agent_session": session.as_str(),
         "revision": record.map(|r| r.revision.as_str()),
         "track": track,
+        // Sources (O-I manual §19.9) on each placement this session holds: its own agent's chain, and the rack's shared reading
+        // ahead of its Agent rack. AIKit's knowledge navigation honours a placed one when the session's agent reads.
+        "sources": {"chain": sources_placement(&track_set, ""), "rack": sources_placement(&track_set, RACK_PREFIX)},
         "task": task,
         "previous_task": previous,
         "standing": "The person's settings for this session and its bound task: intent the owners of launch, model and delivery read. Colour null takes the session's colour; an empty envelope inherits the session's value (Tool calls the session's Scope); retired names what stored settings held in retired words and what took its place; a null loop cap sets no cap; Repeat's levels stay empty until chosen, and its variable, levels, repeats and stop when do not change while its takes run (a change starts a new set once they end); the source is the constellation the task was made of until another is set, and null when it was made of none; success holds the Success conditions the person typed for the task, in their words, and does not change while its takes run; compare is how its takes are drawn side by side (none, a second take, or every take of the Repeat), and changes while they run. A bound task's take_run is the run a Repeat's takes share in Actuation's words — the task and the session's own agent as an agent-jsonl body — or why there is none.",

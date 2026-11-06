@@ -2000,6 +2000,301 @@ impl Service {
         Ok(scope)
     }
 
+    // ---- Sources (O-I manual §19.9): an agent session's knowledge use, and the bounds it reads under ----
+
+    /// Before the agent's `knowledge read`: the Sources its session reads under, honoured — the Read budget, Search first and Link
+    /// depth — and where the page stands from a hit. `None` when this process runs as no agent session (`AIKIT_SESSION_ID`).
+    pub fn knowledge_session_gate_read(
+        &self,
+        address: &KnowledgeAddress,
+    ) -> Result<Option<SessionGate>> {
+        let Some(session) = self.descriptor.session_id.clone() else {
+            return Ok(None);
+        };
+        let walk = SessionWalk::of(&session_use_lines(&self.home, &session)?);
+        let sources = crate::encounter_service::sources_in_effect(&self.home, &session)?;
+        let resource = address.resource_ref();
+        let hops = walk.hops.get(resource.as_str()).copied();
+        if let Some(bound) = &sources {
+            let at = sources_at(bound);
+            if walk.reads >= bound.read_budget {
+                return Err(aikit_core::AikitError::new(
+                    "knowledge.sources_read_budget",
+                    format!("Read budget: this session's agent has read {} of its {} pages in this task ({at}); it reads no more.", walk.reads, bound.read_budget),
+                ));
+            }
+            if bound.search_first && hops.is_none() {
+                return Err(aikit_core::AikitError::new(
+                    "knowledge.sources_search_first",
+                    format!("Search first is on ({at}): search before reading {resource} (`aikit knowledge search`); a page a search found, or a link followed from one, reads."),
+                ));
+            }
+            if let Some(hops) = hops.filter(|hops| *hops > bound.link_depth) {
+                return Err(aikit_core::AikitError::new(
+                    "knowledge.sources_link_depth",
+                    format!("Link depth {} ({at}): {resource} stands {hops} links from a hit; the agent follows no further.", bound.link_depth),
+                ));
+            }
+        }
+        Ok(Some(SessionGate {
+            label: walk.labels.get(resource.as_str()).cloned(),
+            session,
+            sources,
+            hops: hops.unwrap_or(0),
+        }))
+    }
+
+    /// After the agent's read: the page, its source and the revision it read (the read's own reply), kept in its session's record.
+    pub fn knowledge_session_read(
+        &self,
+        gate: Option<SessionGate>,
+        address: &KnowledgeAddress,
+        reply: &serde_json::Value,
+    ) -> Result<()> {
+        let Some(gate) = gate else { return Ok(()) };
+        append_session_use(
+            &self.home,
+            &gate.session,
+            read_line(
+                "read",
+                address,
+                reply,
+                gate.hops,
+                gate.label.as_deref(),
+                gate.sources.as_ref(),
+                None,
+            ),
+        )
+    }
+
+    /// After the agent's search: the pages it found, each a hit (no links from one), kept in its session's record.
+    pub fn knowledge_session_searched(&self, result: &KnowledgeSearchResult) -> Result<()> {
+        let Some(session) = self.descriptor.session_id.clone() else {
+            return Ok(());
+        };
+        let reached: Vec<_> = result
+            .hits
+            .iter()
+            .map(|hit| serde_json::json!({"resource": hit.resource.as_str(), "label": hit.label, "hops": 0}))
+            .collect();
+        append_session_use(
+            &self.home,
+            &session,
+            serde_json::json!({"op": "search", "query": result.query, "reached": reached}),
+        )
+    }
+
+    /// Before the agent's `knowledge relations`: the links Sources lets it follow from this page (Link depth less the links it stands
+    /// from a hit), refused where none is left, and under Search first from a page no search found. Answers the depth to walk.
+    pub fn knowledge_session_gate_relations(
+        &self,
+        address: &KnowledgeAddress,
+        depth: u8,
+    ) -> Result<(Option<SessionGate>, u8)> {
+        let Some(session) = self.descriptor.session_id.clone() else {
+            return Ok((None, depth));
+        };
+        let walk = SessionWalk::of(&session_use_lines(&self.home, &session)?);
+        let sources = crate::encounter_service::sources_in_effect(&self.home, &session)?;
+        let resource = address.resource_ref();
+        let hops = walk.hops.get(resource.as_str()).copied();
+        let mut depth = depth;
+        if let Some(bound) = &sources {
+            let at = sources_at(bound);
+            if bound.search_first && hops.is_none() {
+                return Err(aikit_core::AikitError::new(
+                    "knowledge.sources_search_first",
+                    format!("Search first is on ({at}): search before following links from {resource} (`aikit knowledge search`)."),
+                ));
+            }
+            let from = hops.unwrap_or(0);
+            if from >= bound.link_depth {
+                return Err(aikit_core::AikitError::new(
+                    "knowledge.sources_link_depth",
+                    format!("Link depth {} ({at}): {resource} stands {from} links from a hit; the agent follows no further.", bound.link_depth),
+                ));
+            }
+            depth = depth.min(u8::try_from(bound.link_depth - from).unwrap_or(u8::MAX));
+        }
+        Ok((
+            Some(SessionGate {
+                label: walk.labels.get(resource.as_str()).cloned(),
+                session,
+                sources,
+                hops: hops.unwrap_or(0),
+            }),
+            depth,
+        ))
+    }
+
+    /// After the walk: each page it reached, at the links it stands from a hit, kept in the session's record.
+    pub fn knowledge_session_related(
+        &self,
+        gate: Option<SessionGate>,
+        address: &KnowledgeAddress,
+        view: &KnowledgeRelationView,
+    ) -> Result<()> {
+        let Some(gate) = gate else { return Ok(()) };
+        let focus = address.resource_ref();
+        let mut distance: BTreeMap<String, u64> = BTreeMap::from([(focus.as_str().to_string(), 0)]);
+        let mut frontier = vec![focus.as_str().to_string()];
+        while !frontier.is_empty() {
+            let mut next = Vec::new();
+            for at in &frontier {
+                let here = distance[at];
+                for edge in &view.edges {
+                    for (from, to) in [(&edge.from, &edge.to), (&edge.to, &edge.from)] {
+                        if from.as_str() == at && !distance.contains_key(to.as_str()) {
+                            distance.insert(to.as_str().to_string(), here + 1);
+                            next.push(to.as_str().to_string());
+                        }
+                    }
+                }
+            }
+            frontier = next;
+        }
+        let reached: Vec<_> = view
+            .nodes
+            .iter()
+            .filter(|node| node.resource != focus)
+            .filter_map(|node| {
+                distance.get(node.resource.as_str()).map(|steps| {
+                    serde_json::json!({"resource": node.resource.as_str(), "label": node.label, "hops": gate.hops + steps})
+                })
+            })
+            .collect();
+        append_session_use(
+            &self.home,
+            &gate.session,
+            serde_json::json!({"op": "relations", "from": focus.as_str(), "hops": gate.hops, "reached": reached}),
+        )
+    }
+
+    /// Sources' Read (O-I manual §19.9): what the agent of `agent_session` read in its run — each passage with its source and the
+    /// revision it read, and whether its source moved since (its revision now, read again) — with the Sources its reads were bounded
+    /// by. A reading read again stands at its new revision; a forgotten one is gone. Records nothing.
+    pub fn knowledge_session_reads(
+        &self,
+        agent_session: &ResourceRef,
+    ) -> Result<serde_json::Value> {
+        let session = aikit_core::SessionId::of_agent_session(agent_session);
+        let lines = session_use_lines(&self.home, &session)?;
+        let listed = listed_readings(&lines);
+        let reads = SessionWalk::of(&lines).reads;
+        let mut current: BTreeMap<String, std::result::Result<Option<String>, String>> =
+            BTreeMap::new();
+        for line in listed.iter().rev().take(SESSION_READS_CHECKED) {
+            let Some(address) = line
+                .get("address")
+                .cloned()
+                .and_then(|a| serde_json::from_value::<KnowledgeAddress>(a).ok())
+            else {
+                continue;
+            };
+            let key = address.resource_ref().as_str().to_string();
+            if current.contains_key(&key) {
+                continue;
+            }
+            let now = self
+                .with_knowledge(|_, application| application.read(&address))
+                .map(|reading| reading.revision)
+                .map_err(|error| error.to_string());
+            current.insert(key, now);
+        }
+        let rows: Vec<_> = listed
+            .iter()
+            .map(|line| {
+                let mut row = line.clone();
+                let resource = line
+                    .get("resource")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_default();
+                let read = line.get("revision").and_then(serde_json::Value::as_str);
+                match current.get(resource) {
+                    Some(Ok(now)) => {
+                        row["current_revision"] = serde_json::json!(now);
+                        row["moved"] = serde_json::json!(
+                            matches!((read, now.as_deref()), (Some(read), Some(now)) if read != now)
+                        );
+                    }
+                    Some(Err(why)) => row["unread"] = serde_json::json!(why),
+                    None => {}
+                }
+                row
+            })
+            .collect();
+        let sources = crate::encounter_service::sources_in_effect(&self.home, &session)?;
+        Ok(serde_json::json!({
+            "schema": SESSION_READS_SCHEMA,
+            "agent_session": agent_session.as_str(),
+            "sources": sources,
+            "reads": reads,
+            "readings": rows,
+            "standing": "What this session's agent read in its run, recorded by AIKit as it read (each passage's source, the revision it read, the links it stood from a hit). moved: its source's revision now differs, read again just now (the last 32 sources); unread: it could not be read now. sources: the Sources its reads are bounded by (encounter-session-settings), null where Sources is placed on neither of its placements.",
+        }))
+    }
+
+    /// Sources' Read again: the reading read at its source's current revision, and the use recorded — the reading stands at the new
+    /// revision in the session's record, and AIKit's learned use takes the route (`knowledge route`).
+    pub fn knowledge_session_read_again(
+        &mut self,
+        agent_session: &ResourceRef,
+        reading: &str,
+    ) -> Result<serde_json::Value> {
+        let session = aikit_core::SessionId::of_agent_session(agent_session);
+        let line = listed_reading(&session_use_lines(&self.home, &session)?, reading)?;
+        let address: KnowledgeAddress =
+            serde_json::from_value(line["address"].clone()).map_err(|error| {
+                aikit_core::AikitError::new(
+                    "knowledge.session_reading_unreadable",
+                    format!("{reading} names no address AIKit can read: {error}"),
+                )
+            })?;
+        let fresh = self.knowledge_read(&address)?;
+        let reply = serde_json::to_value(&fresh).map_err(|error| {
+            aikit_core::AikitError::new("knowledge.session_reading_unreadable", error.to_string())
+        })?;
+        let hops = line
+            .get("hops")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0);
+        let again = read_line(
+            "read-again",
+            &address,
+            &reply,
+            hops,
+            line.get("label").and_then(serde_json::Value::as_str),
+            None,
+            Some(reading),
+        );
+        append_session_use(&self.home, &session, again.clone())?;
+        let route = self.knowledge_route(None, std::slice::from_ref(&address))?;
+        Ok(serde_json::json!({"reading": again, "route": route}))
+    }
+
+    /// Sources' Forget: AIKit's learned use of the reading's page in this world dropped (`knowledge forget here`), so the route no
+    /// longer ranks it from memory, and the reading dropped from the session's record. The source is untouched.
+    pub fn knowledge_session_forget(
+        &mut self,
+        agent_session: &ResourceRef,
+        reading: &str,
+    ) -> Result<serde_json::Value> {
+        let session = aikit_core::SessionId::of_agent_session(agent_session);
+        let line = listed_reading(&session_use_lines(&self.home, &session)?, reading)?;
+        let resource = ResourceRef::parse(line["resource"].as_str().unwrap_or_default())?;
+        let scope = self.knowledge_forget_here(resource)?;
+        append_session_use(
+            &self.home,
+            &session,
+            serde_json::json!({"op": "forget", "reading": reading}),
+        )?;
+        Ok(serde_json::json!({
+            "forgot": scope,
+            "reading": reading,
+            "preserved": ["the source", "canonical-resource-identity", "provider-truth", "knowledge-operation-history", "other-worlds"],
+        }))
+    }
+
     fn materialize_knowledge_runtime(
         &self,
         need: KnowledgeNeed,
@@ -5040,6 +5335,243 @@ pub(super) fn now_ms() -> u64 {
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_millis().min(u64::MAX as u128) as u64)
         .unwrap_or_default()
+}
+
+/// `aikit knowledge reads`: one agent session's readings (O-I manual §19.9 Sources' Read).
+pub const SESSION_READS_SCHEMA: &str = "aikit.knowledge-session-reads/v1";
+/// Each line of a session's record of knowledge use.
+const SESSION_USE_SCHEMA: &str = "aikit.knowledge-session-use/v1";
+const SESSION_USE_FILE: &str = "knowledge-use.jsonl";
+const SESSION_USE_BYTES: u64 = 16 * 1024 * 1024;
+/// The readings whose sources a listing reads again for moved: the latest.
+const SESSION_READS_CHECKED: usize = 32;
+
+/// What a gate found before the agent's read or walk, carried to the record after it.
+#[derive(Debug, Clone)]
+pub struct SessionGate {
+    session: aikit_core::SessionId,
+    sources: Option<crate::encounter_service::SourcesInEffect>,
+    hops: u64,
+    label: Option<String>,
+}
+
+/// Where the Sources in effect is held, in words.
+fn sources_at(bound: &crate::encounter_service::SourcesInEffect) -> String {
+    let place = if bound.placement == "chain" {
+        "the agent's own Sources"
+    } else {
+        "the rack's shared Sources"
+    };
+    format!("{place}, held by {} at {}", bound.held_by, bound.revision)
+}
+
+/// A session's record of knowledge use, oldest first: its searches, the links it followed and the pages it read.
+fn session_use_lines(
+    home: &aikit_store::AikitHome,
+    session: &aikit_core::SessionId,
+) -> Result<Vec<serde_json::Value>> {
+    let path = home.session_dir(session).join(SESSION_USE_FILE);
+    let unreadable = |error: String| {
+        aikit_core::AikitError::new(
+            "knowledge.session_use_unreadable",
+            format!("{}: {error}", path.display()),
+        )
+    };
+    match fs::metadata(&path) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(unreadable(error.to_string())),
+        Ok(meta) if meta.len() > SESSION_USE_BYTES => {
+            return Err(unreadable(format!(
+                "the record is over {SESSION_USE_BYTES} bytes"
+            )))
+        }
+        Ok(_) => {}
+    }
+    let body = fs::read_to_string(&path).map_err(|error| unreadable(error.to_string()))?;
+    Ok(body
+        .lines()
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .filter(|line| {
+            line.get("schema").and_then(serde_json::Value::as_str) == Some(SESSION_USE_SCHEMA)
+        })
+        .collect())
+}
+
+/// One line appended to the session's record, stamped with its id and time.
+fn append_session_use(
+    home: &aikit_store::AikitHome,
+    session: &aikit_core::SessionId,
+    mut line: serde_json::Value,
+) -> Result<()> {
+    use std::io::Write as _;
+    let directory = home.session_dir(session);
+    let unkept = |error: std::io::Error| {
+        aikit_core::AikitError::new(
+            "knowledge.session_use_unkept",
+            format!("{}: {error}", directory.display()),
+        )
+    };
+    fs::create_dir_all(&directory).map_err(unkept)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&directory, fs::Permissions::from_mode(0o700)).map_err(unkept)?;
+    }
+    line["schema"] = serde_json::json!(SESSION_USE_SCHEMA);
+    if line.get("id").is_none() {
+        line["id"] = serde_json::json!(format!("use_{}", ulid::Ulid::generate()));
+    }
+    line["at_unix_ms"] = serde_json::json!(now_ms());
+    let mut file = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(directory.join(SESSION_USE_FILE))
+        .map_err(unkept)?;
+    file.write_all(format!("{line}\n").as_bytes())
+        .map_err(unkept)
+}
+
+/// A read's line: the page, its source and the revision it read (from the read's own reply), the links it stands from a hit, and the
+/// Sources it was bounded by.
+fn read_line(
+    op: &str,
+    address: &KnowledgeAddress,
+    reply: &serde_json::Value,
+    hops: u64,
+    label: Option<&str>,
+    sources: Option<&crate::encounter_service::SourcesInEffect>,
+    again_of: Option<&str>,
+) -> serde_json::Value {
+    let mut line = serde_json::json!({
+        "op": op,
+        "id": format!("use_{}", ulid::Ulid::generate()),
+        "address": address,
+        "resource": address.resource_ref().as_str(),
+        "revision": reply.get("revision"),
+        "provider": reply.get("provider"),
+        "hops": hops,
+    });
+    if let Some(label) = label {
+        line["label"] = serde_json::json!(label);
+    }
+    if let Some(bound) = sources {
+        line["sources"] = serde_json::json!(bound.placement);
+    }
+    if let Some(of) = again_of {
+        line["again_of"] = serde_json::json!(of);
+    }
+    line
+}
+
+/// The readings a session's record lists now: each read, unless read again since (the newer stands) or forgotten.
+fn listed_readings(lines: &[serde_json::Value]) -> Vec<serde_json::Value> {
+    let field = |line: &serde_json::Value, key: &str| {
+        line.get(key)
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned)
+    };
+    let forgotten: BTreeSet<String> = lines
+        .iter()
+        .filter(|line| field(line, "op").as_deref() == Some("forget"))
+        .filter_map(|line| field(line, "reading"))
+        .collect();
+    let superseded: BTreeSet<String> = lines
+        .iter()
+        .filter_map(|line| field(line, "again_of"))
+        .collect();
+    lines
+        .iter()
+        .filter(|line| matches!(field(line, "op").as_deref(), Some("read" | "read-again")))
+        .filter(|line| {
+            field(line, "id")
+                .is_some_and(|id| !forgotten.contains(&id) && !superseded.contains(&id))
+        })
+        .cloned()
+        .collect()
+}
+
+fn listed_reading(lines: &[serde_json::Value], reading: &str) -> Result<serde_json::Value> {
+    listed_readings(lines)
+        .into_iter()
+        .find(|line| line.get("id").and_then(serde_json::Value::as_str) == Some(reading))
+        .ok_or_else(|| {
+            aikit_core::AikitError::new(
+                "knowledge.session_reading_absent",
+                format!("This session's record lists no reading {reading}: it was never read, read again since, or forgotten."),
+            )
+        })
+}
+
+/// Where each page stands from a hit (a search's find is 0, a link followed from one adds one, a page read without a search is its
+/// own hit), its label where a search or a walk named it, and how many pages were read.
+struct SessionWalk {
+    hops: BTreeMap<String, u64>,
+    labels: BTreeMap<String, String>,
+    reads: u64,
+}
+
+impl SessionWalk {
+    fn of(lines: &[serde_json::Value]) -> Self {
+        let mut walk = Self {
+            hops: BTreeMap::new(),
+            labels: BTreeMap::new(),
+            reads: 0,
+        };
+        let reach = |walk: &mut Self, resource: &str, hops: u64, label: Option<&str>| {
+            let at = walk.hops.entry(resource.to_string()).or_insert(hops);
+            *at = (*at).min(hops);
+            if let Some(label) = label.filter(|label| !label.is_empty()) {
+                walk.labels
+                    .entry(resource.to_string())
+                    .or_insert_with(|| label.to_string());
+            }
+        };
+        for line in lines {
+            match line.get("op").and_then(serde_json::Value::as_str) {
+                Some("search" | "relations") => {
+                    for reached in line
+                        .get("reached")
+                        .and_then(serde_json::Value::as_array)
+                        .into_iter()
+                        .flatten()
+                    {
+                        if let Some(resource) =
+                            reached.get("resource").and_then(serde_json::Value::as_str)
+                        {
+                            let hops = reached
+                                .get("hops")
+                                .and_then(serde_json::Value::as_u64)
+                                .unwrap_or(0);
+                            reach(
+                                &mut walk,
+                                resource,
+                                hops,
+                                reached.get("label").and_then(serde_json::Value::as_str),
+                            );
+                        }
+                    }
+                }
+                Some("read") => {
+                    walk.reads += 1;
+                    if let Some(resource) = line.get("resource").and_then(serde_json::Value::as_str)
+                    {
+                        let hops = line
+                            .get("hops")
+                            .and_then(serde_json::Value::as_u64)
+                            .unwrap_or(0);
+                        reach(
+                            &mut walk,
+                            resource,
+                            hops,
+                            line.get("label").and_then(serde_json::Value::as_str),
+                        );
+                    }
+                }
+                _ => {}
+            }
+        }
+        walk
+    }
 }
 
 fn exact_knowledge_hit(hit: &aikit_core::KnowledgeSearchHit, subjects: &[&str]) -> bool {

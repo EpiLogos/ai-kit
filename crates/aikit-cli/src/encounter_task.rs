@@ -30,6 +30,7 @@ mod prepared_run;
 #[path = "encounter_task_settings.rs"]
 mod settings;
 use material::{MaterialBinding, MaterialHost};
+pub(crate) use settings::{sources_in_effect, SourcesInEffect};
 
 const WRITE_ACTION: &str = "action/aikit/encounter-task";
 /// The receipt of a task taken off its session (`encounter-task-remove`).

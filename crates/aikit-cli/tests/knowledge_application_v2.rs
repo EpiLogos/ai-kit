@@ -552,3 +552,333 @@ fn each_world_keeps_its_own_use_and_forgets_only_its_own() {
     );
     assert_eq!((used(&alpha), used(&beta), used(&root)), (0, 1, 0));
 }
+
+/// `aikit --json -C <project> ARGS` as an agent session's own process runs it (`AIKIT_SESSION_ID`), or as the person asks it.
+fn aikit_as(
+    project: &std::path::Path,
+    home: &std::path::Path,
+    agent: Option<&str>,
+    args: &[&str],
+) -> serde_json::Value {
+    let mut command = std::process::Command::new(assert_cmd::cargo::cargo_bin("aikit"));
+    command
+        .arg("--json")
+        .arg("-C")
+        .arg(project)
+        .args(args)
+        .env_clear()
+        .env("PATH", std::env::var_os("PATH").unwrap_or_default())
+        .env("HOME", home.join("home"))
+        .env("AIKIT_HOME", home.join("aikit-home"));
+    if let Some(agent) = agent {
+        command.env("AIKIT_SESSION_ID", agent);
+    }
+    let output = command.output().expect("the real aikit binary runs");
+    serde_json::from_slice::<serde_json::Value>(&output.stdout).unwrap_or_else(|_| {
+        panic!(
+            "aikit {args:?}: {}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        )
+    })
+}
+
+/// O-I #745 (DLW §19.9 Sources, BD round 25): Search first, Link depth and Read budget are AIKit's settings on the placement
+/// (encounter-session-settings `sources`), and AIKit's knowledge navigation honours them when the session's agent reads — it
+/// searches before it reads, follows at most Link depth links from a hit, and reads no more than its budget, each refused in words.
+/// What it read is AIKit's record of its run: each passage with its source and the revision it read, a moved one marked; Read
+/// again reads it at the new revision and records the use; Forget drops AIKit's learned use of it, and the source stays as it was.
+#[test]
+fn an_agent_reads_under_its_sources_and_its_run_reads_back_again_and_forgotten() {
+    use aikit_cli::encounter_service::EncounterService;
+    use aikit_core::session_space::SessionSpaceRef;
+    use aikit_core::session_space_application::{
+        SessionSpaceAgentAttachmentIntent, SessionSpaceMutation,
+    };
+    use aikit_store::SessionSpaceApplicationStore;
+
+    let temp = TempDir::new().unwrap();
+    let root = temp.path().canonicalize().unwrap();
+    let project = root.join("project");
+    fs::create_dir_all(&project).unwrap();
+    let wiki = |alpha_revision: u64| {
+        serde_json::json!({"objects": [
+            {"profile":"okf-wiki/v1","object":"space","ref":"wiki:space:need","revision":1,"provenance":[],"title":"Need",
+             "parent_space_refs":[],"child_space_refs":[],"node_refs":["wiki:node:alpha","wiki:node:beta"]},
+            {"profile":"okf-wiki/v1","object":"node","ref":"wiki:node:alpha","revision":alpha_revision,"provenance":[],"type":"Concept",
+             "title":"Alpha","space_refs":["wiki:space:need"],"source_refs":[]},
+            {"profile":"okf-wiki/v1","object":"node","ref":"wiki:node:beta","revision":1,"provenance":[],"type":"Concept",
+             "title":"Beta","space_refs":["wiki:space:need"],"source_refs":[]}
+        ]})
+        .to_string()
+    };
+    fs::write(project.join("semantic-wiki.json"), wiki(1)).unwrap();
+    let home = AikitHome::at(root.join("aikit-home"));
+    home.ensure_layout().unwrap();
+    let spaces = SessionSpaceApplicationStore::new(home.clone());
+    let space = SessionSpaceRef::parse("session-space/sources").unwrap();
+    spaces
+        .apply(
+            &spaces
+                .stage(
+                    None,
+                    SessionSpaceMutation::Create {
+                        id: space.clone(),
+                        label: None,
+                    },
+                )
+                .unwrap(),
+        )
+        .unwrap();
+    let session = ResourceRef::parse("agent-session/sources-reader").unwrap();
+    spaces
+        .apply(
+            &spaces
+                .stage(
+                    Some(&space),
+                    SessionSpaceMutation::AttachAgentSession {
+                        attachment: SessionSpaceAgentAttachmentIntent {
+                            agent_session: session.clone(),
+                            purpose: Some("Sources".into()),
+                            provenance: vec!["isolated Sources test".into()],
+                        },
+                    },
+                )
+                .unwrap(),
+        )
+        .unwrap();
+    let agent = aikit_core::SessionId::of_agent_session(&session).to_string();
+    let address =
+        |reference: &str| serde_json::json!({"kind": "wiki", "value": reference}).to_string();
+    let agent_does = |args: &[&str]| aikit_as(&project, &root, Some(&agent), args);
+    let refusal = |reply: &serde_json::Value| {
+        (reply["ok"] == false).then(|| {
+            reply["error"]["code"]
+                .as_str()
+                .unwrap_or_default()
+                .to_string()
+        })
+    };
+    let nodes = |reply: &serde_json::Value| -> Vec<String> {
+        reply["data"]["nodes"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|node| node["resource"].as_str().map(str::to_owned))
+            .collect()
+    };
+
+    // Unplaced, the agent's reading is unbounded: the walk from Alpha reaches Beta, two links away.
+    assert!(nodes(&aikit_as(
+        &project,
+        &root,
+        None,
+        &[
+            "knowledge",
+            "relations",
+            "--depth",
+            "2",
+            "--",
+            &address("wiki:node:alpha")
+        ]
+    ))
+    .contains(&"wiki:node:beta".to_string()));
+
+    // Sources placed on the agent's own chain: Search first (on by default), one link from a hit, two pages.
+    let written = EncounterService::write_session_settings(
+        &home,
+        &session,
+        serde_json::json!({"track": {"sources": true, "link_depth": 1, "read_budget": 2}}),
+        None,
+    )
+    .unwrap();
+    assert_eq!(
+        written["sources"]["chain"],
+        serde_json::json!({"placed": true, "search_first": true, "link_depth": 1, "read_budget": 2,
+        "set": ["sources", "link_depth", "read_budget"]})
+    );
+    assert_eq!(
+        written["sources"]["rack"]["placed"], false,
+        "the rack's shared reading is not placed"
+    );
+    let refused = EncounterService::write_session_settings(
+        &home,
+        &session,
+        serde_json::json!({"track": {"link_depth": 5}}),
+        Some(&aikit_core::SourceRevision::parse(written["revision"].as_str().unwrap()).unwrap()),
+    );
+    assert!(refused
+        .unwrap_err()
+        .to_string()
+        .contains("Link depth is a whole number from 0 to 4"));
+
+    assert_eq!(
+        refusal(&agent_does(&[
+            "knowledge",
+            "read",
+            "--",
+            &address("wiki:node:beta")
+        ]))
+        .as_deref(),
+        Some("knowledge.sources_search_first"),
+        "it searches before it reads"
+    );
+    let found = agent_does(&["knowledge", "search", "Alpha"]);
+    assert_eq!(found["ok"], true, "{found}");
+    assert_eq!(
+        agent_does(&["knowledge", "read", "--", &address("wiki:node:alpha")])["ok"],
+        true,
+        "a page the search found reads"
+    );
+    let walked = agent_does(&[
+        "knowledge",
+        "relations",
+        "--depth",
+        "2",
+        "--",
+        &address("wiki:node:alpha"),
+    ]);
+    assert_eq!(walked["ok"], true, "{walked}");
+    assert!(
+        nodes(&walked).contains(&"wiki:space:need".to_string()),
+        "one link from the hit: {walked}"
+    );
+    assert!(
+        !nodes(&walked).contains(&"wiki:node:beta".to_string()),
+        "the walk stops at Link depth: {walked}"
+    );
+    assert_eq!(
+        refusal(&agent_does(&[
+            "knowledge",
+            "relations",
+            "--",
+            &address("wiki:space:need")
+        ]))
+        .as_deref(),
+        Some("knowledge.sources_link_depth"),
+        "no link past Link depth"
+    );
+    assert_eq!(
+        agent_does(&["knowledge", "read", "--", &address("wiki:space:need")])["ok"],
+        true,
+        "a page one link from a hit reads"
+    );
+    let over = agent_does(&["knowledge", "read", "--", &address("wiki:node:alpha")]);
+    assert_eq!(
+        refusal(&over).as_deref(),
+        Some("knowledge.sources_read_budget"),
+        "the budget is two pages: {over}"
+    );
+    assert!(over["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("has read 2 of its 2 pages"));
+
+    // Search first off and a larger budget: a page read without a search is its own hit.
+    let settings = EncounterService::read_session_settings(&home, &session).unwrap();
+    EncounterService::write_session_settings(
+        &home,
+        &session,
+        serde_json::json!({"track": {"search_first": false, "read_budget": 3}}),
+        Some(&aikit_core::SourceRevision::parse(settings["revision"].as_str().unwrap()).unwrap()),
+    )
+    .unwrap();
+    assert_eq!(
+        agent_does(&["knowledge", "read", "--", &address("wiki:node:beta")])["ok"],
+        true
+    );
+
+    // Read: the run's passages, each with its source and the revision it read; Alpha's source moves.
+    let person = |args: &[&str]| aikit_as(&project, &root, None, args);
+    fs::write(project.join("semantic-wiki.json"), wiki(2)).unwrap();
+    let before = fs::read(project.join("semantic-wiki.json")).unwrap();
+    let read = person(&["knowledge", "reads", "--agent-session", session.as_str()]);
+    assert_eq!(read["ok"], true, "{read}");
+    let rows = read["data"]["readings"].as_array().unwrap().clone();
+    let of = |rows: &[serde_json::Value], resource: &str| {
+        rows.iter().find(|row| row["resource"] == resource).cloned()
+    };
+    assert_eq!(
+        rows.iter()
+            .map(|row| row["resource"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        ["wiki:node:alpha", "wiki:space:need", "wiki:node:beta"]
+    );
+    let alpha = of(&rows, "wiki:node:alpha").unwrap();
+    assert_eq!(
+        (
+            alpha["revision"].as_str(),
+            alpha["moved"].as_bool(),
+            alpha["hops"].as_u64()
+        ),
+        (Some("1"), Some(true), Some(0)),
+        "{alpha}"
+    );
+    assert_eq!(of(&rows, "wiki:space:need").unwrap()["hops"], 1);
+    assert_eq!(of(&rows, "wiki:space:need").unwrap()["moved"], false);
+    assert_eq!(read["data"]["sources"]["placement"], "chain");
+
+    // Read again: Alpha at its new revision, the use recorded.
+    let again = person(&[
+        "knowledge",
+        "read-again",
+        "--agent-session",
+        session.as_str(),
+        "--reading",
+        alpha["id"].as_str().unwrap(),
+    ]);
+    assert_eq!(again["ok"], true, "{again}");
+    assert_eq!(again["data"]["reading"]["revision"], "2");
+    let rows = person(&["knowledge", "reads", "--agent-session", session.as_str()])["data"]
+        ["readings"]
+        .as_array()
+        .unwrap()
+        .clone();
+    let alpha = of(&rows, "wiki:node:alpha").unwrap();
+    assert_eq!(
+        (alpha["revision"].as_str(), alpha["moved"].as_bool()),
+        (Some("2"), Some(false)),
+        "it stands at the new revision"
+    );
+
+    // Forget: the reading is gone from the run, AIKit's learned use of it dropped; the source is untouched.
+    let space_reading = of(&rows, "wiki:space:need").unwrap();
+    let forgot = person(&[
+        "knowledge",
+        "forget",
+        "reading",
+        "--agent-session",
+        session.as_str(),
+        "--reading",
+        space_reading["id"].as_str().unwrap(),
+    ]);
+    assert_eq!(forgot["ok"], true, "{forgot}");
+    assert_eq!(
+        forgot["data"]["forgot"]["DestinationIn"]["destination"],
+        "wiki:space:need"
+    );
+    let rows = person(&["knowledge", "reads", "--agent-session", session.as_str()])["data"]
+        ["readings"]
+        .as_array()
+        .unwrap()
+        .clone();
+    assert!(of(&rows, "wiki:space:need").is_none(), "forgotten");
+    assert_eq!(
+        fs::read(project.join("semantic-wiki.json")).unwrap(),
+        before,
+        "the source is untouched"
+    );
+    let gone = person(&[
+        "knowledge",
+        "forget",
+        "reading",
+        "--agent-session",
+        session.as_str(),
+        "--reading",
+        space_reading["id"].as_str().unwrap(),
+    ]);
+    assert_eq!(
+        refusal(&gone).as_deref(),
+        Some("knowledge.session_reading_absent")
+    );
+}
