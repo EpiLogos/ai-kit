@@ -39,6 +39,11 @@ def modes(s):
 def note(entry):
     with open(log, "a") as out:
         out.write(json.dumps(entry) + "\n")
+def cancelled(native):
+    # A harness unwinds a cancelled turn before it answers the prompt, as any
+    # real one does: the answer comes a moment after the cancel.
+    if native in waiting:
+        threading.Timer(0.3, result, (waiting.pop(native), {"stopReason": "cancelled"})).start()
 for line in sys.stdin:
     message = json.loads(line)
     method, ident, params = message.get("method"), message.get("id"), message.get("params", {})
@@ -85,9 +90,7 @@ for line in sys.stdin:
               "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "wrote answer.txt: " + said}}}})
         result(ident, {"stopReason": "end_turn", "usage": {"totalTokens": 7, "inputTokens": 5, "outputTokens": 2}})
     elif method == "session/cancel":
-        native = params.get("sessionId")
-        if native in waiting:
-            result(waiting.pop(native), {"stopReason": "cancelled"})
+        cancelled(params.get("sessionId"))
     elif ident == "permission-1":
         outcome = (message.get("result") or {}).get("outcome") or {}
         chosen = outcome.get("optionId") if outcome.get("outcome") == "selected" else None
@@ -98,7 +101,7 @@ for line in sys.stdin:
                     out.write("permission=%s\n" % chosen)
                 result(waiting.pop(native), {"stopReason": "end_turn"})
             else:
-                result(waiting.pop(native), {"stopReason": "cancelled"})
+                cancelled(native)
 "#;
 
 struct Rig {

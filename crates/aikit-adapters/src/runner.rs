@@ -1488,6 +1488,27 @@ impl CapacityRefusalContext<'_> {
     }
 }
 
+/// Spawn `command`, waiting out an executable that is busy for a moment (ETXTBSY). On Linux a script
+/// written just before it runs can still be open for writing in a child another thread forked in
+/// between (its fork holds the write descriptor until its own exec), so the kernel refuses to run it
+/// for that instant; the refusal is the fork's, not the command's. Retried a few times over about a
+/// quarter of a second, as cargo retries its build scripts; any other error, or a file still busy
+/// after that, is the spawn's own.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn spawn_past_busy(command: &mut std::process::Command) -> std::io::Result<std::process::Child> {
+    let mut wait = std::time::Duration::from_millis(1);
+    for _ in 0..8 {
+        match command.spawn() {
+            Err(error) if error.kind() == std::io::ErrorKind::ExecutableFileBusy => {
+                std::thread::sleep(wait);
+                wait *= 2;
+            }
+            spawned => return spawned,
+        }
+    }
+    command.spawn()
+}
+
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 fn capture_native_command(
     command: &mut std::process::Command,
@@ -1534,7 +1555,7 @@ fn capture_native_command(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .process_group(0);
-    let child = command.spawn().map_err(|error| {
+    let child = spawn_past_busy(command).map_err(|error| {
         let failure = if body_free_diagnostics {
             AikitError::new(
                 "mux.command_spawn_failed",
@@ -3303,6 +3324,37 @@ mod tests {
             }
             std::thread::sleep(std::time::Duration::from_millis(5));
         }
+    }
+
+    /// A script still open for writing somewhere when it is run is refused as busy (ETXTBSY) on Linux:
+    /// the spawn waits the moment out instead of failing the command.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_script_busy_for_a_moment_when_spawned_still_runs() {
+        use std::io::Write;
+        use std::os::unix::fs::PermissionsExt;
+        let dir = native_command_tempdir();
+        let script = dir.path().join("busy.sh");
+        let mut open = std::fs::File::create(&script).unwrap();
+        open.write_all(b"#!/bin/sh\nexit 0\n").unwrap();
+        open.flush().unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        // While the file is open for writing the kernel refuses to run it.
+        assert_eq!(
+            std::process::Command::new(&script)
+                .spawn()
+                .unwrap_err()
+                .kind(),
+            std::io::ErrorKind::ExecutableFileBusy
+        );
+        let closer = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            drop(open);
+        });
+        let mut command = std::process::Command::new(&script);
+        let status = spawn_past_busy(&mut command).unwrap().wait().unwrap();
+        closer.join().unwrap();
+        assert!(status.success());
     }
 
     #[cfg(any(target_os = "linux", target_os = "macos"))]

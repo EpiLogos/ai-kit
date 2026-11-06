@@ -111,13 +111,23 @@ fn fixture() -> Fixture {
 }
 
 fn aikit(f: &Fixture, args: &[&str]) -> (bool, Value) {
+    aikit_on(f, args, None)
+}
+
+/// `aikit` with `path` as its PATH, where given: the vendor binaries it runs are the ones found first there.
+fn aikit_on(f: &Fixture, args: &[&str], path: Option<&std::ffi::OsStr>) -> (bool, Value) {
     let bin = assert_cmd::cargo::cargo_bin("aikit");
-    let output = std::process::Command::new(&bin)
+    let mut command = std::process::Command::new(&bin);
+    command
         .args(args)
         .arg("--json")
         .env("AIKIT_HOME", f.home.path())
         .env("HOME", f.home.path())
-        .current_dir(f.project.path())
+        .current_dir(f.project.path());
+    if let Some(path) = path {
+        command.env("PATH", path);
+    }
+    let output = command
         .output()
         .unwrap_or_else(|e| panic!("aikit {args:?}: {e}"));
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -155,6 +165,15 @@ fn json_file(path: &Path) -> Value {
 }
 
 fn export(f: &Fixture, target: &str, extra: &[&str]) -> (bool, Value, PathBuf) {
+    export_on(f, target, extra, None)
+}
+
+fn export_on(
+    f: &Fixture,
+    target: &str,
+    extra: &[&str],
+    path: Option<&std::ffi::OsStr>,
+) -> (bool, Value, PathBuf) {
     let dir = f.out.path().join(target);
     let dir_s = dir.display().to_string();
     let mut args = vec![
@@ -168,7 +187,7 @@ fn export(f: &Fixture, target: &str, extra: &[&str]) -> (bool, Value, PathBuf) {
         &dir_s,
     ];
     args.extend_from_slice(extra);
-    let (ok, envelope) = aikit(f, &args);
+    let (ok, envelope) = aikit_on(f, &args, path);
     (ok, envelope, dir)
 }
 
@@ -520,18 +539,103 @@ fn secret_values_in_package_metadata_are_refused() {
 // Native validation (skips cleanly when the vendor binary is absent)
 // ---------------------------------------------------------------------------
 
+/// Every `program` on PATH in the order a child process resolves them, each installed binary once.
+fn every_on_path(program: &str) -> Vec<PathBuf> {
+    let mut found: Vec<(PathBuf, PathBuf)> = Vec::new();
+    for dir in std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()) {
+        let candidate = dir.join(program);
+        if candidate.is_file() {
+            let installed = fs::canonicalize(&candidate).unwrap_or_else(|_| candidate.clone());
+            if !found.iter().any(|(seen, _)| *seen == installed) {
+                found.push((installed, candidate));
+            }
+        }
+    }
+    found.into_iter().map(|(_, candidate)| candidate).collect()
+}
+
+/// Claude Code validates a plugin natively with `claude plugin validate --strict --json`. AIKit runs whichever `claude` comes first
+/// on PATH, and a machine may carry more than one: an older Claude Code (a Homebrew cask's 2.1.59 here) has neither flag, refuses
+/// them on stderr and prints no report. So each installed `claude` is put first on PATH in turn and asked what it supports, and
+/// the export must say what that one did: passed where it validates strictly, and otherwise failed in the vendor's own words —
+/// never on an empty report. With no `claude` installed, the native check is unavailable and says so.
 #[test]
 fn native_claude_validate() {
-    if !on_path("claude") {
-        eprintln!("skip: `claude` not on PATH");
+    let vendors = every_on_path("claude");
+    if vendors.is_empty() {
+        let f = fixture();
+        let (ok, envelope, _) = export(&f, "claude", &["--native"]);
+        assert!(!ok, "{envelope}");
+        assert_eq!(
+            envelope["error"]["details"]["native"], "Unavailable",
+            "{envelope}"
+        );
+        assert!(
+            envelope["error"]["message"]
+                .as_str()
+                .is_some_and(|m| m.contains("`claude` is not on PATH")),
+            "{envelope}"
+        );
         return;
     }
-    let f = fixture();
-    let (ok, envelope, _) = export(&f, "claude", &["--native"]);
-    assert!(ok, "{envelope}");
-    let native = &envelope["data"]["validation"]["native"];
-    assert_eq!(native["status"], "passed", "{native}");
-    assert_eq!(native["exit"], 0);
+    let path = std::env::var_os("PATH").unwrap_or_default();
+    for vendor in vendors {
+        let first = std::env::join_paths(
+            std::iter::once(vendor.parent().unwrap().to_path_buf())
+                .chain(std::env::split_paths(&path)),
+        )
+        .unwrap();
+        let f = fixture();
+        let asked = |args: &[&str]| {
+            let output = std::process::Command::new(&vendor)
+                .args(args)
+                .env("HOME", f.home.path())
+                .current_dir(f.project.path())
+                .output()
+                .unwrap_or_else(|e| panic!("{}: {e}", vendor.display()));
+            (
+                output.status.code(),
+                String::from_utf8_lossy(&output.stdout).trim().to_string(),
+                String::from_utf8_lossy(&output.stderr).trim().to_string(),
+            )
+        };
+        let (_, help, help_err) = asked(&["plugin", "validate", "--help"]);
+        let strict = [&help, &help_err]
+            .iter()
+            .any(|said| said.contains("--strict") && said.contains("--json"));
+        let (ok, envelope, dir) = export_on(&f, "claude", &["--native"], Some(&first));
+        let at = vendor.display();
+        if strict {
+            assert!(ok, "{at}: {envelope}");
+            let native = &envelope["data"]["validation"]["native"];
+            assert_eq!(native["status"], "passed", "{at}: {native}");
+            assert_eq!(native["exit"], 0, "{at}: {native}");
+            continue;
+        }
+        // The vendor's own refusal, asked of it directly: the export carries those words.
+        let dir = dir.display().to_string();
+        let (exit, report, refused) =
+            asked(&["plugin", "validate", "--strict", "--json", dir.as_str()]);
+        assert!(
+            exit != Some(0) && report.is_empty() && !refused.is_empty(),
+            "{at}: exit {exit:?} stdout {report:?} stderr {refused:?}"
+        );
+        assert!(!ok, "{at}: {envelope}");
+        assert_eq!(
+            envelope["error"]["code"], "skillset.package.validation_failed",
+            "{at}: {envelope}"
+        );
+        assert_eq!(
+            envelope["error"]["details"]["native"], "Failed",
+            "{at}: {envelope}"
+        );
+        let message = envelope["error"]["message"].as_str().unwrap_or_default();
+        let said = refused.lines().next().unwrap_or_default();
+        assert!(
+            message.contains("printed no JSON report") && message.contains(said),
+            "{at} said {said:?}; the export said {message:?}"
+        );
+    }
 }
 
 #[test]
