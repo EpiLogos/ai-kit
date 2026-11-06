@@ -13,7 +13,9 @@
 //! that varies it): then the harness's own option for that answer is given
 //! (`encounter_task_executor::tool_calls_answer`), never a deny, and a
 //! harness that offers none cancels the turn in words. A turn that does not
-//! end within its time is cancelled at the timeout.
+//! end within its time is cancelled at the timeout. A cancelled turn is
+//! answered once the owner has settled it, so whatever the caller does next
+//! (release the body, prompt it again) finds the body idle.
 use crate::encounter_service::EncounterRequest;
 use aikit_core::ResourceRef;
 use serde_json::Value;
@@ -37,6 +39,10 @@ pub enum SubmitStage {
     /// Submitting the draft as the turn's prompt.
     Prompt,
 }
+
+/// How long a cancelled turn is given to settle before its caller is
+/// answered anyway; the owner then names the turn that still stands.
+const CANCEL_SETTLES_WITHIN: Duration = Duration::from_secs(10);
 
 /// The words a caller's turn speaks in: what its session is called and what
 /// the turn is (`"the Day's session"`, `"a Day move"`).
@@ -150,7 +156,7 @@ impl ResidentOwner {
 
     /// Read the session's journal from `after` until the turn ends. A turn
     /// that asks for a tool's permission, or does not end within `timeout`,
-    /// is cancelled and refused in the caller's words.
+    /// is cancelled, settled, and refused in the caller's words.
     pub fn await_turn(
         &self,
         session: &ResourceRef,
@@ -173,11 +179,16 @@ impl ResidentOwner {
         tool_calls: Option<&str>,
     ) -> Result<TurnAnswer, String> {
         let deadline = Instant::now() + timeout;
-        let cancel = |reason: String| {
-            let _ = self.call(&EncounterRequest::Cancel {
-                agent_session: session.clone(),
-                reason: Some(reason),
-            });
+        let cancel = |reason: String, from: u64| {
+            if self
+                .call(&EncounterRequest::Cancel {
+                    agent_session: session.clone(),
+                    reason: Some(reason),
+                })
+                .is_ok()
+            {
+                self.settle(session, from, Instant::now() + CANCEL_SETTLES_WITHIN);
+            }
         };
         let mut cursor = after;
         let mut said = String::new();
@@ -207,7 +218,7 @@ impl ResidentOwner {
                     Some("permission-requested") => {
                         let request = &kind["request"];
                         let Some(word) = tool_calls.filter(|word| *word != "ask") else {
-                            cancel(format!("{} takes no tool", words.act));
+                            cancel(format!("{} takes no tool", words.act), cursor);
                             return Err(match tool_calls {
                                 Some(word) => format!(
                                     "the agent asked for permission to use a tool, and {}'s Tool calls stands at {word}, so it waits for a person nobody is asking; the turn was cancelled",
@@ -237,7 +248,10 @@ impl ResidentOwner {
                                 .map_err(|error| format!("the encounter refused the answer: {}", error.message))
                             });
                         if let Err(reason) = answered {
-                            cancel(format!("{} could not answer a tool's request", words.act));
+                            cancel(
+                                format!("{} could not answer a tool's request", words.act),
+                                cursor,
+                            );
                             return Err(format!(
                                 "the agent asked for permission to use a tool, and {}'s Tool calls ({word}) could not answer it: {reason}; the turn was cancelled",
                                 words.act
@@ -264,13 +278,40 @@ impl ResidentOwner {
             }
             if page["more"] != true {
                 if Instant::now() >= deadline {
-                    cancel(format!("{} timed out", words.act));
+                    cancel(format!("{} timed out", words.act), cursor);
                     return Err(format!(
                         "the agent did not finish within {} seconds; the turn was cancelled",
                         timeout.as_secs()
                     ));
                 }
                 std::thread::sleep(Duration::from_millis(150));
+            }
+        }
+    }
+
+    /// After a cancel, read the journal from `after` until the turn's
+    /// `TurnEnded`: the owner journals it only once the turn has left the
+    /// body, so the body then stands idle. Gives up at `deadline`.
+    fn settle(&self, session: &ResourceRef, mut after: u64, deadline: Instant) {
+        loop {
+            let Ok(page) = self.call(&EncounterRequest::Read {
+                agent_session: session.clone(),
+                after,
+                limit: 256,
+            }) else {
+                return;
+            };
+            for row in page["events"].as_array().into_iter().flatten() {
+                after = row["cursor"].as_u64().unwrap_or(after);
+                if row["event"]["event"].get("TurnEnded").is_some() {
+                    return;
+                }
+            }
+            if page["more"] != true {
+                if Instant::now() >= deadline {
+                    return;
+                }
+                std::thread::sleep(Duration::from_millis(50));
             }
         }
     }
