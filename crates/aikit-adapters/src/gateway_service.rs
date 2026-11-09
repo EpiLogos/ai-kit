@@ -2246,8 +2246,13 @@ fn execute_serialized_request(
         }
         _ => {}
     }
+    // A read changes no semantic state (`is_read_only`), so the state is not
+    // written again for it (606b): `disclose --list` and every other read
+    // leave the state file as it was, as an offline read does. What the load
+    // stamped was written when the service started.
+    let read_only = request.command.is_read_only();
     let response = GatewayResponseEnvelope::from_result(request.request_id, result);
-    if response.ok {
+    if response.ok && !read_only {
         persist_gateway_state(&gateway, state_file)?;
     }
     let encoded = serde_json::to_string(&response).map_err(|error| {
@@ -2740,6 +2745,18 @@ mod tests {
         caller: Value,
         scope: crate::gateway_posture::CarrierScope,
     ) -> Value {
+        over_carrier_kept(gateway, command, caller, scope, None)
+    }
+
+    /// One request over a carrier, its service keeping its state in
+    /// `state_file`.
+    fn over_carrier_kept(
+        gateway: &Arc<Mutex<AgencyGateway>>,
+        command: Value,
+        caller: Value,
+        scope: crate::gateway_posture::CarrierScope,
+        state_file: Option<&Path>,
+    ) -> Value {
         let runtime = test_runtime();
         let mut subscriptions = ConnectionSubscriptions::new(Arc::clone(&runtime.hub));
         let input = serde_json::json!({"request_id": "r", "command": command, "caller": caller})
@@ -2748,7 +2765,7 @@ mod tests {
             gateway,
             &runtime,
             &input,
-            None,
+            state_file,
             Some(&OneOccupant(ASKED, "gen-scribe")),
             &mut subscriptions,
             scope,
@@ -2891,6 +2908,52 @@ mod tests {
             answer["response"]["record"]["protocol"], "pi-rpc",
             "{answer}"
         );
+    }
+
+    /// 606b (review 606, finding 5): a running service writes its state again
+    /// only after a command that changes it. A read (`disclose --list`'s, the
+    /// window's asks, a status) leaves the state file as it was, as an
+    /// offline read does; the person's record writes it again.
+    #[cfg(unix)]
+    #[test]
+    fn a_read_leaves_the_state_file_as_it_was_and_a_change_writes_it_again() {
+        use crate::gateway_posture::CarrierScope;
+        use std::os::unix::fs::MetadataExt;
+        let dir = tempfile::tempdir().unwrap();
+        let state = dir.path().join("gateway.json");
+        let gateway = Arc::new(Mutex::new(gateway()));
+        persist_gateway_state(&gateway.lock().unwrap(), Some(&state)).unwrap();
+        // Every write is a new file renamed over the old one.
+        let inode = || std::fs::metadata(&state).unwrap().ino();
+        let before = inode();
+        for read in [
+            serde_json::json!({"type": "read-world-agent-record", "key": "answer-harness"}),
+            serde_json::json!({"type": "waiting-asks"}),
+            serde_json::json!({"type": "status"}),
+        ] {
+            let answer = over_carrier_kept(
+                &gateway,
+                read.clone(),
+                Value::Null,
+                CarrierScope::Owner,
+                Some(&state),
+            );
+            assert_eq!(answer["ok"], true, "{read}: {answer}");
+            assert_eq!(inode(), before, "{read} wrote the state again");
+        }
+        let record = serde_json::json!({"type": "set-world-agent-record", "key": "answer-harness",
+            "record": {"protocol": "pi-rpc"}});
+        let answer = over_carrier_kept(
+            &gateway,
+            record,
+            Value::Null,
+            CarrierScope::Owner,
+            Some(&state),
+        );
+        assert_eq!(answer["ok"], true, "{answer}");
+        assert_ne!(inode(), before, "a change is written again");
+        let kept = std::fs::read_to_string(&state).unwrap();
+        assert!(kept.contains("pi-rpc"), "{kept}");
     }
 
     #[test]

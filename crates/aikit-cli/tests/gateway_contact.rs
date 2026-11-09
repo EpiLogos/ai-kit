@@ -3201,7 +3201,9 @@ fn answer_of(reply: &Value) -> Value {
 /// the environment it reports). It speaks pi's RPC wire, keeps each prompt it
 /// is given (`prompt-N.txt`) and the environment it was launched in
 /// (`env-PID.json`: the names, save PWD, OLDPWD, SHLVL and `_`, which /bin/sh
-/// sets for itself), and says what `reply.txt` holds; asked its `--version`,
+/// sets for itself, as its shell holds them: never through awk's `ENVIRON`,
+/// to which gawk adds AWKPATH and AWKLIBPATH, 606b), and says what
+/// `reply.txt` holds; asked its `--version`,
 /// it prints what `version.txt` holds (1.5.0 without it) and keeps the
 /// environment that read ran in (`version-env-PID.json`); `TOOL` runs a tool
 /// first, as a pi that ignored its no-tools flags would; its session reports
@@ -3254,9 +3256,11 @@ function hex(h,   i, n) {
 jstr() { printf '%s\n' "$1" | awk "$AWK_ESC"'{ v = v (NR > 1 ? "\\n" : "") body($0) } END { printf "\"%s\"", v }'; }
 # The string value of key $2 in the JSON line $1.
 get() { printf '%s\n' "$1" | awk -v key="$2" "$AWK_GET"; }
-# The names of the environment it was launched in. /bin/sh sets PWD, OLDPWD,
-# SHLVL and _ for itself, so those four are not counted.
-names() { awk 'BEGIN { s = ""; for (k in ENVIRON) if (k != "PWD" && k != "OLDPWD" && k != "SHLVL" && k != "_") s = s (s == "" ? "" : ",") "\"" k "\""; printf "[%s]", s }'; }
+# The names of the environment it was launched in, as its shell holds them
+# (export -p: `export NAME...`, or bash's `declare -x NAME...`), never awk's
+# ENVIRON, to which gawk adds AWKPATH and AWKLIBPATH (606b). /bin/sh sets
+# PWD, OLDPWD, SHLVL and _ for itself, so those four are not counted.
+names() { export -p | sed -n -E 's/^(export|declare -x) ([A-Za-z_][A-Za-z0-9_]*).*/\2/p' | awk '$0 != "PWD" && $0 != "OLDPWD" && $0 != "SHLVL" && $0 != "_" { s = s (s == "" ? "" : ",") "\"" $0 "\"" } END { printf "[%s]", s }'; }
 send() { printf '%s\n' "$1"; }
 respond() {
   if [ -n "${3-}" ]; then
@@ -3702,8 +3706,9 @@ fn the_window_lists_what_aikit_holds_a_world_shows_and_the_list_changes_nothing(
 /// window never reads it from the words. An ask past the bound is refused
 /// before the journal keeps it, whether this process meets the refusal against
 /// the state file or the running service answers it; a send refused before it
-/// reaches the gateway kept nothing either. Central handed the person's
-/// request and not confirming it may have kept it.
+/// reaches the gateway kept nothing either, its working folder gone among
+/// them (606b). Central handed the person's request and not confirming it,
+/// by a refusal or by no answer it can read, may have kept it.
 #[test]
 fn a_refused_send_says_in_data_whether_it_kept_anything() {
     let world = World::new();
@@ -3767,6 +3772,71 @@ fn a_refused_send_says_in_data_whether_it_kept_anything() {
     let refused = guardian.refused(&["gateway", "send", "--to", "@owner", "--body", "Shall I?"]);
     assert_eq!(refused["code"], "gateway.owner_refused", "{refused}");
     assert_eq!(refused["details"]["recorded"], "true", "{refused}");
+
+    // Central, handed it, answers nothing it can read (606b): a crash or a
+    // timeout after it may have kept it.
+    let mut shape = world.world();
+    shape["receiving_refuses"] = json!(false);
+    shape["receiving_unavailable"] = json!(true);
+    std::fs::write(&world.world, serde_json::to_vec(&shape).unwrap()).unwrap();
+    let unavailable = guardian.refused(&[
+        "gateway",
+        "send",
+        "--to",
+        "@owner",
+        "--body",
+        "Shall I now?",
+    ]);
+    assert_eq!(
+        unavailable["code"], "gateway.owner_unavailable",
+        "{unavailable}"
+    );
+    assert_eq!(unavailable["details"]["recorded"], "true", "{unavailable}");
+
+    // A send refused before anything is handed on (606b): its working folder
+    // is gone, so nothing reached a gateway or Central.
+    let gone = tempfile::tempdir().unwrap();
+    let folder = gone.path().join("gone");
+    std::fs::create_dir(&folder).unwrap();
+    let inner = window.command(&[
+        "gateway",
+        "send",
+        "--to",
+        STEWARD,
+        "--body",
+        &ask("Where now?"),
+        "--json",
+    ]);
+    let mut command = Command::new("/bin/sh");
+    command
+        .arg("-c")
+        .arg("cd \"$1\" && rmdir \"$1\" && shift && exec \"$@\"")
+        .arg("sh")
+        .arg(&folder)
+        .arg(inner.get_program())
+        .args(inner.get_args());
+    for (name, value) in inner.get_envs() {
+        match value {
+            Some(value) => command.env(name, value),
+            None => command.env_remove(name),
+        };
+    }
+    let output = command.output().unwrap();
+    let envelope: Value = serde_json::from_slice(&output.stdout).unwrap_or_else(|_| {
+        panic!(
+            "stdout={} stderr={}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        )
+    });
+    assert_eq!(
+        envelope["error"]["code"], "cli.cwd_unavailable",
+        "{envelope}"
+    );
+    assert_eq!(
+        envelope["error"]["details"]["recorded"], "false",
+        "{envelope}"
+    );
 }
 
 #[test]

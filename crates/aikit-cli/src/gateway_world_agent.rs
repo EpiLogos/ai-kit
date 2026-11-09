@@ -567,6 +567,11 @@ const ELECT_EXAMPLE: &str = "aikit gateway answer-harness --protocol pi-rpc --cr
 /// credential variable, never a provider AIKit names for them.
 const ELECT_AGAIN: &str = "aikit gateway answer-harness --protocol pi-rpc --credential-env <your provider's key variable> -- <your 1.5 pi> --mode rpc --provider <your provider> --no-session --no-tools --no-extensions --no-skills --no-mcp --no-context-files";
 
+/// What mends a pi whose `--version` exits 127 (be2i): pi is a node script,
+/// and 127 is its `env node` finding no node. Electing again does not mend it,
+/// so words that end with this never go on to ask for that (606b).
+const NO_NODE: &str = "which usually means the gateway service's PATH holds no node for pi to run on: give the service a PATH that holds node";
+
 /// Only a harness AIKit holds to no tools before its session opens is
 /// elected or prompted (DLW build ruling 2026-11-09, be2d): pi, by its own
 /// launch flags. An ACP or Prime harness is held to none only by its own
@@ -753,7 +758,7 @@ pub fn pi_reported_version(
         // pi is a node script: 127 is its `env node` finding no node
         // (be2i), which electing again does not mend.
         return Err(format!(
-            "{} --version exited 127, which usually means the gateway service's PATH holds no node for pi to run on: give the service a PATH that holds node",
+            "{} --version exited 127, {NO_NODE}",
             program.display()
         ));
     }
@@ -1200,8 +1205,13 @@ fn elected_pi_fits(
 }
 
 /// Why the elected harness cannot be confined now, and what to do (be2h):
-/// bounded words of AIKit's own, with none of the harness's stderr.
+/// bounded words of AIKit's own, with none of the harness's stderr. Electing
+/// again is asked for only where it mends (606b): a pi with no node to run on
+/// is mended where the service runs.
 fn cannot_be_confined_now(why: &str) -> String {
+    if why.ends_with(NO_NODE) {
+        return format!("the elected answer harness cannot be confined now: {why}");
+    }
     format!(
         "the elected answer harness cannot be confined now: {why}; elect a 1.5 pi again with your own provider and flags: {ELECT_AGAIN}"
     )
@@ -3922,6 +3932,37 @@ mod tests {
         );
     }
 
+    /// 606b (review 606, finding 4): words of what electing again cannot mend
+    /// never ask for it. A pi whose node the service's PATH lacks (exit 127)
+    /// is said with what mends it where the service runs; a pi of another
+    /// line still ends with how to elect again.
+    #[cfg(unix)]
+    #[test]
+    fn words_electing_again_cannot_mend_never_ask_for_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = AikitHome::at(dir.path().join("aikit"));
+        let journal = Journal::new();
+        let read = |program: &Path| pi_reported_version(&home, program, PI_VERSION_BOUND);
+        let no_node = fake_pi(dir.path(), "no-node", "exit 127");
+        journal.elect_pi(no_node.to_str().unwrap());
+        assert_eq!(
+            harness_ready(&journal, &read).unwrap_err(),
+            format!(
+                "the elected answer harness cannot be confined now: {} --version exited 127, which usually means the gateway service's PATH holds no node for pi to run on: give the service a PATH that holds node",
+                no_node.display()
+            )
+        );
+        let other_line = fake_pi(dir.path(), "other-line", "echo 1.6.0");
+        journal.elect_pi(other_line.to_str().unwrap());
+        let why = harness_ready(&journal, &read).unwrap_err();
+        assert!(
+            why.ends_with(&format!(
+                "; elect a 1.5 pi again with your own provider and flags: {ELECT_AGAIN}"
+            )),
+            "{why}"
+        );
+    }
+
     /// be2h (review 2 and 5): a harness that cannot be confined now leaves
     /// its asks waiting, never declined, and says why in the pass's errors;
     /// the election is read once a pass, and only when an ask waits to be
@@ -4173,6 +4214,22 @@ mod tests {
         assert_eq!(reads.get(), 1, "{pass}");
         assert_eq!(pass["started"], json!([ask.clone()]), "{pass}");
         assert_eq!(*spawned.borrow(), vec![ask.clone()]);
+        // A claim gone stale, its start dead without answering (606b, review
+        // 606 finding 5), is free: read, and started, its claim taken again.
+        let stale = journal.ask("stale", ASKED, None, 12);
+        assert!(claim(&home, &stale));
+        let long_ago = std::time::SystemTime::now() - ANSWER_CLAIM_STALE - Duration::from_secs(1);
+        std::fs::File::options()
+            .write(true)
+            .open(claim_path(&home, &stale))
+            .unwrap()
+            .set_modified(long_ago)
+            .unwrap();
+        let pass = answer_pass_with(&home, &owners, &journal, 20, &spawn, &read);
+        assert_eq!(reads.get(), 2, "{pass}");
+        assert_eq!(pass["started"], json!([stale.clone()]), "{pass}");
+        assert_eq!(*spawned.borrow(), vec![ask.clone(), stale.clone()]);
+        assert!(claim_is_live(&home, &stale), "its claim taken again");
     }
 
     /// be2h (review 2, the `--version` hang): a pi whose `--version` does not

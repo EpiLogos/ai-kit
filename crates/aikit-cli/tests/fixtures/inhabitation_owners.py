@@ -130,6 +130,12 @@ def ctrl(args):
                        "consequence": "Nothing was read.",
                        "action": "ctrl --json action run central.position.list '{}'"}}, 2)
     if action == "central.receiving.submit":
+        if world.get("receiving_unavailable"):
+            # Central is handed it and answers nothing that can be read: a crash after it kept the request, say.
+            world.setdefault("received", []).append(payload)
+            save(world)
+            sys.stderr.write("ctrl: the Receiving ledger stopped\n")
+            sys.exit(1)
         if world.get("receiving_refuses"):
             # Central refuses it, and its refusal alone does not say whether it kept a record.
             emit({"ok": False, "action": action,

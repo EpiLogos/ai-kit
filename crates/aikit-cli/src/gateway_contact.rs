@@ -1960,6 +1960,15 @@ fn said_recorded(sent: Result<Value>) -> Result<Value> {
     sent.map_err(|error| recorded(error, false))
 }
 
+/// A send refused before anything was handed to a gateway or to Central (its
+/// home, its carrier, its working folder, its body): it kept nothing, unless
+/// it says so already (606b, DLW build ruling 2026-11-09). Clap's own usage
+/// error never comes here: it ends with exit 2 and no envelope, which the
+/// person's window reads as a run that sent nothing.
+pub fn refused_before_handing(error: AikitError) -> AikitError {
+    recorded(error, false)
+}
+
 fn send_checked(
     home: &AikitHome,
     owners: &dyn ContactOwners,

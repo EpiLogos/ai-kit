@@ -1849,7 +1849,8 @@ impl GatewayCommand {
     }
 
     /// Reads that change no semantic state. An offline execution against the
-    /// state file does not rewrite the file for these.
+    /// state file does not rewrite the file for these, nor does a running
+    /// service after it answers one (606b).
     pub fn is_read_only(&self) -> bool {
         matches!(
             self,
