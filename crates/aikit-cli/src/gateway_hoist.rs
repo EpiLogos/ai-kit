@@ -189,6 +189,7 @@ pub fn pack(home: &AikitHome, args: &HoistArgs) -> Result<PackedPosture> {
     })?);
     let state_file = home.gateway_state();
     if state_file.exists() {
+        // Read unlocked and never kept: a record this stamps travels stamped in the snapshot, and the source state stamps it again at its own next load (two stamps, one per gateway; be2h leaves it so).
         gateway = aikit_adapters::restore_gateway_state(gateway, Some(&state_file))?;
     }
     let mut gateway_state = gateway.snapshot();

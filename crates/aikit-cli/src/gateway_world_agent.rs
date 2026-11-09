@@ -23,8 +23,10 @@
 //!   and its own credential variable only, an empty HOME and working folder of
 //!   its own, no MCP and no skills, and refused unless its session reports no
 //!   tools. Its only input is the ask's words and the resolved parts' labels
-//!   and text, quoted as data. With no harness elected the ask waits, and the
-//!   asker reads "Waiting for the world's agent."
+//!   and text, quoted as data. With no harness elected, or one that cannot be
+//!   confined now (be2h: the pi it names is gone, named by no absolute path,
+//!   or not of the 1.5 line), the ask waits, and the asker reads "Waiting for
+//!   the world's agent."
 //! - **What it may say** is checked before anything is sent: words within the
 //!   field's bound, at most 16 cites, each one a resolved part.
 //! - **Where it goes** is where the ask truly came from, as the journal
@@ -32,13 +34,16 @@
 //!   Position (`aikit:sender-of:<ref>`). A Claimed asker is no destination:
 //!   its ask is closed, declined.
 //! - **It ends once.** The journal takes one answer per ask. A turn that fails
-//!   or says no answer, and every error after the ask is taken, sends one
-//!   plain decline; an ask waiting 24 hours is declined.
+//!   or says no answer, and every error after the ask is taken but a harness
+//!   that cannot be confined now, sends one plain decline; an ask waiting 24
+//!   hours is declined.
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use aikit_adapters::connection_process::ModelEnvironment;
+use aikit_adapters::runner::SystemRunner;
 use aikit_adapters::{pi_provider_credential_variables, pi_selected_provider, pi_version_fits};
 use aikit_adapters::{
     AgentHostTurnSource, CommuniqueDraft, CommuniqueHandling, CommuniqueState,
@@ -601,8 +606,9 @@ pub struct ResolvedPi {
 
 /// Resolve the pi an election's argv names: only the pi AIKit resolves, by
 /// its name or by its path; never another program that happens to be named
-/// pi. Its version is read from the program itself.
-pub fn resolve_pi(named: &str) -> std::result::Result<ResolvedPi, String> {
+/// pi. Elected by a path from the root (be2h), and its version read from the
+/// program itself, confined ([`pi_reported_version`]).
+pub fn resolve_pi(home: &AikitHome, named: &str) -> std::result::Result<ResolvedPi, String> {
     let profile = aikit_adapters::profiles::for_slug("pi")
         .ok_or("AIKit carries no harness profile for pi")?;
     let executable = profile
@@ -623,31 +629,101 @@ pub fn resolve_pi(named: &str) -> std::result::Result<ResolvedPi, String> {
             program.display()
         ));
     }
-    let version = pi_reported_version(&program)?;
+    let program = from_the_root(&program)?;
+    let version = pi_reported_version(home, &program, PI_VERSION_BOUND)?;
     Ok(ResolvedPi { program, version })
 }
 
-/// What `program --version` prints, within AIKit's probe bound.
-fn pi_reported_version(program: &Path) -> std::result::Result<String, String> {
-    use aikit_adapters::runner::CommandRunner as _;
-    let output = crate::probe::probe_runner()
-        .run(&[program.display().to_string(), "--version".into()])
+/// `program` as a path from the root (DLW build ruling 2026-11-09, be2h): its
+/// folder made canonical, so an empty or relative PATH entry never yields a
+/// relative pi, and its own name kept. pi's own install is a link named pi
+/// to a script that is not, and only a program named pi is held to no tools
+/// by its flags, so the program's own link is not followed.
+fn from_the_root(program: &Path) -> std::result::Result<PathBuf, String> {
+    let name = program
+        .file_name()
+        .ok_or_else(|| format!("{} names no program", program.display()))?;
+    let folder = program
+        .parent()
+        .filter(|folder| !folder.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    let folder = std::fs::canonicalize(folder).map_err(|error| {
+        format!(
+            "the folder of {} could not be read: {error}",
+            program.display()
+        )
+    })?;
+    Ok(folder.join(name))
+}
+
+/// How long pi's `--version` may take (DLW build ruling 2026-11-09, be2h):
+/// AIKit's own bound, never read from the environment.
+pub const PI_VERSION_BOUND: Duration = Duration::from_secs(10);
+
+/// What a program prints for `--version`: [`pi_reported_version`] within
+/// [`PI_VERSION_BOUND`], or what a test names.
+pub type ReadVersion<'a> = &'a dyn Fn(&Path) -> std::result::Result<String, String>;
+
+/// Each `--version` read's own folder in this process.
+static VERSION_READS: AtomicU64 = AtomicU64::new(0);
+
+/// What `program --version` prints, read as an answer turn runs (DLW build
+/// ruling 2026-11-09, be2h): with PATH and LANG only, an empty HOME of its
+/// own and an empty working folder, nothing of AIKit's, Central's or the
+/// occupant's (no gateway token, Position, generation or ambient key), and
+/// within `bound`, its process group ended when the bound passes. Only what
+/// it printed, or why there is nothing, in words that carry none of its
+/// stderr.
+pub fn pi_reported_version(
+    home: &AikitHome,
+    program: &Path,
+    bound: Duration,
+) -> std::result::Result<String, String> {
+    if !program.is_file() {
+        return Err(format!("{} is gone", program.display()));
+    }
+    let root = world_agent_dir(home).join("versions").join(format!(
+        "{}-{}",
+        std::process::id(),
+        VERSION_READS.fetch_add(1, Ordering::SeqCst)
+    ));
+    let (empty_home, work) = (root.join("home"), root.join("work"));
+    let _ = std::fs::remove_dir_all(&root);
+    let ran = std::fs::create_dir_all(&empty_home)
+        .and_then(|()| std::fs::create_dir_all(&work))
         .map_err(|error| {
             format!(
-                "{} --version could not be read: {}",
-                program.display(),
-                error.message()
+                "the empty folder {} --version runs in could not be made: {error}",
+                program.display()
             )
-        })?;
+        })
+        .and_then(|()| {
+            let mut command = std::process::Command::new(program);
+            command.arg("--version").current_dir(&work);
+            ModelEnvironment::isolated(&empty_home).apply(&mut command);
+            SystemRunner::new()
+                .with_timeout(bound)
+                .with_output_limit_bytes(64 * 1024)
+                .capture_command(&mut command)
+                .map_err(|error| match error.code() {
+                    "mux.command_timeout" => format!(
+                        "{} --version did not answer within {} ms",
+                        program.display(),
+                        bound.as_millis()
+                    ),
+                    code => format!("{} --version could not be run ({code})", program.display()),
+                })
+        });
+    let _ = std::fs::remove_dir_all(&root);
+    let output = ran?;
     if output.status != 0 {
         return Err(format!(
-            "{} --version exited {}: {}",
+            "{} --version exited {}",
             program.display(),
-            output.status,
-            output.stderr.trim()
+            output.status
         ));
     }
-    Ok(output.stdout.trim().to_owned())
+    Ok(output.stdout)
 }
 
 /// `aikit gateway answer-harness`.
@@ -668,7 +744,7 @@ pub fn elect_answer_harness(
     gateway: &dyn GatewayAccess,
     request: ElectHarness<'_>,
 ) -> Result<Value> {
-    elect_answer_harness_with(home, gateway, request, &resolve_pi)
+    elect_answer_harness_with(home, gateway, request, &|named| resolve_pi(home, named))
 }
 
 /// [`elect_answer_harness`] with pi resolved by `resolve` (tests name the
@@ -691,6 +767,11 @@ pub fn elect_answer_harness_with(
         write_record(gateway, HARNESS_KEY, None)?;
         return Ok(json!({"schema": ANSWER_HARNESS_SCHEMA, "harness": null}));
     }
+    // The gateway's own check that this is the person's connection, before
+    // any program is resolved or run (DLW build ruling 2026-11-09, be2h):
+    // the election as it stands, written back unchanged, which the gateway
+    // takes only from the person's own connection.
+    write_record(gateway, HARNESS_KEY, read_record(gateway, HARNESS_KEY)?)?;
     let raw = request.protocol.unwrap_or_default();
     let refuse = |code: &'static str, fact: String| {
         three_part(code, fact, "Nothing was elected.", ELECT_EXAMPLE)
@@ -999,26 +1080,34 @@ fn reply_object(said: &str) -> std::result::Result<Value, String> {
     serde_json::from_str(inner).map_err(|_| "the turn's reply is not one JSON object".to_owned())
 }
 
-/// ONE turn on the elected harness, confined before the prompt (DLW build
-/// ruling 2026-11-09): only a harness its protocol can hold to no tools; an
-/// empty working folder and an empty HOME of its own; PATH, LANG and the
-/// harness's own credential variable only; no MCP and no skills; its session
-/// refused unless it reports no tools; launch, handshake, session open and
-/// the turn all within [`ANSWER_TURN_TIMEOUT`]. Its reply, or why there is
-/// none.
-pub fn take_answer_turn(
-    home: &AikitHome,
-    harness: &AnswerHarness,
-    ask_communique: &str,
-    prompt: String,
-) -> std::result::Result<String, String> {
-    let protocol = protocol_of(&harness.protocol).ok_or_else(|| {
-        format!(
-            "the elected harness speaks {}, which AIKit does not",
-            harness.protocol
-        )
-    })?;
-    let name = format!(
+/// Why an answer turn gave no reply (DLW build ruling 2026-11-09, be2h).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TurnRefusal {
+    /// The elected harness cannot be confined now: nothing ran, and the ask
+    /// waits, as with none elected, for the person to elect again, until its
+    /// day has passed.
+    Waits(String),
+    /// The turn could not run, or said nothing that answers: the ask is
+    /// declined.
+    Declines(String),
+}
+
+impl From<String> for TurnRefusal {
+    fn from(why: String) -> Self {
+        Self::Declines(why)
+    }
+}
+
+impl std::fmt::Display for TurnRefusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Waits(why) | Self::Declines(why) => f.write_str(why),
+        }
+    }
+}
+
+fn harness_name(harness: &AnswerHarness) -> String {
+    format!(
         "{} ({})",
         harness.protocol,
         harness
@@ -1026,24 +1115,95 @@ pub fn take_answer_turn(
             .first()
             .map(String::as_str)
             .unwrap_or("no argv")
-    );
+    )
+}
+
+/// The elected harness as it stands, read with no process run (be2h): a
+/// protocol AIKit speaks and elects, and an argv that protocol holds to no
+/// tools.
+fn harness_confines(
+    harness: &AnswerHarness,
+) -> std::result::Result<ConversationHarnessProtocol, String> {
+    let protocol = protocol_of(&harness.protocol).ok_or_else(|| {
+        format!(
+            "the elected harness speaks {}, which AIKit does not",
+            harness.protocol
+        )
+    })?;
     electable(protocol)?;
-    protocol
-        .confines(&harness.argv)
-        .map_err(|why| format!("AIKit cannot hold the {name} harness to no tools: {why}"))?;
-    // The pi elected may have been replaced since (be2f): its version is
-    // read again before each turn.
-    pi_reported_version(Path::new(&harness.argv[0]))
-        .and_then(|version| pi_version_fits(&version))
-        .map_err(|why| format!("AIKit cannot hold the {name} harness to no tools: {why}"))?;
+    protocol.confines(&harness.argv).map_err(|why| {
+        format!(
+            "AIKit cannot hold the {} harness to no tools: {why}",
+            harness_name(harness)
+        )
+    })?;
+    Ok(protocol)
+}
+
+/// The pi the election names, read again (be2f, be2h): by a path from the
+/// root, there, and printing a version of the 1.5 line. An argv[0] that is
+/// no path from the root is an election made before AIKit's pi check, never
+/// run by whatever PATH holds.
+fn elected_pi_fits(
+    harness: &AnswerHarness,
+    read_version: ReadVersion<'_>,
+) -> std::result::Result<(), String> {
+    let program = Path::new(harness.argv.first().map_or("", String::as_str));
+    if !program.is_absolute() {
+        return Err(format!(
+            "its pi is named {:?}, by no path from the root: this election predates AIKit's pi check",
+            program.display().to_string()
+        ));
+    }
+    read_version(program).and_then(|version| pi_version_fits(&version))
+}
+
+/// Why the elected harness cannot be confined now, and what to do (be2h):
+/// bounded words of AIKit's own, with none of the harness's stderr.
+fn cannot_be_confined_now(why: &str) -> String {
+    format!(
+        "the elected answer harness cannot be confined now: {why}; elect a 1.5 pi again with: {ELECT_EXAMPLE}"
+    )
+}
+
+/// ONE turn on the elected harness, confined before the prompt (DLW build
+/// ruling 2026-11-09): only a harness its protocol can hold to no tools; an
+/// empty working folder and an empty HOME of its own; PATH, LANG and the
+/// harness's own credential variable only; no MCP and no skills; its session
+/// refused unless it reports no tools; launch, handshake, session open and
+/// the turn all within [`ANSWER_TURN_TIMEOUT`]. What needs no process is
+/// read first, and the pi it names last, just before the launch (be2h). Its
+/// reply, or why there is none: [`TurnRefusal::Waits`] when the elected
+/// harness cannot be confined now.
+pub fn take_answer_turn(
+    home: &AikitHome,
+    harness: &AnswerHarness,
+    ask_communique: &str,
+    prompt: String,
+) -> std::result::Result<String, TurnRefusal> {
+    take_answer_turn_with(home, harness, ask_communique, prompt, &|program| {
+        pi_reported_version(home, program, PI_VERSION_BOUND)
+    })
+}
+
+/// [`take_answer_turn`] with pi's `--version` read by `read_version` (tests
+/// name what it reads).
+pub fn take_answer_turn_with(
+    home: &AikitHome,
+    harness: &AnswerHarness,
+    ask_communique: &str,
+    prompt: String,
+    read_version: ReadVersion<'_>,
+) -> std::result::Result<String, TurnRefusal> {
+    let waits = |why: String| TurnRefusal::Waits(cannot_be_confined_now(&why));
+    let name = harness_name(harness);
+    let protocol = harness_confines(harness).map_err(waits)?;
     if let Some(why) = harness
         .credential_env
         .as_deref()
         .and_then(|variable| credential_refused(variable, &harness.argv))
     {
-        return Err(format!(
-            "the {name} harness is not given its credential: {why}"
-        ));
+        return Err(format!("the {name} harness is not given its credential: {why}").into());
     }
     let key = key_of(ask_communique);
     let reference = |raw: String| ResourceRef::parse(&raw).map_err(|error| error.to_string());
@@ -1067,21 +1227,17 @@ pub fn take_answer_turn(
             )
             .map_err(|error| error.message().to_owned())?;
     }
+    // Last before the launch (be2h): the pi elected, read again (be2f).
+    elected_pi_fits(harness, read_version).map_err(waits)?;
     // Every return from here on goes through `finish`, which removes the
     // turn's folder (DLW build ruling 2026-11-09, be2d).
     let finish = |outcome: std::result::Result<String, String>| {
         let _ = std::fs::remove_dir_all(&root);
-        outcome
+        outcome.map_err(TurnRefusal::Declines)
     };
-    // Made while the pass's leftover removal is held off (be2f).
     let work = root.join("work");
-    let made = folders_lock(home, FOLDERS_LOCK_WAIT)
-        .map_err(|error| error.message().to_owned())
-        .and_then(|_held| {
-            let _ = std::fs::remove_dir_all(&root);
-            std::fs::create_dir_all(&work).map_err(|error| error.to_string())
-        });
-    if let Err(error) = made {
+    let _ = std::fs::remove_dir_all(&root);
+    if let Err(error) = std::fs::create_dir_all(&work) {
         return finish(Err(format!("the turn's folder could not be made: {error}")));
     }
     let started = Instant::now();
@@ -1255,7 +1411,8 @@ fn turn_lock(home: &AikitHome, asked: &str) -> Result<ContextLock> {
 /// it said checked whole; the answer sent where the ask came from, which ends
 /// the ask in the journal. Once the ask is taken, a turn that fails, says no
 /// answer, or meets any error sends the one decline instead. With no harness
-/// elected nothing is sent, and the ask waits.
+/// elected, or one that cannot be confined now (be2h), nothing is sent, and
+/// the ask waits.
 pub fn answer(
     home: &AikitHome,
     owners: &dyn ContactOwners,
@@ -1283,7 +1440,7 @@ pub fn answer_with(
     cwd: &Path,
     request: AnswerRequest<'_>,
     now: u64,
-    turn: &dyn Fn(&AnswerHarness, String, &str) -> std::result::Result<String, String>,
+    turn: &dyn Fn(&AnswerHarness, String, &str) -> std::result::Result<String, TurnRefusal>,
 ) -> Result<Value> {
     let reference = request.communique_ref;
     let answered = resolve_sender(owners, request.from_position)
@@ -1307,6 +1464,18 @@ fn releases_claim(error_code: Option<&str>) -> bool {
     )
 }
 
+/// The refusal for an ask whose elected harness cannot be confined now (DLW
+/// build ruling 2026-11-09, be2h): as with none elected, nothing is sent and
+/// the ask waits, for the person to elect again, until its day has passed.
+fn harness_waits(reference: &str, why: &str) -> AikitError {
+    three_part(
+        "gateway.answer_waiting",
+        format!("{reference} waits, and its asker reads \"{WAITING_WORDS}\": {why}"),
+        "Nothing was sent.",
+        "The gateway's own pass reads the election again on each pass, and declines the ask when its day has passed.",
+    )
+}
+
 /// [`answer_with`] for a sender already resolved.
 #[allow(clippy::too_many_arguments)]
 fn answer_as(
@@ -1317,7 +1486,7 @@ fn answer_as(
     reference: &str,
     sender: &SenderResolution,
     now: u64,
-    turn: &dyn Fn(&AnswerHarness, String, &str) -> std::result::Result<String, String>,
+    turn: &dyn Fn(&AnswerHarness, String, &str) -> std::result::Result<String, TurnRefusal>,
 ) -> Result<Value> {
     let record = expect_record(gateway.call(GatewayCommand::ReadCommunique {
         communique_ref: reference.into(),
@@ -1413,19 +1582,30 @@ fn answer_as(
         let why = "it waited 24 hours with no answer";
         return match decline(why.into(), AnswerParts::default()) {
             Err(error) if error.code() == "gateway.answer_not_verified" => {
-                close_ask(
-                    gateway,
-                    &record,
-                    &format!("declined: {why}, and the decline sent was not stored Verified"),
-                    now,
-                )?;
+                let basis =
+                    format!("declined: {why}, and the decline sent was not stored Verified");
+                let closed = close_ask(gateway, &record, &basis, now)?;
+                // Said as it happened (be2h): closed here, or ended already
+                // by something else, when closing it changed nothing.
+                let consequence = match closed.transitions.last() {
+                    Some(last)
+                        if last.at_unix_ms == now
+                            && last.basis == format!("the ask ended: {basis}") =>
+                    {
+                        "The decline does not count, so the ask was closed, declined: its day has passed.".to_owned()
+                    }
+                    last => format!(
+                        "The decline does not count, and the ask had ended already: {}.",
+                        last.map_or("no transition is recorded", |last| last.basis.as_str())
+                    ),
+                };
                 Err(three_part(
                     "gateway.answer_not_verified",
                     error
                         .details()
                         .get("fact")
                         .map_or_else(|| error.message().to_owned(), Clone::clone),
-                    "The decline does not count, so the ask was closed, declined: its day has passed.",
+                    consequence,
                     format!("Read where it stands: aikit --json gateway message {reference}"),
                 ))
             }
@@ -1469,7 +1649,8 @@ fn answer_as(
             )
         }
     };
-    // From here the ask is taken: every error sends the one decline.
+    // From here the ask is taken: every error sends the one decline, but a
+    // harness that cannot be confined now (be2h), with which the ask waits.
     let parts = match read_disclosure(gateway, &ask.world_ref)
         .and_then(|disclosure| resolve_parts(&disclosure, &ask, &asked))
     {
@@ -1484,11 +1665,14 @@ fn answer_as(
             )
         }
     };
-    let said = turn(
+    let said = match turn(
         &harness,
         answer_prompt(&ask, &parts, &asker_of(&record, &ask)),
         reference,
-    );
+    ) {
+        Err(TurnRefusal::Waits(why)) => return Err(harness_waits(reference, &why)),
+        said => said.map_err(|refusal| refusal.to_string()),
+    };
     let body = said
         .and_then(|said| reply_object(&said))
         .and_then(|value| checked_answer(&parts, &value));
@@ -1681,30 +1865,9 @@ fn claim_path(home: &AikitHome, reference: &str) -> PathBuf {
     world_agent_dir(home).join("claims").join(key_of(reference))
 }
 
-/// How long a claim or a turn waits for the pass's leftover removal to end
-/// before it makes its folder.
-const FOLDERS_LOCK_WAIT: Duration = Duration::from_secs(5);
-
-/// The hold on the world agent's turn folders and claims (DLW build ruling
-/// 2026-11-09, be2f): a claim and a turn make theirs under it, and the pass
-/// removes what ended asks left under it, reading the asks waiting again
-/// first, so it never removes what an ask began after its own reading.
-fn folders_lock(home: &AikitHome, timeout: Duration) -> Result<ContextLock> {
-    ContextLock::acquire(
-        home,
-        "world-agent-folders",
-        LockOptions::default()
-            .with_timeout(timeout)
-            .with_purpose("the world agent's turn folders and claims"),
-    )
-}
-
 /// Take the one start of an ask's answer: a claim made once, retaken only
 /// after it went stale (a start that died without answering).
 fn claim(home: &AikitHome, reference: &str) -> bool {
-    let Ok(_held) = folders_lock(home, FOLDERS_LOCK_WAIT) else {
-        return false;
-    };
     let path = claim_path(home, reference);
     if path
         .parent()
@@ -1753,19 +1916,60 @@ fn current_occupant(owners: &dyn ContactOwners, position: &str) -> Option<String
 /// - a Claimed asker's ask is closed, declined, and never answered;
 /// - an ask whose Position has a current occupant starts `aikit gateway
 ///   answer` as that occupant, one Position's turn at a time, once per ask
-///   (with no harness elected it waits, until its day has passed);
+///   (with no harness elected, or one that cannot be confined now, it waits,
+///   until its day has passed);
 /// - an ask that waited 24 hours, on this gateway's clock, with no occupant
 ///   to answer it, or whose turn lock fails for an I/O reason, is closed,
 ///   declined;
 /// - each Position's occupancy is read once a pass (be2d), and what a pass
 ///   left of an ask no longer waiting (its turn folder, its claim) is
-///   removed.
+///   removed;
+/// - the election is read once a pass, and only when an ask waits to be
+///   started (be2h): the harness as elected, then the pi it names, by its
+///   `--version`, confined. Why it cannot be confined now goes into the
+///   pass's `errors`, and so into the tick's and `aikit gateway status`, as
+///   does every spawn and close that fails.
 pub fn answer_pass(
     home: &AikitHome,
     owners: &dyn ContactOwners,
     gateway: &dyn GatewayAccess,
     now: u64,
     spawn: &dyn Fn(&str, &str, &str) -> std::io::Result<()>,
+) -> Value {
+    answer_pass_with(home, owners, gateway, now, spawn, &|program| {
+        pi_reported_version(home, program, PI_VERSION_BOUND)
+    })
+}
+
+/// Whether asks can be started now (be2h): `Ok(false)` with no harness
+/// elected; why not, in words, when the one elected cannot be confined now
+/// or cannot be read.
+fn harness_ready(
+    gateway: &dyn GatewayAccess,
+    read_version: ReadVersion<'_>,
+) -> std::result::Result<bool, String> {
+    match answer_harness(gateway) {
+        Ok(None) => Ok(false),
+        Ok(Some(harness)) => harness_confines(&harness)
+            .and_then(|_| elected_pi_fits(&harness, read_version))
+            .map(|()| true)
+            .map_err(|why| cannot_be_confined_now(&why)),
+        Err(error) => Err(format!(
+            "the elected answer harness could not be read: {}",
+            error.message()
+        )),
+    }
+}
+
+/// [`answer_pass`] with pi's `--version` read by `read_version` (tests name
+/// what it reads, and its bound).
+pub fn answer_pass_with(
+    home: &AikitHome,
+    owners: &dyn ContactOwners,
+    gateway: &dyn GatewayAccess,
+    now: u64,
+    spawn: &dyn Fn(&str, &str, &str) -> std::io::Result<()>,
+    read_version: ReadVersion<'_>,
 ) -> Value {
     let asks = match gateway
         .call(GatewayCommand::WaitingAsks)
@@ -1774,71 +1978,104 @@ pub fn answer_pass(
         Ok(asks) => asks,
         Err(error) => return json!({"error": error.to_string()}),
     };
-    let elected = answer_harness(gateway).is_ok_and(|harness| harness.is_some());
     let (mut started, mut closed, mut waiting) = (Vec::new(), Vec::new(), Vec::new());
     let mut errors: Vec<Value> = Vec::new();
     let mut turning: Vec<String> = Vec::new();
     let mut occupants: std::collections::HashMap<String, Option<String>> =
         std::collections::HashMap::new();
+    let mut ready: Option<bool> = None;
+    // An ask ended here, or the error that kept it waiting (be2h).
+    let close = |ask: &aikit_adapters::Communique,
+                 basis: &str,
+                 closed: &mut Vec<String>,
+                 waiting: &mut Vec<String>,
+                 errors: &mut Vec<Value>| {
+        match close_ask(gateway, ask, basis, now) {
+            Ok(_) => closed.push(ask.communique_ref.clone()),
+            Err(error) => {
+                errors.push(json!({
+                    "communique_ref": ask.communique_ref,
+                    "error": format!("the ask could not be ended: {error}"),
+                }));
+                waiting.push(ask.communique_ref.clone());
+            }
+        }
+    };
     for ask in asks {
         let reference = ask.communique_ref.clone();
         let asked = ask.to_position_ref.clone();
         let expired = ask.ask_expired(now);
         if ask.attribution == SenderAttribution::Claimed {
             let basis = "declined: its asker named a Position this gateway did not verify, so no answer may go there";
-            if close_ask(gateway, &ask, basis, now).is_ok() {
-                closed.push(reference);
-            }
+            close(&ask, basis, &mut closed, &mut waiting, &mut errors);
             continue;
         }
         let occupant = occupants
             .entry(asked.clone())
             .or_insert_with(|| current_occupant(owners, &asked))
             .clone();
-        match occupant {
-            Some(generation) if elected || expired => {
-                let lock = if turning.contains(&asked) {
-                    Err(None)
-                } else {
-                    match turn_lock(home, &asked) {
-                        Ok(_) => Ok(()),
-                        Err(error) if error.code() == LOCK_BUSY => Err(None),
-                        Err(error) => Err(Some(error)),
-                    }
-                };
-                match lock {
-                    Ok(())
-                        if claim(home, &reference)
-                            && spawn(&reference, &asked, &generation).is_ok() =>
-                    {
-                        turning.push(asked);
-                        started.push(reference);
-                    }
-                    Err(Some(error)) if expired => {
-                        let basis = format!(
-                            "declined: it waited 24 hours, and the lock for its answer turn could not be taken (an I/O error): {}",
-                            error.message()
-                        );
-                        if close_ask(gateway, &ask, &basis, now).is_ok() {
-                            closed.push(reference);
-                        }
-                    }
-                    Err(Some(error)) => {
-                        errors.push(json!({
-                            "communique_ref": reference,
-                            "error": turn_lock_failed(&asked, &reference, &error).to_string(),
-                        }));
-                        waiting.push(reference);
-                    }
-                    _ => waiting.push(reference),
-                }
-            }
-            None if expired => {
+        let Some(generation) = occupant else {
+            if expired {
                 let basis =
                     format!("declined: it waited 24 hours, and no occupant of {asked} answered it");
-                if close_ask(gateway, &ask, &basis, now).is_ok() {
-                    closed.push(reference);
+                close(&ask, &basis, &mut closed, &mut waiting, &mut errors);
+            } else {
+                waiting.push(reference);
+            }
+            continue;
+        };
+        // A day waited is declined by the turn whatever the harness; any
+        // other ask is started only on a harness that can be confined now.
+        let startable = expired
+            || *ready.get_or_insert_with(|| {
+                harness_ready(gateway, read_version).unwrap_or_else(|why| {
+                    errors.push(json!(why));
+                    false
+                })
+            });
+        if !startable {
+            waiting.push(reference);
+            continue;
+        }
+        let lock = if turning.contains(&asked) {
+            Err(None)
+        } else {
+            match turn_lock(home, &asked) {
+                Ok(_) => Ok(()),
+                Err(error) if error.code() == LOCK_BUSY => Err(None),
+                Err(error) => Err(Some(error)),
+            }
+        };
+        match lock {
+            Ok(()) if claim(home, &reference) => match spawn(&reference, &asked, &generation) {
+                Ok(()) => {
+                    turning.push(asked);
+                    started.push(reference);
                 }
+                // Nothing started: the claim goes, and the error is said
+                // (be2h), so the next pass starts it again.
+                Err(error) => {
+                    unclaim(home, &reference);
+                    errors.push(json!({
+                        "communique_ref": reference,
+                        "error": format!("its answer could not be started: {error}"),
+                    }));
+                    waiting.push(reference);
+                }
+            },
+            Err(Some(error)) if expired => {
+                let basis = format!(
+                    "declined: it waited 24 hours, and the lock for its answer turn could not be taken (an I/O error): {}",
+                    error.message()
+                );
+                close(&ask, &basis, &mut closed, &mut waiting, &mut errors);
+            }
+            Err(Some(error)) => {
+                errors.push(json!({
+                    "communique_ref": reference,
+                    "error": turn_lock_failed(&asked, &reference, &error).to_string(),
+                }));
+                waiting.push(reference);
             }
             _ => waiting.push(reference),
         }
@@ -1862,10 +2099,11 @@ pub fn answer_pass(
 /// Remove the turn folders and claims of asks no longer waiting (DLW build
 /// ruling 2026-11-09, be2d): only an ask still waiting keeps either. What
 /// the pass's reading of the asks waiting (`waiting_keys`) does not name is
-/// removed only under the hold claims and turns make their folders under,
-/// and only if the asks waiting, read again under it, do not name it either
-/// (be2f): an ask that began after the pass's reading keeps what it has.
-/// When the hold is taken, nothing is removed this pass. How many were
+/// removed only if the asks waiting, read again, do not name it either
+/// (be2f): an ask that began after the pass's reading keeps what it has. No
+/// lock is held, across that reading or at all (be2h): an ask that no
+/// longer waits can never begin a turn or a claim again, so once the
+/// reading says it ended, what it left is its own to remove. How many were
 /// removed.
 fn remove_leftovers(
     home: &AikitHome,
@@ -1887,9 +2125,6 @@ fn remove_leftovers(
     if candidates.is_empty() {
         return 0;
     }
-    let Ok(_held) = folders_lock(home, Duration::ZERO) else {
-        return 0;
-    };
     let Ok(waiting_now) = gateway
         .call(GatewayCommand::WaitingAsks)
         .and_then(expect_list)
@@ -2371,10 +2606,18 @@ mod tests {
             .unwrap();
             format!("aikit:communique:{reference}")
         }
+        /// The person elects a pi AIKit could confine (be2h: by a path from
+        /// the root; the tests' version reads say what it prints).
         fn elect(&self) {
+            self.elect_pi(ELECTED_PI);
+        }
+        fn elect_pi(&self, program: &str) {
             self.call(GatewayCommand::SetWorldAgentRecord {
                 key: HARNESS_KEY.into(),
-                record: Some(json!({"schema": ANSWER_HARNESS_SCHEMA, "protocol": "acp", "argv": ["fixture"]})),
+                record: Some(
+                    json!({"schema": ANSWER_HARNESS_SCHEMA, "protocol": "pi-rpc",
+                    "argv": pi_argv(program)}),
+                ),
             })
             .unwrap();
         }
@@ -2491,6 +2734,30 @@ mod tests {
     }
 
     const VACANT: &str = "central:position:project:O-I:vacant";
+    const ELECTED_PI: &str = "/opt/pi/bin/pi";
+
+    /// A pi argv AIKit holds to no tools, with `program` as its program.
+    fn pi_argv(program: &str) -> Vec<String> {
+        [
+            program,
+            "--mode",
+            "rpc",
+            "--no-session",
+            "-nt",
+            "-ne",
+            "-ns",
+            "--no-mcp",
+            "-nc",
+        ]
+        .map(str::to_owned)
+        .to_vec()
+    }
+
+    /// The version a pi of the 1.5 line prints (be2h's seam: no test runs a
+    /// pi from PATH).
+    fn fits(_: &Path) -> std::result::Result<String, String> {
+        Ok("1.5.0\n".into())
+    }
     const ELSEWHERE: &str = "central:position:project:O-I:keeper";
     const DAY_MS: u64 = aikit_adapters::ASK_EXPIRES_AFTER_MS;
 
@@ -2537,7 +2804,7 @@ mod tests {
             Ok(())
         };
 
-        let pass = answer_pass(&home, &owners, &journal, 20, &spawn);
+        let pass = answer_pass_with(&home, &owners, &journal, 20, &spawn, &fits);
         assert_eq!(pass["started"], json!([]), "no harness elected: {pass}");
         assert_eq!(pass["closed"], json!([claimed.clone()]), "{pass}");
         assert!(
@@ -2553,7 +2820,7 @@ mod tests {
             .contains("did not verify"));
 
         journal.elect();
-        let pass = answer_pass(&home, &owners, &journal, 13 + DAY_MS, &spawn);
+        let pass = answer_pass_with(&home, &owners, &journal, 13 + DAY_MS, &spawn, &fits);
         assert_eq!(pass["started"], json!([first.clone()]), "{pass}");
         assert_eq!(
             pass["closed"],
@@ -2571,7 +2838,7 @@ mod tests {
             "as the asked Position's own occupant, once"
         );
         // Its claim stands: the next pass starts the second, never the first again.
-        let pass = answer_pass(&home, &owners, &journal, 13 + DAY_MS, &spawn);
+        let pass = answer_pass_with(&home, &owners, &journal, 13 + DAY_MS, &spawn, &fits);
         assert_eq!(pass["started"], json!([second.clone()]), "{pass}");
         assert_eq!(spawned.borrow().len(), 2);
     }
@@ -2786,8 +3053,14 @@ mod tests {
                 credential_env: None,
             };
             let why =
-                take_answer_turn(&home, &stored, "aikit:communique:x", "p".into()).unwrap_err();
-            assert!(why.contains(&format!("no {which} agent")), "{why}");
+                take_answer_turn_with(&home, &stored, "aikit:communique:x", "p".into(), &|_| {
+                    panic!("nothing is run for a harness that is not pi")
+                })
+                .unwrap_err();
+            assert!(
+                matches!(&why, TurnRefusal::Waits(words) if words.contains(&format!("no {which} agent"))),
+                "it waits, never declined: {why:?}"
+            );
         }
         // Review 5 (be2d): pi's own grammar; a confining flag read as another
         // flag's value is refused in words.
@@ -2861,8 +3134,9 @@ mod tests {
         let error = elect("pi-rpc", &anthropic, Some("ANTHROPIC_API_KEY"), None).unwrap_err();
         assert_eq!(error.code(), "gateway.answer_harness_not_confined");
         assert!(
-            error.to_string().contains("this pi is version 1.6.0")
-                && error.to_string().contains("as pi 1.5.0 reads them"),
+            error
+                .to_string()
+                .contains("pi 1.6.0 is not the 1.5 line AIKit confines"),
             "{error}"
         );
         *resolved.borrow_mut() = Err("pi is not the pi AIKit resolves (/opt/pi/bin/pi)".into());
@@ -2920,8 +3194,12 @@ mod tests {
             credential_env: None,
         };
         let why = take_answer_turn(&home, &stored, "aikit:communique:x", "p".into()).unwrap_err();
+        let TurnRefusal::Waits(why) = why else {
+            panic!("a pi that cannot be confined now leaves the ask waiting: {why:?}");
+        };
         assert!(
-            why.contains("this pi is version 1.6.0") && why.contains("as pi 1.5.0 reads them"),
+            why.contains("pi 1.6.0 is not the 1.5 line AIKit confines")
+                && why.contains("elect a 1.5 pi again with: aikit gateway answer-harness"),
             "{why}"
         );
     }
@@ -3086,6 +3364,95 @@ mod tests {
             "{:?}",
             record.transitions.last()
         );
+        // No further decline is sent (be2h): a later start finds it ended,
+        // and the pass never starts it again.
+        let declines = || {
+            expect_list(
+                journal
+                    .call(GatewayCommand::CommuniqueInbox {
+                        position_ref: VACANT.into(),
+                    })
+                    .unwrap(),
+            )
+            .unwrap()
+            .iter()
+            .filter(|reply| reply.reply_to.as_deref() == Some(ask.as_str()))
+            .count()
+        };
+        assert_eq!(declines(), 1, "the one decline, stored unverified");
+        let again = answer_as(
+            &home,
+            &owners,
+            &Unverifying(&journal),
+            dir.path(),
+            &ask,
+            &verified(ASKED),
+            late + 1,
+            &said,
+        )
+        .unwrap_err();
+        assert_eq!(again.code(), "gateway.ask_ended", "{again}");
+        let spawn = |_: &str, _: &str, _: &str| -> std::io::Result<()> {
+            panic!("an ended ask is never started")
+        };
+        answer_pass_with(&home, &owners, &journal, late + 2, &spawn, &fits);
+        assert_eq!(declines(), 1, "no further decline is sent");
+    }
+
+    /// A gateway on which something else ends every ask just before AIKit
+    /// closes it: closing it then changes nothing.
+    struct EndedFirst<'a>(&'a Journal);
+
+    impl GatewayAccess for EndedFirst<'_> {
+        fn call(&self, command: GatewayCommand) -> Result<GatewayResponse> {
+            if let GatewayCommand::CloseAsk {
+                communique_ref,
+                at_unix_ms,
+                ..
+            } = &command
+            {
+                self.0.call(GatewayCommand::CloseAsk {
+                    communique_ref: communique_ref.clone(),
+                    basis: "answered on another carrier".into(),
+                    at_unix_ms: *at_unix_ms,
+                })?;
+            }
+            Unverifying(self.0).call(command)
+        }
+    }
+
+    /// be2h (review nit): when the ask had ended already as AIKit closes it,
+    /// the words say it ended, never that AIKit closed it, declined.
+    #[test]
+    fn a_close_that_finds_the_ask_ended_says_it_ended() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = AikitHome::at(dir.path());
+        let journal = Journal::new();
+        journal.elect();
+        let owners = Occupancy::new(vec![(ASKED, "gen-scribe")]);
+        let said = |_: &AnswerHarness, _: String, _: &str| Ok(ANSWERED.to_owned());
+        let ask = journal.ask_verified("waited", ASKED, VACANT);
+        let late = 10 + DAY_MS;
+        journal.at(late);
+        let error = answer_as(
+            &home,
+            &owners,
+            &EndedFirst(&journal),
+            dir.path(),
+            &ask,
+            &verified(ASKED),
+            late,
+            &said,
+        )
+        .unwrap_err();
+        assert_eq!(error.code(), "gateway.answer_not_verified", "{error}");
+        assert!(
+            error
+                .to_string()
+                .contains("the ask had ended already: the ask ended: answered on another carrier"),
+            "{error}"
+        );
+        assert!(!error.to_string().contains("closed, declined"), "{error}");
     }
 
     /// Review 10 (be2d): a turn lock that fails for an I/O reason is named as
@@ -3121,7 +3488,7 @@ mod tests {
         );
 
         let spawn = |_: &str, _: &str, _: &str| Ok(());
-        let pass = answer_pass(&home, &owners, &journal, 20, &spawn);
+        let pass = answer_pass_with(&home, &owners, &journal, 20, &spawn, &fits);
         assert_eq!(pass["started"], json!([]), "{pass}");
         assert_eq!(pass["waiting"], json!([ask.clone()]), "{pass}");
         assert!(
@@ -3131,7 +3498,7 @@ mod tests {
                 .contains("an I/O error"),
             "{pass}"
         );
-        let pass = answer_pass(&home, &owners, &journal, 10 + DAY_MS, &spawn);
+        let pass = answer_pass_with(&home, &owners, &journal, 10 + DAY_MS, &spawn, &fits);
         assert_eq!(pass["closed"], json!([ask.clone()]), "{pass}");
         let record = journal.record(&ask);
         assert!(!record.ask_waits());
@@ -3178,6 +3545,9 @@ mod tests {
         };
         let why = take_answer_turn(&home, &harness, "aikit:communique:u", "p".into()).unwrap_err();
         std::env::remove_var(variable);
+        let TurnRefusal::Declines(why) = why else {
+            panic!("{why:?}");
+        };
         assert!(why.contains("not as valid Unicode"), "{why}");
         assert!(!why.contains("is not set"), "{why}");
         assert!(
@@ -3214,7 +3584,7 @@ mod tests {
             .unwrap();
         }
         let spawn = |_: &str, _: &str, _: &str| Ok(());
-        let pass = answer_pass(&home, &owners, &journal, 20, &spawn);
+        let pass = answer_pass_with(&home, &owners, &journal, 20, &spawn, &fits);
         assert_eq!(
             owners.1.load(std::sync::atomic::Ordering::SeqCst),
             1,
@@ -3238,9 +3608,8 @@ mod tests {
     }
 
     /// Review 9 (be2f): what an ask began after the pass read the asks
-    /// waiting is never removed as a leftover. The pass reads them again
-    /// under the hold claims and turns make their folders under, and while a
-    /// claim or a turn holds it, removes nothing.
+    /// waiting is never removed as a leftover: the pass reads them again
+    /// before it removes anything (be2h: with no lock held across it).
     #[test]
     fn a_leftover_removal_keeps_what_an_ask_began_after_the_pass_read_the_asks() {
         let dir = tempfile::tempdir().unwrap();
@@ -3262,13 +3631,6 @@ mod tests {
         assert!(turn(&arrived).exists(), "an ask that waits keeps its turn");
         assert!(!claim_path(&home, &ended).exists());
         assert!(!turn(&ended).exists());
-
-        // While a claim or a turn makes its folder, nothing is removed.
-        begin(&ended);
-        let held = folders_lock(&home, Duration::ZERO).unwrap();
-        assert_eq!(remove_leftovers(&home, &journal, &[]), 0);
-        drop(held);
-        assert_eq!(remove_leftovers(&home, &journal, &[]), 2);
     }
 
     /// Review 2 (be2d): a sender's stamp is never arithmetic. An ask stamped at
@@ -3285,13 +3647,13 @@ mod tests {
         // Taken at the end of this gateway's own clock: its day saturates.
         let late = journal.ask_taken_at("late", VACANT, None, u64::MAX, u64::MAX - 1);
         let spawn = |_: &str, _: &str, _: &str| Ok(());
-        let pass = answer_pass(&home, &owners, &journal, 20, &spawn);
+        let pass = answer_pass_with(&home, &owners, &journal, 20, &spawn, &fits);
         assert_eq!(
             pass["waiting"],
             json!([stamped.clone(), late.clone()]),
             "{pass}"
         );
-        let pass = answer_pass(&home, &owners, &journal, 10 + DAY_MS, &spawn);
+        let pass = answer_pass_with(&home, &owners, &journal, 10 + DAY_MS, &spawn, &fits);
         assert_eq!(
             pass["closed"],
             json!([stamped.clone()]),
@@ -3303,6 +3665,378 @@ mod tests {
             journal.record(&stamped).sent_at_unix_ms,
             u64::MAX,
             "kept for display"
+        );
+    }
+
+    /// A fake pi, `NAME/pi` under `dir`: a shell script running `body`.
+    #[cfg(unix)]
+    fn fake_pi(dir: &Path, name: &str, body: &str) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let folder = dir.join(name);
+        std::fs::create_dir_all(&folder).unwrap();
+        let program = folder.join("pi");
+        std::fs::write(&program, format!("#!/bin/sh\n{body}\n")).unwrap();
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
+        program
+    }
+
+    /// A gateway that refuses the person's own records to this connection,
+    /// as the runtime refuses a body presenting an occupant generation.
+    struct NotThePerson<'a>(&'a Journal);
+
+    impl GatewayAccess for NotThePerson<'_> {
+        fn call(&self, command: GatewayCommand) -> Result<GatewayResponse> {
+            match command {
+                GatewayCommand::SetWorldAgentRecord { .. } => Err(AikitError::new(
+                    "agency_gateway.not_the_person",
+                    "this connection presents occupant generation gen-x",
+                )),
+                other => self.0.call(other),
+            }
+        }
+    }
+
+    /// be2h (review 1): a body that is not the person is refused as not the
+    /// person by the gateway's own check before any pi is resolved or run.
+    #[test]
+    fn a_body_that_is_not_the_person_is_refused_before_pi_is_resolved() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = AikitHome::at(dir.path());
+        let journal = Journal::new();
+        let error = elect_answer_harness_with(
+            &home,
+            &NotThePerson(&journal),
+            ElectHarness {
+                protocol: Some("pi-rpc"),
+                argv: pi_argv("pi"),
+                credential_env: None,
+                clear: false,
+                from_position: None,
+            },
+            &|_| panic!("pi is resolved for the person alone"),
+        )
+        .unwrap_err();
+        assert_eq!(
+            error.code(),
+            "gateway.world_agent_not_the_person",
+            "{error}"
+        );
+        assert!(
+            error.to_string().contains("presents occupant generation"),
+            "{error}"
+        );
+        assert!(answer_harness(&journal).unwrap().is_none());
+    }
+
+    /// be2h (review 3): pi's `--version` is read as the turn runs: PATH and
+    /// LANG beside an empty HOME of its own, in an empty folder of its own,
+    /// nothing else of this process's environment; within its bound; and
+    /// in words that carry none of its stderr. Its folders go with it.
+    #[cfg(unix)]
+    #[test]
+    fn pis_version_is_read_confined_bounded_and_in_words_of_aikits_own() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = AikitHome::at(dir.path().join("aikit"));
+        let seen = dir.path().join("seen.txt");
+        let recorder = fake_pi(
+            dir.path(),
+            "recorder",
+            &format!(
+                "{{ env; echo \"@@CWD=$(pwd -P)\"; ls -A \"$HOME\" | sed 's/^/@@HOME_HOLDS=/'; }} > '{}'\necho 1.5.0",
+                seen.display()
+            ),
+        );
+        let allowed = [
+            "PATH",
+            "LANG",
+            "HOME",
+            "PWD",
+            "OLDPWD",
+            "SHLVL",
+            "_",
+            "LC_CTYPE",
+            "__CF_USER_TEXT_ENCODING",
+        ];
+        let ambient: Vec<String> = std::env::vars_os()
+            .map(|(name, _)| name.to_string_lossy().into_owned())
+            .filter(|name| !allowed.contains(&name.as_str()))
+            .collect();
+        assert!(
+            !ambient.is_empty(),
+            "this test's own process has more to withhold"
+        );
+        let printed = pi_reported_version(&home, &recorder, PI_VERSION_BOUND).unwrap();
+        assert_eq!(printed.trim(), "1.5.0");
+        let seen = std::fs::read_to_string(&seen).unwrap();
+        let versions = world_agent_dir(&home).join("versions");
+        for line in seen.lines() {
+            if let Some(cwd) = line.strip_prefix("@@CWD=") {
+                assert!(cwd.ends_with("/work"), "{cwd}");
+                assert!(
+                    cwd.starts_with(std::fs::canonicalize(&versions).unwrap().to_str().unwrap()),
+                    "{cwd}"
+                );
+            } else if let Some(held) = line.strip_prefix("@@HOME_HOLDS=") {
+                panic!("its HOME was not empty: {held}");
+            } else if let Some((name, value)) = line.split_once('=') {
+                assert!(allowed.contains(&name), "{name} reached pi's --version");
+                if name == "HOME" {
+                    assert!(
+                        value.starts_with(versions.to_str().unwrap()) && value.ends_with("/home"),
+                        "{value}"
+                    );
+                }
+            }
+        }
+        assert!(seen.contains("@@CWD="), "{seen}");
+        assert_eq!(
+            std::fs::read_dir(&versions).unwrap().count(),
+            0,
+            "each read's folders go with it"
+        );
+
+        let hangs = fake_pi(dir.path(), "hangs", "exec sleep 30");
+        let started = Instant::now();
+        let why = pi_reported_version(&home, &hangs, Duration::from_millis(300)).unwrap_err();
+        assert!(started.elapsed() < Duration::from_secs(10), "bounded");
+        assert_eq!(
+            why,
+            format!("{} --version did not answer within 300 ms", hangs.display())
+        );
+        let fails = fake_pi(dir.path(), "fails", "echo 'secret stderr' >&2\nexit 3");
+        let why = pi_reported_version(&home, &fails, PI_VERSION_BOUND).unwrap_err();
+        assert_eq!(why, format!("{} --version exited 3", fails.display()));
+        let gone = dir.path().join("gone").join("pi");
+        let why = pi_reported_version(&home, &gone, PI_VERSION_BOUND).unwrap_err();
+        assert_eq!(why, format!("{} is gone", gone.display()));
+    }
+
+    /// be2h (review 2 and 5): a harness that cannot be confined now leaves
+    /// its asks waiting, never declined, and says why in the pass's errors;
+    /// the election is read once a pass, and only when an ask waits to be
+    /// started; electing a pi of the 1.5 line again starts it.
+    #[test]
+    fn a_harness_that_cannot_be_confined_now_leaves_its_asks_waiting_and_says_why() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = AikitHome::at(dir.path());
+        let journal = Journal::new();
+        let owners = Occupancy::new(vec![(ASKED, "gen-scribe")]);
+        let spawned = std::cell::RefCell::new(Vec::new());
+        let spawn = |reference: &str, _: &str, _: &str| {
+            spawned.borrow_mut().push(reference.to_owned());
+            Ok(())
+        };
+        let reads = std::cell::Cell::new(0);
+        let prints = std::cell::RefCell::new("1.6.0\n".to_owned());
+        let read = |_: &Path| {
+            reads.set(reads.get() + 1);
+            Ok(prints.borrow().clone())
+        };
+        journal.elect();
+        // An idle pass, and asks no turn could start, never read it.
+        answer_pass_with(&home, &owners, &journal, 20, &spawn, &read);
+        let elsewhere = journal.ask("elsewhere", VACANT, None, 10);
+        answer_pass_with(&home, &owners, &journal, 20, &spawn, &read);
+        assert_eq!(reads.get(), 0, "no election read with no ask to start");
+
+        let first = journal.ask("first", ASKED, None, 10);
+        let second = journal.ask("second", ASKED, None, 11);
+        let pass = answer_pass_with(&home, &owners, &journal, 20, &spawn, &read);
+        assert_eq!(reads.get(), 1, "read once a pass: {pass}");
+        assert_eq!(pass["started"], json!([]), "{pass}");
+        assert_eq!(
+            pass["waiting"],
+            json!([elsewhere.clone(), first.clone(), second.clone()]),
+            "{pass}"
+        );
+        let words = pass["errors"][0].as_str().unwrap();
+        assert!(
+            words.contains("the elected answer harness cannot be confined now: pi 1.6.0 is not the 1.5 line AIKit confines")
+                && words.contains("elect a 1.5 pi again with: aikit gateway answer-harness"),
+            "{pass}"
+        );
+        assert!(spawned.borrow().is_empty());
+        assert!(journal.record(&first).ask_waits(), "never declined");
+
+        // The turn itself waits too (the answer child's own read).
+        let said = |harness: &AnswerHarness, prompt: String, ask: &str| {
+            take_answer_turn_with(&home, harness, ask, prompt, &read)
+        };
+        let waits = answer_as(
+            &home,
+            &owners,
+            &journal,
+            dir.path(),
+            &first,
+            &verified(ASKED),
+            20,
+            &said,
+        )
+        .unwrap_err();
+        assert_eq!(waits.code(), "gateway.answer_waiting", "{waits}");
+        assert!(
+            waits
+                .to_string()
+                .contains("pi 1.6.0 is not the 1.5 line AIKit confines"),
+            "{waits}"
+        );
+        assert!(releases_claim(Some(waits.code())));
+        assert!(journal.record(&first).ask_waits(), "nothing was sent");
+
+        // A day waited is still declined by its turn, whatever the harness.
+        let late = 10 + DAY_MS;
+        let reads_before = reads.get();
+        let pass = answer_pass_with(&home, &owners, &journal, late, &spawn, &read);
+        assert_eq!(pass["started"], json!([first.clone()]), "{pass}");
+        assert_eq!(reads.get(), reads_before + 1, "{pass}");
+        unclaim(&home, &first);
+        spawned.borrow_mut().clear();
+
+        // The person elects a 1.5 pi again: the next pass starts its asks.
+        *prints.borrow_mut() = "1.5.0\n".into();
+        let pass = answer_pass_with(&home, &owners, &journal, 20, &spawn, &read);
+        assert_eq!(pass["started"], json!([first.clone()]), "{pass}");
+        assert!(pass.get("errors").is_none(), "{pass}");
+
+        // An election made before AIKit's pi check names pi by no path from
+        // the root: it waits, in words, and is never run by PATH.
+        unclaim(&home, &first);
+        journal.elect_pi("pi");
+        let never = |_: &Path| -> std::result::Result<String, String> {
+            panic!("a pi named by no path from the root is never run")
+        };
+        let pass = answer_pass_with(&home, &owners, &journal, 20, &spawn, &never);
+        assert_eq!(pass["started"], json!([]), "{pass}");
+        assert!(
+            pass["errors"][0]
+                .as_str()
+                .unwrap()
+                .contains("its pi is named \"pi\", by no path from the root: this election predates AIKit's pi check"),
+            "{pass}"
+        );
+        let stored = answer_harness(&journal).unwrap().unwrap();
+        let why = take_answer_turn_with(&home, &stored, &first, "p".into(), &never).unwrap_err();
+        assert!(
+            matches!(&why, TurnRefusal::Waits(words) if words.contains("this election predates AIKit's pi check")),
+            "{why:?}"
+        );
+    }
+
+    /// be2h (review 2, the `--version` hang): a pi whose `--version` does not
+    /// answer within its bound leaves the ask waiting, said in the pass's
+    /// errors; the bound is the seam's, never the environment's.
+    #[cfg(unix)]
+    #[test]
+    fn a_pi_whose_version_hangs_past_its_bound_leaves_the_ask_waiting() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = AikitHome::at(dir.path().join("aikit"));
+        let journal = Journal::new();
+        let owners = Occupancy::new(vec![(ASKED, "gen-scribe")]);
+        let hangs = fake_pi(dir.path(), "hangs", "exec sleep 30");
+        journal.elect_pi(hangs.to_str().unwrap());
+        let ask = journal.ask("asked", ASKED, None, 10);
+        let spawn = |_: &str, _: &str, _: &str| -> std::io::Result<()> {
+            panic!("nothing starts on a pi that cannot be read")
+        };
+        let bounded =
+            |program: &Path| pi_reported_version(&home, program, Duration::from_millis(300));
+        let started = Instant::now();
+        let pass = answer_pass_with(&home, &owners, &journal, 20, &spawn, &bounded);
+        assert!(started.elapsed() < Duration::from_secs(10), "{pass}");
+        assert_eq!(pass["waiting"], json!([ask.clone()]), "{pass}");
+        assert!(
+            pass["errors"][0].as_str().unwrap().contains(&format!(
+                "cannot be confined now: {} --version did not answer within 300 ms",
+                hangs.display()
+            )),
+            "{pass}"
+        );
+        assert!(journal.record(&ask).ask_waits());
+        // A pi elected again that answers is read within AIKit's own bound
+        // (a script's first run on macOS may be checked past 300 ms).
+        let answers = fake_pi(dir.path(), "answers", "echo 1.5.0");
+        journal.elect_pi(answers.to_str().unwrap());
+        let spawned = std::cell::Cell::new(0);
+        let spawn = |_: &str, _: &str, _: &str| {
+            spawned.set(spawned.get() + 1);
+            Ok(())
+        };
+        let own = |program: &Path| pi_reported_version(&home, program, PI_VERSION_BOUND);
+        let pass = answer_pass_with(&home, &owners, &journal, 20, &spawn, &own);
+        assert_eq!(pass["started"], json!([ask.clone()]), "{pass}");
+        assert_eq!(spawned.get(), 1);
+    }
+
+    /// A gateway that refuses to end any ask.
+    struct Unclosing<'a>(&'a Journal);
+
+    impl GatewayAccess for Unclosing<'_> {
+        fn call(&self, command: GatewayCommand) -> Result<GatewayResponse> {
+            match command {
+                GatewayCommand::CloseAsk { .. } => Err(AikitError::new(
+                    "agency_gateway.not_the_person",
+                    "Ending an ask unanswered is the person's own act",
+                )),
+                other => self.0.call(other),
+            }
+        }
+    }
+
+    /// be2h (review 6): a start that fails after its claim, and a close that
+    /// fails, are said in the pass's errors; neither falls silently to
+    /// waiting, and the failed start's claim goes, so the next pass starts it.
+    #[test]
+    fn a_start_or_a_close_that_fails_is_said_in_the_passs_errors() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = AikitHome::at(dir.path());
+        let journal = Journal::new();
+        journal.elect();
+        let owners = Occupancy::new(vec![(ASKED, "gen-scribe")]);
+        let ask = journal.ask("asked", ASKED, None, 10);
+        let fails = |_: &str, _: &str, _: &str| Err(std::io::Error::other("no aikit to start"));
+        let pass = answer_pass_with(&home, &owners, &journal, 20, &fails, &fits);
+        assert_eq!(pass["started"], json!([]), "{pass}");
+        assert_eq!(pass["waiting"], json!([ask.clone()]), "{pass}");
+        assert_eq!(pass["errors"][0]["communique_ref"], ask.as_str(), "{pass}");
+        assert_eq!(
+            pass["errors"][0]["error"], "its answer could not be started: no aikit to start",
+            "{pass}"
+        );
+        assert!(
+            !claim_path(&home, &ask).exists(),
+            "nothing started holds it"
+        );
+        let starts = |_: &str, _: &str, _: &str| Ok(());
+        let pass = answer_pass_with(&home, &owners, &journal, 20, &starts, &fits);
+        assert_eq!(pass["started"], json!([ask.clone()]), "{pass}");
+
+        let claimed = journal.ask(
+            "claimed",
+            ELSEWHERE,
+            Some("central:position:world:mara:keeper"),
+            12,
+        );
+        let pass = answer_pass_with(&home, &owners, &Unclosing(&journal), 20, &starts, &fits);
+        assert_eq!(pass["closed"], json!([]), "{pass}");
+        assert!(
+            pass["waiting"]
+                .as_array()
+                .unwrap()
+                .contains(&json!(claimed)),
+            "{pass}"
+        );
+        let said = pass["errors"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|error| error["communique_ref"] == claimed.as_str())
+            .unwrap_or_else(|| panic!("{pass}"));
+        assert!(
+            said["error"]
+                .as_str()
+                .unwrap()
+                .starts_with("the ask could not be ended: "),
+            "{pass}"
         );
     }
 }

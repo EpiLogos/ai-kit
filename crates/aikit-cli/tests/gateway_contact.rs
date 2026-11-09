@@ -3198,6 +3198,8 @@ fn answer_of(reply: &Value) -> Value {
 /// The answer harness: a stdlib-only program named `pi` that speaks pi's RPC
 /// wire, keeps each prompt it is given (`prompt-N.txt`) and the environment
 /// it was launched in (`env-PID.json`), and says what `reply.txt` holds;
+/// asked its `--version`, it prints what `version.txt` holds (1.5.0 without
+/// it) and keeps the environment that read ran in (`version-env-PID.json`);
 /// `TOOL` runs a tool first, as a pi that ignored its no-tools flags would;
 /// its session reports the tools `tools.json` names (no list without it).
 /// Only pi is elected (DLW build ruling 2026-11-09, be2d), so the fake is pi
@@ -3206,6 +3208,10 @@ const ANSWER_HARNESS: &str = r#"#!/usr/bin/env python3
 import json, os, sys
 folder = FOLDER
 if "--version" in sys.argv[1:]:
+    home = os.environ.get("HOME", "")
+    with open(os.path.join(folder, "version-env-%d.json" % os.getpid()), "w") as seen:
+        json.dump({"env": sorted(os.environ), "home": home, "cwd": os.getcwd(),
+                   "home_empty": os.path.isdir(home) and os.listdir(home) == []}, seen)
     kept = os.path.join(folder, "version.txt")
     print(open(kept).read().strip() if os.path.exists(kept) else "1.5.0")
     sys.exit(0)
@@ -3340,10 +3346,25 @@ fn elect_answer_harness(window: &Body<'_>) -> PathBuf {
         refused.to_string().contains("is not the pi AIKit resolves"),
         "{refused}"
     );
-    let (ok, elected) = elect(&program);
+    // Named through a link to it (be2h): the pi AIKit resolves by another
+    // spelling, compared as the file it is, and kept as PATH finds it, by a
+    // path from the root.
+    let linked = window.home.join("linked");
+    std::fs::create_dir_all(&linked).unwrap();
+    let link = linked.join("pi");
+    let _ = std::fs::remove_file(&link);
+    std::os::unix::fs::symlink(&program, &link).unwrap();
+    let (ok, elected) = elect(&link.display().to_string());
     assert!(ok, "{elected}");
     assert_eq!(elected["data"]["harness"]["protocol"], "pi-rpc");
-    assert_eq!(elected["data"]["harness"]["argv"][0], program.as_str());
+    assert_eq!(
+        elected["data"]["harness"]["argv"][0],
+        std::fs::canonicalize(&program)
+            .unwrap()
+            .display()
+            .to_string(),
+        "elected by the path AIKit resolved, from the root"
+    );
     folder
 }
 
@@ -3905,6 +3926,159 @@ fn a_worlds_agent_answers_an_ask_in_one_bounded_turn_from_what_its_world_shows_a
     assert!(
         !population.to_string().contains("aikit:sender-of:"),
         "{population}"
+    );
+    service.stop();
+}
+
+/// The names a confined read or turn may see: PATH and LANG beside its own
+/// HOME, and what macOS adds to every process.
+const CONFINED_ENV: [&str; 5] = [
+    "PATH",
+    "LANG",
+    "HOME",
+    "LC_CTYPE",
+    "__CF_USER_TEXT_ENCODING",
+];
+
+/// be2h (review 2, 3 and 5): a pi that cannot be confined now leaves the ask
+/// waiting, never declined, and `aikit gateway status` says why; electing a
+/// pi of the 1.5 line again gets it answered by the gateway's own pass. Every
+/// `--version` read (the election's, the pass's and the answer turn's) runs
+/// confined; and an election through a relative PATH entry is kept by a path
+/// from the root.
+#[test]
+fn a_pi_that_cannot_be_confined_now_leaves_the_ask_waiting_and_status_says_why() {
+    let world = World::new();
+    world.claim(SCRIBE, "scribe-1", "workcell:a");
+    let window = body(&world, "a", "workcell:a", "agency-gateway/a");
+    let scribe = window.as_occupant(SCRIBE, "scribe-1");
+    let service = Gateway::serve_ticking(&window, None, Some(300));
+    the_world_shows(&window);
+    let harness = elect_answer_harness(&window);
+    harness_says(
+        &harness,
+        r#"{"schema":"oi.world-agent-answer/v1","words":"It is the second plate.","cites":["part:plate-2"]}"#,
+    );
+    // pi was replaced since its election by one of another line.
+    std::fs::write(harness.join("version.txt"), "1.6.0\n").unwrap();
+    let ask_ref = reference_of(&window.ok(&[
+        "gateway",
+        "send",
+        "--to",
+        SCRIBE,
+        "--body",
+        &world_agent_ask(),
+    ]));
+    let words = "pi 1.6.0 is not the 1.5 line AIKit confines";
+    let deadline = Instant::now() + Duration::from_secs(60);
+    let status = loop {
+        let status = window.ok(&["gateway", "status"]);
+        if status.to_string().contains(words) {
+            break status;
+        }
+        assert!(Instant::now() < deadline, "status never said why: {status}");
+        std::thread::sleep(Duration::from_millis(100));
+    };
+    let said = status
+        .pointer("/status/last_tick/errors")
+        .and_then(Value::as_array)
+        .unwrap_or_else(|| panic!("{status}"))
+        .iter()
+        .filter_map(Value::as_str)
+        .find(|error| error.contains(words))
+        .unwrap_or_else(|| panic!("{status}"))
+        .to_owned();
+    assert!(
+        said.contains("elect a 1.5 pi again with: aikit gateway answer-harness"),
+        "{said}"
+    );
+    // It waits: never declined, and no turn ran.
+    let read = window.ok(&["gateway", "replies", &ask_ref]);
+    assert_eq!(read["waiting"], "Waiting for the world's agent.", "{read}");
+    assert_eq!(read["replies"], json!([]), "{read}");
+    assert!(prompts_kept(&harness).is_empty(), "no turn");
+    // The answer turn's own read waits too, with an ambient key beside it.
+    let output = scribe
+        .command(&["gateway", "answer", &ask_ref, "--json"])
+        .env("ANTHROPIC_API_KEY", "ambient-key")
+        .output()
+        .unwrap();
+    let refused: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert!(!output.status.success(), "{refused}");
+    assert_eq!(
+        refused["error"]["code"], "gateway.answer_waiting",
+        "{refused}"
+    );
+    assert!(refused.to_string().contains(words), "{refused}");
+    assert!(
+        window.ok(&["gateway", "replies", &ask_ref])["replies"]
+            .as_array()
+            .unwrap()
+            .is_empty(),
+        "nothing was sent"
+    );
+
+    // The person elects a pi of the 1.5 line again: the pass answers it.
+    std::fs::write(harness.join("version.txt"), "1.5.0\n").unwrap();
+    elect_answer_harness(&window);
+    let replies = replies_once(&window, &ask_ref, 1);
+    assert_eq!(
+        answer_of(&replies["replies"][0]),
+        json!({"schema": "oi.world-agent-answer/v1", "words": "It is the second plate.",
+            "cites": [{"part_ref": "part:plate-2", "star_ref": "star:rosarium"}]})
+    );
+
+    // Every --version read ran confined: the election's, the pass's and
+    // the turns'.
+    let reads: Vec<Value> = std::fs::read_dir(&harness)
+        .unwrap()
+        .filter_map(Result::ok)
+        .filter(|entry| {
+            entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with("version-env-")
+        })
+        .map(|entry| serde_json::from_str(&std::fs::read_to_string(entry.path()).unwrap()).unwrap())
+        .collect();
+    assert!(reads.len() >= 4, "{reads:?}");
+    for read in &reads {
+        for name in read["env"].as_array().unwrap() {
+            assert!(
+                CONFINED_ENV.contains(&name.as_str().unwrap()),
+                "{name} reached pi's --version: {read}"
+            );
+        }
+        assert_eq!(read["home_empty"], true, "{read}");
+        let home = read["home"].as_str().unwrap();
+        assert!(
+            home.ends_with("/home") && home.contains("world-agent"),
+            "{read}"
+        );
+        assert!(!Path::new(home).exists(), "its HOME went with it: {read}");
+        assert!(read["cwd"].as_str().unwrap().ends_with("/work"), "{read}");
+    }
+
+    // pi found through a relative PATH entry is kept by a path from the root.
+    answer_harness_program(&window.home);
+    let mut elect_pi = vec![
+        "gateway",
+        "answer-harness",
+        "--protocol",
+        "pi-rpc",
+        "--",
+        "pi",
+    ];
+    elect_pi.extend(PI_CONFINED);
+    let (ok, elected) = json_first_on_path(&window, &elect_pi, Some(Path::new(".")));
+    assert!(ok, "{elected}");
+    assert_eq!(
+        elected["data"]["harness"]["argv"][0],
+        std::fs::canonicalize(&window.home)
+            .unwrap()
+            .join("pi")
+            .display()
+            .to_string()
     );
     service.stop();
 }

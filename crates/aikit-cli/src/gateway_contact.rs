@@ -855,11 +855,14 @@ impl aikit_adapters::GatewayOccupancyReader for ServedOccupancy {
 /// build ruling 2026-11-09, be2d). This Workcell's Actuation is asked first,
 /// and its word stands: when the Position has a current occupant here, no
 /// other Workcell is asked. Only when this Workcell's Actuation cannot be
-/// asked at all, or it refuses and then reads the Position vacant, is a
+/// asked at all, or it refuses and then reads the Position vacant (its
+/// reading says `vacant` for exactly that Position, be2h), is a
 /// relayed record verified by the Workcell it names as its origin: the
 /// declared remote whose gateway is the record's origin, reading the
 /// Position current on its own Workcell for exactly that generation. After a
-/// refusal, a reading that fails is no vacancy: nothing else is asked (be2f).
+/// refusal, a reading that fails is no vacancy: nothing else is asked (be2f);
+/// nor is anything asked over a reading that does not show that Position
+/// vacant (be2h).
 /// A body that speaks here (`origin_gateway_ref` is `None`) is verified only
 /// here.
 ///
@@ -887,14 +890,26 @@ fn verify_occupant(
                 refusal.code, refusal.fact
             );
             // Only a clean vacant reading lets another Workcell be asked
-            // (be2f): a reading that fails is no vacancy.
+            // (be2f): a reading that fails is no vacancy, and neither is one
+            // that does not say `vacant` for this very Position (be2h).
             match owners.occupancy_read(position_ref) {
                 Ok(reading) if tenure_in(&reading, position_ref).is_some() => {
                     return Err(format!(
                         "{refused}; {position_ref} has a current occupant on this Workcell, so no other Workcell is asked"
                     ))
                 }
-                Ok(_) => refused,
+                Ok(reading)
+                    if reading.get("state").and_then(Value::as_str) == Some("vacant")
+                        && reading.get("position_ref").and_then(Value::as_str)
+                            == Some(position_ref) =>
+                {
+                    refused
+                }
+                Ok(_) => {
+                    return Err(format!(
+                        "{refused}; this Workcell's reading of {position_ref} does not show it vacant, so no other Workcell is asked"
+                    ))
+                }
                 Err(unreadable) => {
                     return Err(format!(
                         "{refused}; {position_ref}'s occupancy on this Workcell could not be read ({}: {}), so no other Workcell is asked",
@@ -4590,20 +4605,19 @@ impl aikit_adapters::GatewayTick for GatewayServiceTick {
     fn tick(&self) -> Result<Value> {
         let dispatcher = self.dispatcher.as_ref().map(|tick| tick.tick());
         let relay = self.relay.run();
-        // The upgrade-worker surface is retired with the managed-upgrade lane;
-        // no worker ever resumes here, and the tick keeps naming the slot so
-        // readers of the tick document stay stable.
-        match (&dispatcher, &relay) {
-            (Some(Err(error)), _) | (None, Err(error)) => Err(AikitError::new(
-                "gateway.service_tick_failed",
-                error.to_string(),
-            )),
-            _ => Ok(json!({
-                "dispatcher": dispatcher.and_then(|result| result.ok()),
-                "relay": relay.unwrap_or_else(|error| json!({ "error": error.to_string() })),
-                "upgrade": Value::Null,
-            })),
-        }
+        // Both halves' reports, whichever failed (DLW build ruling
+        // 2026-11-09, be2h): a failing dispatcher never hides the relay's
+        // errors from status. The upgrade-worker surface is retired with the
+        // managed-upgrade lane; no worker ever resumes here, and the tick
+        // keeps naming the slot so readers of the tick document stay stable.
+        let report = |half: Result<Value>| {
+            half.unwrap_or_else(|error| json!({ "error": error.to_string() }))
+        };
+        Ok(json!({
+            "dispatcher": dispatcher.map(report),
+            "relay": report(relay),
+            "upgrade": Value::Null,
+        }))
     }
 }
 
@@ -5576,11 +5590,15 @@ mod be2d_tests {
 
     /// This Workcell's Actuation: `occupant` is the current generation here,
     /// none when the Position is vacant here; `read_fails` makes its
-    /// occupancy read fail, as an owner that times out does.
+    /// occupancy read fail, as an owner that times out does; `verify_fails`
+    /// makes it unaskable for a verdict at all (be2h); `reading` is the
+    /// reading it gives in place of the one its occupant makes (be2h).
     #[derive(Default)]
     struct Here {
         occupant: Option<&'static str>,
         read_fails: bool,
+        verify_fails: bool,
+        reading: Option<Value>,
     }
 
     impl ContactOwners for Here {
@@ -5606,6 +5624,9 @@ mod be2d_tests {
                     reason: "timed out".into(),
                 });
             }
+            if let Some(reading) = &self.reading {
+                return Ok(reading.clone());
+            }
             Ok(match self.occupant {
                 Some(generation) => json!({"position_ref": position, "state": "occupied",
                     "current": {"generation_ref": generation, "workcell_ref": "workcell:a"}}),
@@ -5617,6 +5638,12 @@ mod be2d_tests {
             _: &str,
             generation_ref: &str,
         ) -> std::result::Result<OccupancyVerdict, OwnerUnavailable> {
+            if self.verify_fails {
+                return Err(OwnerUnavailable {
+                    command: "actuation occupancy verify".into(),
+                    reason: "timed out".into(),
+                });
+            }
             let refused = |code: &str| {
                 Ok(OccupancyVerdict::Refused(OwnerRefusal {
                     command: "actuation occupancy verify".into(),
@@ -5790,8 +5817,9 @@ mod be2d_tests {
 
     /// Review 2 (be2f): after this Workcell refuses the generation, a reading
     /// of the Position that fails is no vacancy. The record stays unverified
-    /// and no other Workcell is asked, whatever the origin would say. Only
-    /// when Actuation here cannot be asked at all is the origin asked.
+    /// and no other Workcell is asked, whatever the origin would say. (When
+    /// Actuation here cannot be asked at all, the origin is asked: the next
+    /// test.)
     #[test]
     fn a_reading_that_fails_after_a_refusal_asks_no_other_workcell() {
         let asked = Cell::new(false);
@@ -5799,6 +5827,7 @@ mod be2d_tests {
             &Here {
                 occupant: Some("gen-here"),
                 read_fails: true,
+                ..Here::default()
             },
             POSITION,
             "gen-stale",
@@ -5815,6 +5844,97 @@ mod be2d_tests {
             why.contains("could not be read (actuation occupancy read: timed out)"),
             "{why}"
         );
+    }
+
+    /// Review 7 (be2h): only when this Workcell's Actuation cannot be asked
+    /// for a verdict at all is the record's origin asked, and then only its
+    /// own Workcell's word for exactly that generation verifies it.
+    #[test]
+    fn an_actuation_that_cannot_be_asked_leaves_the_origin_to_vouch() {
+        let unaskable = Here {
+            verify_fails: true,
+            ..Here::default()
+        };
+        let asked = Cell::new(false);
+        let basis = verify_occupant(
+            &unaskable,
+            POSITION,
+            "gen-x",
+            Some("agency-gateway/b"),
+            || {
+                asked.set(true);
+                answered("workcell:b", "agency-gateway/b", "workcell:b", "gen-x")
+            },
+        )
+        .unwrap();
+        assert!(asked.get(), "the origin is asked");
+        assert!(
+            basis.contains("the Workcell of gateway agency-gateway/b"),
+            "{basis}"
+        );
+        let why = verify_occupant(
+            &unaskable,
+            POSITION,
+            "gen-x",
+            Some("agency-gateway/b"),
+            || answered("workcell:b", "agency-gateway/b", "workcell:b", "gen-y"),
+        )
+        .unwrap_err();
+        assert!(
+            why.contains(
+                "occupancy could not be verified: `actuation occupancy verify` failed: timed out"
+            ),
+            "{why}"
+        );
+        assert!(why.contains("did not read gen-x current"), "{why}");
+    }
+
+    /// Review 7 (be2h): after a refusal, only a reading that says `vacant`
+    /// for exactly the Position asked lets the origin be asked. Any other
+    /// reading, however it parses, is refused as not shown vacant.
+    #[test]
+    fn a_reading_that_does_not_show_the_position_vacant_asks_no_other_workcell() {
+        for reading in [
+            json!({}),
+            json!({"state": "vacant"}),
+            json!({"position_ref": "central:position:project:O-I:scribe", "state": "vacant"}),
+            json!({"position_ref": POSITION, "state": "occupied", "current": null}),
+            json!({"position_ref": POSITION, "state": "unknown"}),
+            json!({"positions": [{"position_ref": POSITION, "state": "vacant"}]}),
+        ] {
+            let asked = Cell::new(false);
+            let why = verify_occupant(
+                &Here {
+                    reading: Some(reading.clone()),
+                    ..Here::default()
+                },
+                POSITION,
+                "gen-x",
+                Some("agency-gateway/b"),
+                || {
+                    asked.set(true);
+                    answered("workcell:b", "agency-gateway/b", "workcell:b", "gen-x")
+                },
+            )
+            .unwrap_err();
+            assert!(!asked.get(), "{reading}: no remote is asked: {why}");
+            assert!(
+                why.contains("does not show it vacant, so no other Workcell is asked"),
+                "{reading}: {why}"
+            );
+        }
+        let shown_vacant = Here {
+            reading: Some(json!({"position_ref": POSITION, "state": "vacant"})),
+            ..Here::default()
+        };
+        assert!(verify_occupant(
+            &shown_vacant,
+            POSITION,
+            "gen-x",
+            Some("agency-gateway/b"),
+            || { answered("workcell:b", "agency-gateway/b", "workcell:b", "gen-x") }
+        )
+        .is_ok());
     }
 
     /// The gateway journal in this process, its clock the tick's own.
@@ -5862,6 +5982,45 @@ mod be2d_tests {
             })
             .unwrap();
         communique_ref
+    }
+
+    /// A Routine dispatcher whose pass fails.
+    struct FailingDispatcher;
+
+    impl aikit_adapters::GatewayTick for FailingDispatcher {
+        fn tick(&self) -> Result<Value> {
+            Err(AikitError::new(
+                "routine.tick_failed",
+                "Central could not be read",
+            ))
+        }
+    }
+
+    /// Review 6 (be2h): a dispatcher that fails never hides the relay's
+    /// report from status: the tick answers both halves, each error where
+    /// it arose.
+    #[cfg(unix)]
+    #[test]
+    fn a_failing_dispatcher_never_hides_the_relays_report() {
+        let dir = tempfile::tempdir().unwrap();
+        let tick = GatewayServiceTick {
+            dispatcher: Some(Box::new(FailingDispatcher)),
+            relay: CommuniqueRelayTick {
+                home: AikitHome::at(dir.path()),
+                target: GatewayCarrierTarget::UnixSocket(dir.path().join("no-gateway.sock")),
+            },
+        };
+        let report = aikit_adapters::GatewayTick::tick(&tick).unwrap();
+        assert!(
+            report["dispatcher"]["error"]
+                .as_str()
+                .is_some_and(|error| error.contains("Central could not be read")),
+            "{report}"
+        );
+        assert!(
+            report["relay"]["world_agent"]["error"].is_string(),
+            "the relay's own report, its errors with it: {report}"
+        );
     }
 
     /// Review 4: a relay pass that errs (here a malformed
