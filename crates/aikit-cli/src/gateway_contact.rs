@@ -1912,7 +1912,55 @@ pub(crate) fn held_for_agent(recipient: &Recipient) -> OccupancyRouting {
     }
 }
 
+/// The detail a refusal of a send says in data whether it kept anything by
+/// (DLW build ruling 2026-11-09, 601c ruling 3): "true" when a Communique (or
+/// the person's request) was or may have been kept, so it is never sent
+/// again; "false" when nothing was. A caller reads it, never the words.
+pub const RECORDED: &str = "recorded";
+
+/// Says on a refusal whether anything may have been kept, unless it says so
+/// already.
+fn recorded(error: AikitError, kept: bool) -> AikitError {
+    if error.details().contains_key(RECORDED) {
+        return error;
+    }
+    error.with(RECORDED, if kept { "true" } else { "false" })
+}
+
+/// Whether a failed `SendCommunique` failed before the journal appended
+/// anything: the gateway's own refusal, as a running service answered it
+/// (`gateway_error_code`) or as this process met it against the state file
+/// (the journal checks everything before it appends); no service and no
+/// state file; or a state another process holds. Any other failure (an
+/// answer lost on its way back, a state not written after the append) may
+/// have kept it.
+fn refused_before_append(error: &AikitError) -> bool {
+    error.details().contains_key("gateway_error_code")
+        || error.code().starts_with("agency_gateway.")
+        || matches!(
+            error.code(),
+            "agency_gateway_client.unix_connect" | "gateway.state_held_by_unreachable_service"
+        )
+}
+
+/// `aikit gateway send`. Every refusal says whether it kept anything
+/// ([`RECORDED`]): one that does not say yet was refused before anything was
+/// handed to a gateway or to Central.
 pub fn send(
+    home: &AikitHome,
+    owners: &dyn ContactOwners,
+    gateway: &dyn GatewayAccess,
+    cwd: &Path,
+    request: SendRequest<'_>,
+) -> Result<Value> {
+    said_recorded(send_checked(home, owners, gateway, cwd, request))
+}
+
+fn said_recorded(sent: Result<Value>) -> Result<Value> {
+    sent.map_err(|error| recorded(error, false))
+}
+
+fn send_checked(
     home: &AikitHome,
     owners: &dyn ContactOwners,
     gateway: &dyn GatewayAccess,
@@ -2355,16 +2403,25 @@ fn accept_and_relay_via(
             }
         }
     }
-    let (mut communique, replayed, accepted_by) =
-        expect_accepted(gateway.call(GatewayCommand::SendCommunique {
+    // From here the gateway holds the words, or may: a refusal says so in
+    // data (601c ruling 3).
+    let response = gateway
+        .call(GatewayCommand::SendCommunique {
             draft: Box::new(draft),
-        })?)?;
-    ensure_instance_kept(expected.as_ref(), &communique, "on this Workcell")?;
-    ensure_handling_kept(handling, &communique, "on this Workcell")?;
+        })
+        .map_err(|error| {
+            let kept = !refused_before_append(&error);
+            recorded(error, kept)
+        })?;
+    let kept = |error| recorded(error, true);
+    let (mut communique, replayed, accepted_by) = expect_accepted(response).map_err(kept)?;
+    ensure_instance_kept(expected.as_ref(), &communique, "on this Workcell").map_err(kept)?;
+    ensure_handling_kept(handling, &communique, "on this Workcell").map_err(kept)?;
     let mut forward = Value::Null;
     if let Some(entry) = remote {
         let (record, report) =
-            forward_one_via(gateway, &communique, &entry, &accepted_by, None, carrier)?;
+            forward_one_via(gateway, &communique, &entry, &accepted_by, None, carrier)
+                .map_err(kept)?;
         communique = record;
         forward = report;
     }
@@ -4704,6 +4761,9 @@ mod exact_instance_binding_tests {
     /// RecordCommuniqueStanding for those refs.
     #[derive(Default)]
     struct StubGateway {
+        /// Fails SendCommunique itself with this code, and the gateway's own
+        /// code as a running service's refusal carries it.
+        send_fails: Option<(&'static str, Option<&'static str>)>,
         features: Vec<&'static str>,
         strip: bool,
         /// Drops `handling` from every record it answers with (an older
@@ -4761,6 +4821,13 @@ mod exact_instance_binding_tests {
                     },
                 }),
                 GatewayCommand::SendCommunique { draft } => {
+                    if let Some((code, gateway_code)) = self.send_fails {
+                        let error = AikitError::new(code, "the send failed");
+                        return Err(match gateway_code {
+                            Some(gateway_code) => error.with("gateway_error_code", gateway_code),
+                            None => error,
+                        });
+                    }
                     Ok(GatewayResponse::CommuniqueAccepted {
                         communique: self.answer(accepted_from(&draft)),
                         replayed: false,
@@ -5090,6 +5157,75 @@ mod exact_instance_binding_tests {
         .unwrap_err();
         assert_eq!(code(&error), "gateway.handling_unsupported");
         assert!(!old_remote.saw("ingest-communique"));
+    }
+
+    /// 601c ruling 3 (DLW build ruling 2026-11-09): a refused send says in
+    /// data whether it kept anything. The gateway's own refusal, carried from
+    /// a running service or met against the state file, kept nothing; so did
+    /// no service and no state file, or a state another process holds. An
+    /// answer lost on its way back, a state not written after the append, or
+    /// a record kept and then found wanting, may have kept it. A refusal
+    /// before the gateway was handed anything says nothing here, and the send
+    /// says it kept nothing.
+    #[test]
+    fn a_refused_send_says_in_data_whether_the_gateway_may_have_kept_it() {
+        let none = &|_: &GatewayRemote, _: GatewayCommand| -> Result<GatewayResponse> {
+            unreachable!("no remote")
+        };
+        let said = |error: &AikitError| error.details().get(RECORDED).cloned();
+        for (failed, gateway_code, kept) in [
+            (
+                "agency_gateway_client.gateway_refused",
+                Some("agency_gateway.asks_waiting_full"),
+                "false",
+            ),
+            ("agency_gateway.asks_waiting_full", None, "false"),
+            ("agency_gateway_client.unix_connect", None, "false"),
+            ("gateway.state_held_by_unreachable_service", None, "false"),
+            ("agency_gateway_client.read_timeout", None, "true"),
+            ("agency_gateway_service.state_write", None, "true"),
+        ] {
+            let failing = StubGateway {
+                send_fails: Some((failed, gateway_code)),
+                ..StubGateway::modern()
+            };
+            let error =
+                accept_and_relay_via(&failing, draft(None), None, json!({}), none).unwrap_err();
+            assert_eq!(code(&error), failed);
+            assert_eq!(said(&error).as_deref(), Some(kept), "{failed}: {error}");
+        }
+
+        // Kept, then found wanting: here, or at the Workcell it was relayed to.
+        let stripping = StubGateway {
+            strip: true,
+            ..StubGateway::modern()
+        };
+        let error =
+            accept_and_relay_via(&stripping, draft(Some("g1")), None, json!({}), none).unwrap_err();
+        assert_eq!(code(&error), "gateway.communique_instance_binding_lost");
+        assert_eq!(said(&error).as_deref(), Some("true"));
+        let local = StubGateway::modern();
+        let error = accept_and_relay_via(
+            &local,
+            draft(Some("g1")),
+            Some(remote_b()),
+            json!({}),
+            &|_, command| stripping.call(command),
+        )
+        .unwrap_err();
+        assert!(local.saw("send-communique"));
+        assert_eq!(code(&error), "gateway.communique_instance_binding_lost");
+        assert_eq!(said(&error).as_deref(), Some("true"));
+
+        // Refused before the gateway was handed anything: the send says so.
+        let error = accept_and_relay_via(&local, steer(), None, json!({}), none).unwrap_err();
+        assert_eq!(code(&error), "gateway.handling_unsupported");
+        assert_eq!(said(&error), None);
+        let error = said_recorded(Err(error)).unwrap_err();
+        assert_eq!(said(&error).as_deref(), Some("false"));
+        // What says it may have kept it already keeps saying so.
+        let error = said_recorded(Err(recorded(AikitError::new("x", "y"), true))).unwrap_err();
+        assert_eq!(said(&error).as_deref(), Some("true"));
     }
 
     #[test]

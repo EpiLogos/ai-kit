@@ -130,6 +130,12 @@ def ctrl(args):
                        "consequence": "Nothing was read.",
                        "action": "ctrl --json action run central.position.list '{}'"}}, 2)
     if action == "central.receiving.submit":
+        if world.get("receiving_refuses"):
+            # Central refuses it, and its refusal alone does not say whether it kept a record.
+            emit({"ok": False, "action": action,
+                  "error": {"code": "central.receiving_refused", "message": "refused"},
+                  "data": {"fact": "The request was refused.", "consequence": "Nothing is confirmed.",
+                           "action": "Read the Receiving ledger."}}, 2)
         # What a Position asks the person: kept as the input arrived, answered as Central's receipt of a pending request.
         received = world.setdefault("received", [])
         received.append(payload)

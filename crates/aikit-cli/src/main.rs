@@ -1947,14 +1947,23 @@ fn cmd_gateway_dispatch(command: GatewayCmd, cwd: &std::path::Path) -> Result<Re
         }
         GatewaySub::Disclose(a) => {
             // The person's own act: written through the gateway runtime, which
-            // takes it only from the person's own connection.
+            // takes it only from the person's own connection. A list only
+            // reads.
             let (_, gateway, _) = contact_seams(&home, &a.carrier)?;
+            if a.list {
+                return gateway_data(aikit_cli::gateway_contact::world_agent::list_disclosed(
+                    &gateway,
+                    &a.world_ref,
+                )?);
+            }
             gateway_data(aikit_cli::gateway_contact::world_agent::disclose(
                 &home,
                 &gateway,
                 aikit_cli::gateway_contact::world_agent::DiscloseRequest {
                     world_ref: &a.world_ref,
-                    part_ref: &a.part_ref,
+                    // clap requires --part without --list; an empty one is
+                    // refused as no plain ref.
+                    part_ref: a.part_ref.as_deref().unwrap_or_default(),
                     star_ref: a.star_ref.as_deref(),
                     to_field: a.to_field,
                     kind: a.kind.as_deref(),

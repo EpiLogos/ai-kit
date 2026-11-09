@@ -153,10 +153,25 @@ pub(super) fn send_to_owner(
         input["reply_to"] = json!(reply_to);
     }
     let project = request.project_world.and_then(project_input);
+    // Central was handed the request: a failure here may have kept it (601c
+    // ruling 3, DLW build ruling 2026-11-09), so it is never sent again
+    // unread.
     let received = match owners
         .receiving_submit(project.as_deref(), &input)
         .map_err(|unavailable| {
-            owner_unavailable_refusal("Central could not receive the request", &unavailable)
+            three_part(
+                "gateway.owner_unavailable",
+                format!(
+                    "Central could not receive the request: `{}` failed ({}).",
+                    unavailable.command, unavailable.reason
+                ),
+                "Central did not confirm the request; whether it kept a record is not known here.",
+                format!(
+                    "Make the owner answer (re-run `{}`), and read the person's Receiving ledger before you send it again.",
+                    unavailable.command
+                ),
+            )
+            .with(super::RECORDED, "true")
         })? {
         Ok(received) => received,
         Err(refusal) => {
@@ -168,7 +183,8 @@ pub(super) fn send_to_owner(
                 ),
                 refusal.consequence,
                 refusal.action,
-            ))
+            )
+            .with(super::RECORDED, "true"))
         }
     };
     Ok(json!({

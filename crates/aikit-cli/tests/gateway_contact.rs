@@ -3195,70 +3195,121 @@ fn answer_of(reply: &Value) -> Value {
     serde_json::from_str(reply["body"].as_str().unwrap()).unwrap()
 }
 
-/// The answer harness: a stdlib-only program named `pi` that speaks pi's RPC
-/// wire, keeps each prompt it is given (`prompt-N.txt`) and the environment
-/// it was launched in (`env-PID.json`), and says what `reply.txt` holds;
-/// asked its `--version`, it prints what `version.txt` holds (1.5.0 without
-/// it) and keeps the environment that read ran in (`version-env-PID.json`);
-/// `TOOL` runs a tool first, as a pi that ignored its no-tools flags would;
-/// its session reports the tools `tools.json` names (no list without it).
-/// Only pi is elected (DLW build ruling 2026-11-09, be2d), so the fake is pi
-/// by name and wire; `FOLDER` is where it keeps what it saw.
-const ANSWER_HARNESS: &str = r#"#!/usr/bin/env python3
-import json, os, sys
-folder = FOLDER
-if "--version" in sys.argv[1:]:
-    home = os.environ.get("HOME", "")
-    with open(os.path.join(folder, "version-env-%d.json" % os.getpid()), "w") as seen:
-        json.dump({"env": sorted(os.environ), "home": home, "cwd": os.getcwd(),
-                   "home_empty": os.path.isdir(home) and os.listdir(home) == []}, seen)
-    kept = os.path.join(folder, "version.txt")
-    print(open(kept).read().strip() if os.path.exists(kept) else "1.5.0")
-    sys.exit(0)
-turns = 0
-def send(obj):
-    sys.stdout.write(json.dumps(obj) + "\n")
-    sys.stdout.flush()
-def answer(message, data=None):
-    reply = {"type": "response", "id": message["id"], "command": message["type"], "success": True}
-    if data is not None:
-        reply["data"] = data
-    send(reply)
-for line in sys.stdin:
-    line = line.strip()
-    if not line:
-        continue
-    message = json.loads(line)
-    kind = message.get("type")
-    if kind == "get_available_models":
-        answer(message, {"models": []})
-    elif kind == "get_state":
-        state = {"sessionId": "answer-1", "isStreaming": False, "isCompacting": False,
-                 "pendingMessageCount": 0, "model": None}
-        if os.path.exists(os.path.join(folder, "tools.json")):
-            state["tools"] = json.load(open(os.path.join(folder, "tools.json")))
-        answer(message, state)
-        with open(os.path.join(folder, "env-%d.json" % os.getpid()), "w") as kept:
-            json.dump({"env": sorted(os.environ), "home": os.environ.get("HOME"), "cwd": os.getcwd(),
-                       "argv": sys.argv[1:]}, kept)
-    elif kind == "prompt":
-        turns += 1
-        with open(os.path.join(folder, "prompt-%d.txt" % turns), "w") as kept:
-            kept.write(message["message"])
-        with open(os.path.join(folder, "reply.txt")) as said:
-            reply = said.read()
-        answer(message)
-        if reply.startswith("TOOL"):
-            send({"type": "tool_execution_start", "toolCallId": "read-1", "toolName": "read",
-                  "args": {"path": "/etc/hosts"}})
-            reply = reply[4:]
-        send({"type": "message_update", "assistantMessageEvent": {"type": "text_delta", "delta": reply}})
-        send({"type": "message_end", "message": {"role": "assistant", "stopReason": "stop",
-              "content": [{"type": "text", "text": reply}]}})
-        send({"type": "agent_settled"})
-    elif kind == "abort":
-        answer(message)
-"#;
+/// The answer harness: a POSIX sh program named `pi`, with awk for its JSON
+/// (DLW build ruling 2026-11-09, be2i: no python, so no interpreter shim, such
+/// as Xcode's `python3` on a Mac with only system folders on PATH, can add to
+/// the environment it reports). It speaks pi's RPC wire, keeps each prompt it
+/// is given (`prompt-N.txt`) and the environment it was launched in
+/// (`env-PID.json`: the names, save PWD, OLDPWD, SHLVL and `_`, which /bin/sh
+/// sets for itself), and says what `reply.txt` holds; asked its `--version`,
+/// it prints what `version.txt` holds (1.5.0 without it) and keeps the
+/// environment that read ran in (`version-env-PID.json`); `TOOL` runs a tool
+/// first, as a pi that ignored its no-tools flags would; its session reports
+/// the tools `tools.json` names (no list without it). Only pi is elected (DLW
+/// build ruling 2026-11-09, be2d), so the fake is pi by name and wire;
+/// `FOLDER` is where it keeps what it saw.
+const ANSWER_HARNESS: &str = r##"#!/bin/sh
+# pi's RPC wire in POSIX sh, with awk for JSON: no interpreter shim runs in
+# between, so nothing is added to the environment it was launched in.
+folder=FOLDER
+AWK_ESC='
+BEGIN { for (i = 1; i < 32; i++) code[sprintf("%c", i)] = sprintf("\\u%04x", i) }
+function body(s,   out, i, n, c) {
+  out = ""; n = length(s)
+  for (i = 1; i <= n; i++) {
+    c = substr(s, i, 1)
+    if (c == "\\" || c == "\"") out = out "\\" c
+    else if (c in code) out = out code[c]
+    else out = out c
+  }
+  return out
+}'
+AWK_GET='
+function hex(h,   i, n) {
+  n = 0
+  for (i = 1; i <= 4; i++) n = n * 16 + index("0123456789abcdef", tolower(substr(h, i, 1))) - 1
+  return n
+}
+{
+  k = "\"" key "\":\""; p = index($0, k)
+  if (!p) exit
+  s = substr($0, p + length(k)); n = length(s); out = ""
+  for (i = 1; i <= n; i++) {
+    c = substr(s, i, 1)
+    if (c == "\"") break
+    if (c != "\\") { out = out c; continue }
+    i++; d = substr(s, i, 1)
+    if (d == "n") out = out "\n"
+    else if (d == "t") out = out "\t"
+    else if (d == "r") out = out "\r"
+    else if (d == "b") out = out "\b"
+    else if (d == "f") out = out "\f"
+    else if (d == "u") { h = substr(s, i + 1, 4); i += 4; v = hex(h); out = out (v > 0 && v < 128 ? sprintf("%c", v) : "\\u" h) }
+    else out = out d
+  }
+  printf "%s", out
+  exit
+}'
+# A JSON string of $1.
+jstr() { printf '%s\n' "$1" | awk "$AWK_ESC"'{ v = v (NR > 1 ? "\\n" : "") body($0) } END { printf "\"%s\"", v }'; }
+# The string value of key $2 in the JSON line $1.
+get() { printf '%s\n' "$1" | awk -v key="$2" "$AWK_GET"; }
+# The names of the environment it was launched in. /bin/sh sets PWD, OLDPWD,
+# SHLVL and _ for itself, so those four are not counted.
+names() { awk 'BEGIN { s = ""; for (k in ENVIRON) if (k != "PWD" && k != "OLDPWD" && k != "SHLVL" && k != "_") s = s (s == "" ? "" : ",") "\"" k "\""; printf "[%s]", s }'; }
+send() { printf '%s\n' "$1"; }
+respond() {
+  if [ -n "${3-}" ]; then
+    send "{\"type\":\"response\",\"id\":$1,\"command\":\"$2\",\"success\":true,\"data\":$3}"
+  else
+    send "{\"type\":\"response\",\"id\":$1,\"command\":\"$2\",\"success\":true}"
+  fi
+}
+for arg in "$@"; do
+  if [ "$arg" = --version ]; then
+    home=${HOME-}
+    if [ -d "$home" ] && [ -z "$(ls -A "$home")" ]; then empty=true; else empty=false; fi
+    printf '{"env":%s,"home":%s,"cwd":%s,"home_empty":%s}' "$(names)" "$(jstr "$home")" "$(jstr "$(pwd -P)")" "$empty" > "$folder/version-env-$$.json"
+    if [ -f "$folder/version.txt" ]; then printf '%s\n' "$(cat "$folder/version.txt")"; else echo 1.5.0; fi
+    exit 0
+  fi
+done
+turns=0
+while IFS= read -r line || [ -n "$line" ]; do
+  [ -n "$line" ] || continue
+  kind=$(get "$line" type)
+  id=$(jstr "$(get "$line" id)")
+  case $kind in
+    get_available_models) respond "$id" "$kind" '{"models":[]}' ;;
+    get_state)
+      state='{"sessionId":"answer-1","isStreaming":false,"isCompacting":false,"pendingMessageCount":0,"model":null'
+      if [ -f "$folder/tools.json" ]; then state="$state,\"tools\":$(cat "$folder/tools.json")"; fi
+      respond "$id" "$kind" "$state}"
+      args=""
+      for a in "$@"; do args="$args${args:+,}$(jstr "$a")"; done
+      if [ -n "${HOME+set}" ]; then home=$(jstr "$HOME"); else home=null; fi
+      printf '{"env":%s,"home":%s,"cwd":%s,"argv":[%s]}' "$(names)" "$home" "$(jstr "$(pwd -P)")" "$args" > "$folder/env-$$.json"
+      ;;
+    prompt)
+      turns=$((turns + 1))
+      get "$line" message > "$folder/prompt-$turns.txt"
+      reply=$(cat "$folder/reply.txt")
+      respond "$id" "$kind"
+      case $reply in
+        TOOL*)
+          send '{"type":"tool_execution_start","toolCallId":"read-1","toolName":"read","args":{"path":"/etc/hosts"}}'
+          reply=${reply#TOOL}
+          ;;
+      esac
+      text=$(jstr "$reply")
+      send "{\"type\":\"message_update\",\"assistantMessageEvent\":{\"type\":\"text_delta\",\"delta\":$text}}"
+      send "{\"type\":\"message_end\",\"message\":{\"role\":\"assistant\",\"stopReason\":\"stop\",\"content\":[{\"type\":\"text\",\"text\":$text}]}}"
+      send '{"type":"agent_settled"}'
+      ;;
+    abort) respond "$id" "$kind" ;;
+  esac
+done
+"##;
 
 /// The confined pi argv after its program: the flags that hold pi to no
 /// tools, read by pi's own grammar.
@@ -3551,6 +3602,171 @@ fn the_same_user_boundary_a_body_that_unsets_both_variables_is_taken_as_the_pers
             .any(|shown| shown["part_ref"] == "part:boundary"),
         "a body that hides both is not stopped: {shown}"
     );
+}
+
+/// 601c ruling 2 (DLW build ruling 2026-11-09): AIKit lists what it holds a
+/// World shows, as data, and the list changes nothing; the person's window
+/// sets the field right against it when it goes live.
+#[test]
+fn the_window_lists_what_aikit_holds_a_world_shows_and_the_list_changes_nothing() {
+    let world = World::new();
+    let window = body(&world, "a", "workcell:a", "agency-gateway/a");
+    let _service = Gateway::serve(&window, None);
+    let list =
+        |world_ref: &str| window.ok(&["gateway", "disclose", "--list", "--world", world_ref]);
+    let empty = list("project:O-I");
+    assert_eq!(empty["schema"], "aikit.world-star-disclosure/v1");
+    assert_eq!(empty["act"], "listed");
+    assert_eq!(empty["changed"], false);
+    assert_eq!(empty["disclosure"]["world_ref"], "project:O-I");
+    assert_eq!(empty["disclosure"]["parts"], json!([]), "{empty}");
+
+    the_world_shows(&window);
+    let listed = list("project:O-I");
+    assert_eq!(listed["act"], "listed");
+    assert_eq!(listed["changed"], false);
+    let parts = listed["disclosure"]["parts"].as_array().unwrap();
+    let at: Vec<(&str, Option<&str>)> = parts
+        .iter()
+        .map(|part| {
+            (
+                part["part_ref"].as_str().unwrap(),
+                part["star_ref"].as_str(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        at,
+        [
+            ("part:plate-2", Some("star:rosarium")),
+            ("part:essay", None),
+            ("part:elsewhere", Some("star:other")),
+        ],
+        "{listed}"
+    );
+    assert_eq!(parts[0]["kind"], "page");
+    assert_eq!(parts[0]["label"], "The second plate");
+    // What the last write answered is what the list reads, and reading it
+    // again changes nothing.
+    let shown = disclose(
+        &window,
+        &["--part", "part:essay", "--field", "--label", "The essay"],
+    );
+    let listed = list("project:O-I");
+    assert_eq!(listed["disclosure"], shown["disclosure"]);
+    assert_eq!(list("project:O-I"), listed);
+    // Another World's list holds none of it.
+    assert_eq!(list("project:Other")["disclosure"]["parts"], json!([]));
+    // A World not named whole is refused in words; a list names nothing else.
+    let refused = window.refused(&["gateway", "disclose", "--list", "--world", "project"]);
+    assert_eq!(refused["code"], "gateway.disclose_invalid");
+    assert_eq!(
+        refused["details"]["consequence"],
+        "Nothing was read or written."
+    );
+    // clap's usage refusal (exit 2): a list names nothing else, and a show
+    // names its part.
+    let usage = |args: &[&str]| window.command(args).output().unwrap().status.code();
+    assert_eq!(
+        usage(&[
+            "gateway",
+            "disclose",
+            "--list",
+            "--world",
+            "project:O-I",
+            "--part",
+            "part:essay"
+        ]),
+        Some(2)
+    );
+    assert_eq!(
+        usage(&[
+            "gateway",
+            "disclose",
+            "--list",
+            "--world",
+            "project:O-I",
+            "--withdraw"
+        ]),
+        Some(2)
+    );
+    assert_eq!(
+        usage(&["gateway", "disclose", "--world", "project:O-I", "--field"]),
+        Some(2)
+    );
+    assert_eq!(list("project:O-I"), listed);
+}
+
+/// 601c ruling 3 (DLW build ruling 2026-11-09): every refusal of a send says
+/// in data whether it kept anything (`details.recorded`), so the person's
+/// window never reads it from the words. An ask past the bound is refused
+/// before the journal keeps it, whether this process meets the refusal against
+/// the state file or the running service answers it; a send refused before it
+/// reaches the gateway kept nothing either. Central handed the person's
+/// request and not confirming it may have kept it.
+#[test]
+fn a_refused_send_says_in_data_whether_it_kept_anything() {
+    let world = World::new();
+    let window = body(&world, "a", "workcell:a", "agency-gateway/a");
+    let ask = |words: &str| {
+        let mut ask: Value =
+            serde_json::from_str(&world_agent_ask_of("project:O-I", json!([]))).unwrap();
+        ask["words"] = json!(words);
+        ask.to_string()
+    };
+    for n in 0..4 {
+        window.ok(&[
+            "gateway",
+            "send",
+            "--to",
+            STEWARD,
+            "--body",
+            &ask(&format!("Question {n}?")),
+        ]);
+    }
+    let kept = state_file_communiques(&window.home).len();
+    let full = window.refused(&[
+        "gateway",
+        "send",
+        "--to",
+        STEWARD,
+        "--body",
+        &ask("One more?"),
+    ]);
+    assert_eq!(full["code"], "agency_gateway.asks_waiting_full", "{full}");
+    assert_eq!(full["details"]["recorded"], "false", "{full}");
+    let service = Gateway::serve(&window, None);
+    let carried = window.refused(&[
+        "gateway",
+        "send",
+        "--to",
+        STEWARD,
+        "--body",
+        &ask("Still one more?"),
+    ]);
+    assert_eq!(
+        carried["details"]["gateway_error_code"], "agency_gateway.asks_waiting_full",
+        "{carried}"
+    );
+    assert_eq!(carried["details"]["recorded"], "false", "{carried}");
+    let empty = window.refused(&["gateway", "send", "--to", STEWARD, "--body", " "]);
+    assert_eq!(empty["code"], "gateway.empty_body");
+    assert_eq!(empty["details"]["recorded"], "false");
+    drop(service);
+    assert_eq!(
+        state_file_communiques(&window.home).len(),
+        kept,
+        "nothing refused was kept"
+    );
+
+    // Central, handed the person's request, does not confirm it.
+    let mut shape = world.world();
+    shape["receiving_refuses"] = json!(true);
+    std::fs::write(&world.world, serde_json::to_vec(&shape).unwrap()).unwrap();
+    let guardian = window.as_occupant(GUARDIAN, "guardian-1");
+    let refused = guardian.refused(&["gateway", "send", "--to", "@owner", "--body", "Shall I?"]);
+    assert_eq!(refused["code"], "gateway.owner_refused", "{refused}");
+    assert_eq!(refused["details"]["recorded"], "true", "{refused}");
 }
 
 #[test]
@@ -3989,7 +4205,9 @@ fn a_pi_that_cannot_be_confined_now_leaves_the_ask_waiting_and_status_says_why()
         .unwrap_or_else(|| panic!("{status}"))
         .to_owned();
     assert!(
-        said.contains("elect a 1.5 pi again with: aikit gateway answer-harness"),
+        said.contains(
+            "elect a 1.5 pi again with your own provider and flags: aikit gateway answer-harness"
+        ),
         "{said}"
     );
     // It waits: never declined, and no turn ran.

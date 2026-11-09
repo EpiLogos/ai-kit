@@ -792,14 +792,20 @@ fn strict_version(version: &str) -> Option<(u64, u64, u64)> {
     parts.next().is_none().then_some(version)
 }
 
-/// At most 40 characters of what a pi printed, escaped as Rust escapes a
-/// string, so a refusal quotes it bounded and on one line.
-fn quoted_at_most_40(read: &str) -> String {
+/// At most 40 characters of what a pi printed, an ellipsis saying where
+/// more was cut.
+fn at_most_40(read: &str) -> String {
     let mut kept: String = read.chars().take(40).collect();
     if read.chars().count() > 40 {
         kept.push('…');
     }
-    format!("{kept:?}")
+    kept
+}
+
+/// [`at_most_40`], escaped as Rust escapes a string, so a refusal quotes it
+/// bounded and on one line.
+fn quoted_at_most_40(read: &str) -> String {
+    format!("{:?}", at_most_40(read))
 }
 
 /// Whether the version a pi reports (its `--version` output) is one this
@@ -812,8 +818,11 @@ pub fn pi_version_fits(reported: &str) -> std::result::Result<(), String> {
     let first = reported.lines().next().unwrap_or_default().trim();
     match strict_version(first) {
         Some((read_major, read_minor, _)) if (read_major, read_minor) == (major, minor) => Ok(()),
+        // Digits and dots only, so quoted bare, and bounded as every
+        // quote of what was read is (be2i).
         Some(_) => Err(format!(
-            "pi {first} is not the {major}.{minor} line AIKit confines (AIKit reads pi's flags as pi {PI_GRAMMAR_VERSION} reads them)"
+            "pi {} is not the {major}.{minor} line AIKit confines (AIKit reads pi's flags as pi {PI_GRAMMAR_VERSION} reads them)",
+            at_most_40(first)
         )),
         None => Err(format!(
             "this pi's --version reads {}, which is not one MAJOR.MINOR.PATCH version, so AIKit cannot say it is the {major}.{minor} line it confines",
@@ -4073,6 +4082,14 @@ mod tests {
                 format!("pi {other} is not the 1.5 line AIKit confines (AIKit reads pi's flags as pi 1.5.0 reads them)")
             );
         }
+        // A version of another line is quoted bounded too (be2i): three
+        // largest parts run to 62 characters.
+        let max = format!("{0}.{0}.{0}", u64::MAX);
+        let why = pi_version_fits(&max).unwrap_err();
+        assert!(
+            why.starts_with(&format!("pi {}… is not the 1.5 line", &max[..40])),
+            "{why}"
+        );
         // Bounded: at most 40 characters of what was read, escaped.
         let why = pi_version_fits(&"x".repeat(60)).unwrap_err();
         assert!(why.contains(&format!("\"{}…\"", "x".repeat(40))), "{why}");
