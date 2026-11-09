@@ -39,7 +39,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use aikit_adapters::connection_process::ModelEnvironment;
-use aikit_adapters::{pi_provider_credential_variables, pi_selected_provider};
+use aikit_adapters::{pi_provider_credential_variables, pi_selected_provider, pi_version_fits};
 use aikit_adapters::{
     AgentHostTurnSource, CommuniqueDraft, CommuniqueHandling, CommuniqueState,
     ConversationHarnessProtocol, ConversationTurnOutcome, ConversationTurnRequest,
@@ -590,6 +590,66 @@ fn lawful_credential_env(name: &str) -> bool {
             .any(|prefix| name.starts_with(prefix))
 }
 
+/// The pi AIKit resolves (DLW build ruling 2026-11-09, be2f): the program
+/// its pi harness profile names, found on PATH as AIKit finds its harnesses,
+/// and the version that program reports.
+#[derive(Debug, Clone)]
+pub struct ResolvedPi {
+    pub program: PathBuf,
+    pub version: String,
+}
+
+/// Resolve the pi an election's argv names: only the pi AIKit resolves, by
+/// its name or by its path; never another program that happens to be named
+/// pi. Its version is read from the program itself.
+pub fn resolve_pi(named: &str) -> std::result::Result<ResolvedPi, String> {
+    let profile = aikit_adapters::profiles::for_slug("pi")
+        .ok_or("AIKit carries no harness profile for pi")?;
+    let executable = profile
+        .presence
+        .as_ref()
+        .and_then(|presence| presence.executables.first())
+        .ok_or("AIKit's pi profile names no executable")?;
+    let program = crate::probe::which(executable).ok_or_else(|| {
+        format!("{executable}, the executable AIKit's pi profile names, is not on PATH")
+    })?;
+    let same = |given: &Path| {
+        let real = |path: &Path| std::fs::canonicalize(path).ok();
+        real(given).is_some() && real(given) == real(&program)
+    };
+    if !crate::probe::which(named).is_some_and(|given| same(&given)) {
+        return Err(format!(
+            "{named} is not the pi AIKit resolves ({}), so AIKit cannot say pi's flags hold it",
+            program.display()
+        ));
+    }
+    let version = pi_reported_version(&program)?;
+    Ok(ResolvedPi { program, version })
+}
+
+/// What `program --version` prints, within AIKit's probe bound.
+fn pi_reported_version(program: &Path) -> std::result::Result<String, String> {
+    use aikit_adapters::runner::CommandRunner as _;
+    let output = crate::probe::probe_runner()
+        .run(&[program.display().to_string(), "--version".into()])
+        .map_err(|error| {
+            format!(
+                "{} --version could not be read: {}",
+                program.display(),
+                error.message()
+            )
+        })?;
+    if output.status != 0 {
+        return Err(format!(
+            "{} --version exited {}: {}",
+            program.display(),
+            output.status,
+            output.stderr.trim()
+        ));
+    }
+    Ok(output.stdout.trim().to_owned())
+}
+
 /// `aikit gateway answer-harness`.
 pub struct ElectHarness<'a> {
     pub protocol: Option<&'a str>,
@@ -607,6 +667,17 @@ pub fn elect_answer_harness(
     home: &AikitHome,
     gateway: &dyn GatewayAccess,
     request: ElectHarness<'_>,
+) -> Result<Value> {
+    elect_answer_harness_with(home, gateway, request, &resolve_pi)
+}
+
+/// [`elect_answer_harness`] with pi resolved by `resolve` (tests name the
+/// pi they resolve).
+pub fn elect_answer_harness_with(
+    home: &AikitHome,
+    gateway: &dyn GatewayAccess,
+    request: ElectHarness<'_>,
+    resolve: &dyn Fn(&str) -> std::result::Result<ResolvedPi, String>,
 ) -> Result<Value> {
     if request.protocol.is_none() && !request.clear {
         return Ok(json!({"schema": ANSWER_HARNESS_SCHEMA, "harness": answer_harness(gateway)?}));
@@ -627,7 +698,7 @@ pub fn elect_answer_harness(
     let Some(protocol) = protocol_of(raw).filter(|_| !request.argv.is_empty()) else {
         return Err(refuse(
             "gateway.answer_harness_invalid",
-            format!("A harness is named by its protocol (acp, pi-rpc or prime-rpc; {raw} given) and the argv that launches it."),
+            format!("A harness is named by its protocol and the argv that launches it; only pi-rpc is elected ({raw} given)."),
         ));
     };
     if let Err(why) = electable(protocol) {
@@ -645,10 +716,22 @@ pub fn elect_answer_harness(
     {
         return Err(refuse("gateway.answer_harness_invalid", format!("{why}.")));
     }
+    // Only the pi AIKit resolves, of the version its reading of pi's flags
+    // was made for (be2f); elected by the path it resolved to.
+    let mut argv = request.argv;
+    let pi = resolve(&argv[0])
+        .and_then(|pi| pi_version_fits(&pi.version).map(|()| pi))
+        .map_err(|why| {
+            refuse(
+                "gateway.answer_harness_not_confined",
+                format!("AIKit cannot hold this {raw} harness to no tools: {why}."),
+            )
+        })?;
+    argv[0] = pi.program.display().to_string();
     let harness = AnswerHarness {
         schema: ANSWER_HARNESS_SCHEMA.into(),
         protocol: raw.to_owned(),
-        argv: request.argv,
+        argv,
         credential_env: request.credential_env.map(str::to_owned),
     };
     let value = serde_json::to_value(&harness).expect("a harness encodes");
@@ -948,6 +1031,11 @@ pub fn take_answer_turn(
     protocol
         .confines(&harness.argv)
         .map_err(|why| format!("AIKit cannot hold the {name} harness to no tools: {why}"))?;
+    // The pi elected may have been replaced since (be2f): its version is
+    // read again before each turn.
+    pi_reported_version(Path::new(&harness.argv[0]))
+        .and_then(|version| pi_version_fits(&version))
+        .map_err(|why| format!("AIKit cannot hold the {name} harness to no tools: {why}"))?;
     if let Some(why) = harness
         .credential_env
         .as_deref()
@@ -985,9 +1073,15 @@ pub fn take_answer_turn(
         let _ = std::fs::remove_dir_all(&root);
         outcome
     };
-    let _ = std::fs::remove_dir_all(&root);
+    // Made while the pass's leftover removal is held off (be2f).
     let work = root.join("work");
-    if let Err(error) = std::fs::create_dir_all(&work) {
+    let made = folders_lock(home, FOLDERS_LOCK_WAIT)
+        .map_err(|error| error.message().to_owned())
+        .and_then(|_held| {
+            let _ = std::fs::remove_dir_all(&root);
+            std::fs::create_dir_all(&work).map_err(|error| error.to_string())
+        });
+    if let Err(error) = made {
         return finish(Err(format!("the turn's folder could not be made: {error}")));
     }
     let started = Instant::now();
@@ -1312,12 +1406,31 @@ fn answer_as(
             parts,
         )
     };
-    // A day waited: declined, so the asker never waits on it longer.
+    // A day waited: declined, so the asker never waits on it longer. A
+    // decline the journal did not store Verified does not end the ask, so
+    // the ask is closed, declined, here (be2f): its day has passed either way.
     if record.ask_expired(now) {
-        return decline(
-            "it waited 24 hours with no answer".into(),
-            AnswerParts::default(),
-        );
+        let why = "it waited 24 hours with no answer";
+        return match decline(why.into(), AnswerParts::default()) {
+            Err(error) if error.code() == "gateway.answer_not_verified" => {
+                close_ask(
+                    gateway,
+                    &record,
+                    &format!("declined: {why}, and the decline sent was not stored Verified"),
+                    now,
+                )?;
+                Err(three_part(
+                    "gateway.answer_not_verified",
+                    error
+                        .details()
+                        .get("fact")
+                        .map_or_else(|| error.message().to_owned(), Clone::clone),
+                    "The decline does not count, so the ask was closed, declined: its day has passed.",
+                    format!("Read where it stands: aikit --json gateway message {reference}"),
+                ))
+            }
+            declined => declined,
+        };
     }
     // Malformed, or of another World than the one this Position stands in:
     // declined, so the asker never waits on it.
@@ -1568,9 +1681,30 @@ fn claim_path(home: &AikitHome, reference: &str) -> PathBuf {
     world_agent_dir(home).join("claims").join(key_of(reference))
 }
 
+/// How long a claim or a turn waits for the pass's leftover removal to end
+/// before it makes its folder.
+const FOLDERS_LOCK_WAIT: Duration = Duration::from_secs(5);
+
+/// The hold on the world agent's turn folders and claims (DLW build ruling
+/// 2026-11-09, be2f): a claim and a turn make theirs under it, and the pass
+/// removes what ended asks left under it, reading the asks waiting again
+/// first, so it never removes what an ask began after its own reading.
+fn folders_lock(home: &AikitHome, timeout: Duration) -> Result<ContextLock> {
+    ContextLock::acquire(
+        home,
+        "world-agent-folders",
+        LockOptions::default()
+            .with_timeout(timeout)
+            .with_purpose("the world agent's turn folders and claims"),
+    )
+}
+
 /// Take the one start of an ask's answer: a claim made once, retaken only
 /// after it went stale (a start that died without answering).
 fn claim(home: &AikitHome, reference: &str) -> bool {
+    let Ok(_held) = folders_lock(home, FOLDERS_LOCK_WAIT) else {
+        return false;
+    };
     let path = claim_path(home, reference);
     if path
         .parent()
@@ -1714,7 +1848,7 @@ pub fn answer_pass(
         .chain(waiting.iter())
         .map(|reference| key_of(reference))
         .collect();
-    let removed = remove_leftovers(home, &still);
+    let removed = remove_leftovers(home, gateway, &still);
     let mut pass = json!({"started": started, "closed": closed, "waiting": waiting});
     if !errors.is_empty() {
         pass["errors"] = json!(errors);
@@ -1726,28 +1860,58 @@ pub fn answer_pass(
 }
 
 /// Remove the turn folders and claims of asks no longer waiting (DLW build
-/// ruling 2026-11-09, be2d): only an ask still waiting keeps either. How
-/// many were removed.
-fn remove_leftovers(home: &AikitHome, waiting_keys: &[String]) -> usize {
-    let mut removed = 0;
+/// ruling 2026-11-09, be2d): only an ask still waiting keeps either. What
+/// the pass's reading of the asks waiting (`waiting_keys`) does not name is
+/// removed only under the hold claims and turns make their folders under,
+/// and only if the asks waiting, read again under it, do not name it either
+/// (be2f): an ask that began after the pass's reading keeps what it has.
+/// When the hold is taken, nothing is removed this pass. How many were
+/// removed.
+fn remove_leftovers(
+    home: &AikitHome,
+    gateway: &dyn GatewayAccess,
+    waiting_keys: &[String],
+) -> usize {
+    let mut candidates = Vec::new();
     for folder in ["turns", "claims"] {
         let Ok(entries) = std::fs::read_dir(world_agent_dir(home).join(folder)) else {
             continue;
         };
         for entry in entries.flatten() {
             let name = entry.file_name().to_string_lossy().into_owned();
-            if waiting_keys.contains(&name) {
-                continue;
+            if !waiting_keys.contains(&name) {
+                candidates.push((name, entry.path()));
             }
-            let path = entry.path();
-            let gone = if path.is_dir() {
-                std::fs::remove_dir_all(&path)
-            } else {
-                std::fs::remove_file(&path)
-            };
-            if gone.is_ok() {
-                removed += 1;
-            }
+        }
+    }
+    if candidates.is_empty() {
+        return 0;
+    }
+    let Ok(_held) = folders_lock(home, Duration::ZERO) else {
+        return 0;
+    };
+    let Ok(waiting_now) = gateway
+        .call(GatewayCommand::WaitingAsks)
+        .and_then(expect_list)
+    else {
+        return 0;
+    };
+    let waiting_now: Vec<String> = waiting_now
+        .iter()
+        .map(|ask| key_of(&ask.communique_ref))
+        .collect();
+    let mut removed = 0;
+    for (name, path) in candidates {
+        if waiting_now.contains(&name) {
+            continue;
+        }
+        let gone = if path.is_dir() {
+            std::fs::remove_dir_all(&path)
+        } else {
+            std::fs::remove_file(&path)
+        };
+        if gone.is_ok() {
+            removed += 1;
         }
     }
     removed
@@ -2551,9 +2715,15 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let home = AikitHome::at(dir.path());
         let journal = Journal::new();
+        // The pi AIKit resolves here, and the version it reports (be2f).
+        let resolved = std::cell::RefCell::new(Ok::<_, String>(ResolvedPi {
+            program: PathBuf::from("/opt/pi/bin/pi"),
+            version: "1.5.0".into(),
+        }));
+        let resolve = |_: &str| resolved.borrow().clone();
         let elect =
             |protocol: &str, argv: &[&str], credential: Option<&str>, from: Option<&str>| {
-                elect_answer_harness(
+                elect_answer_harness_with(
                     &home,
                     &journal,
                     ElectHarness {
@@ -2563,6 +2733,7 @@ mod tests {
                         clear: false,
                         from_position: from,
                     },
+                    &resolve,
                 )
             };
         let error =
@@ -2681,13 +2852,78 @@ mod tests {
             );
             assert!(error.to_string().contains(why), "{credential}: {error}");
         }
+        // Review 5 (be2f): only the pi AIKit resolves, of the version its
+        // reading of pi's flags was made for.
+        *resolved.borrow_mut() = Ok(ResolvedPi {
+            program: PathBuf::from("/opt/pi/bin/pi"),
+            version: "1.6.0".into(),
+        });
+        let error = elect("pi-rpc", &anthropic, Some("ANTHROPIC_API_KEY"), None).unwrap_err();
+        assert_eq!(error.code(), "gateway.answer_harness_not_confined");
+        assert!(
+            error.to_string().contains("this pi is version 1.6.0")
+                && error.to_string().contains("as pi 1.5.0 reads them"),
+            "{error}"
+        );
+        *resolved.borrow_mut() = Err("pi is not the pi AIKit resolves (/opt/pi/bin/pi)".into());
+        let error = elect("pi-rpc", &anthropic, Some("ANTHROPIC_API_KEY"), None).unwrap_err();
+        assert_eq!(error.code(), "gateway.answer_harness_not_confined");
+        assert!(
+            error.to_string().contains("not the pi AIKit resolves"),
+            "{error}"
+        );
         assert!(
             answer_harness(&journal).unwrap().is_none(),
             "nothing refused was elected"
         );
+        *resolved.borrow_mut() = Ok(ResolvedPi {
+            program: PathBuf::from("/opt/pi/bin/pi"),
+            version: "1.5.3".into(),
+        });
         elect("pi-rpc", &anthropic, Some("ANTHROPIC_API_KEY"), None).unwrap();
         let harness = answer_harness(&journal).unwrap().unwrap();
         assert_eq!(harness.credential_env.as_deref(), Some("ANTHROPIC_API_KEY"));
+        assert_eq!(
+            harness.argv[0], "/opt/pi/bin/pi",
+            "elected by the path AIKit resolved"
+        );
+    }
+
+    /// Review 5 (be2f): the elected pi's version is read again before each
+    /// turn, so a pi replaced since its election by one the reading of pi's
+    /// flags was not made for is not prompted.
+    #[cfg(unix)]
+    #[test]
+    fn a_pi_replaced_since_its_election_is_not_prompted() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let home = AikitHome::at(dir.path());
+        let program = dir.path().join("pi");
+        std::fs::write(&program, "#!/bin/sh\necho 1.6.0\n").unwrap();
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let stored = AnswerHarness {
+            schema: ANSWER_HARNESS_SCHEMA.into(),
+            protocol: "pi-rpc".into(),
+            argv: [
+                program.display().to_string().as_str(),
+                "--mode",
+                "rpc",
+                "--no-session",
+                "-nt",
+                "-ne",
+                "-ns",
+                "--no-mcp",
+                "-nc",
+            ]
+            .map(str::to_owned)
+            .to_vec(),
+            credential_env: None,
+        };
+        let why = take_answer_turn(&home, &stored, "aikit:communique:x", "p".into()).unwrap_err();
+        assert!(
+            why.contains("this pi is version 1.6.0") && why.contains("as pi 1.5.0 reads them"),
+            "{why}"
+        );
     }
 
     /// A gateway whose carrier does not verify the answering body: every reply
@@ -2806,6 +3042,50 @@ mod tests {
         )
         .unwrap();
         assert_eq!(answered["answered"], true, "the next start answers it");
+    }
+
+    /// Review 4 (be2f): an ask whose day has passed is declined; when that
+    /// decline is not stored Verified, the ask is still ended, declined, so
+    /// it never waits again and no further decline is sent.
+    #[test]
+    fn a_decline_that_never_lands_verified_still_ends_the_ask() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = AikitHome::at(dir.path());
+        let journal = Journal::new();
+        journal.elect();
+        let owners = Occupancy::new(vec![(ASKED, "gen-scribe")]);
+        let said = |_: &AnswerHarness, _: String, _: &str| Ok(ANSWERED.to_owned());
+        let ask = journal.ask_verified("waited", ASKED, VACANT);
+        let late = 10 + DAY_MS;
+        journal.at(late);
+        let error = answer_as(
+            &home,
+            &owners,
+            &Unverifying(&journal),
+            dir.path(),
+            &ask,
+            &verified(ASKED),
+            late,
+            &said,
+        )
+        .unwrap_err();
+        assert_eq!(error.code(), "gateway.answer_not_verified", "{error}");
+        assert!(
+            error.to_string().contains("the ask was closed, declined"),
+            "{error}"
+        );
+        let record = journal.record(&ask);
+        assert!(
+            !record.ask_waits(),
+            "ended, though its decline did not count"
+        );
+        assert!(
+            record.transitions.last().unwrap().basis.contains(
+                "declined: it waited 24 hours with no answer, and the decline sent was not stored Verified"
+            ),
+            "{:?}",
+            record.transitions.last()
+        );
     }
 
     /// Review 10 (be2d): a turn lock that fails for an I/O reason is named as
@@ -2955,6 +3235,40 @@ mod tests {
                 .join(key_of(reference))
                 .exists());
         }
+    }
+
+    /// Review 9 (be2f): what an ask began after the pass read the asks
+    /// waiting is never removed as a leftover. The pass reads them again
+    /// under the hold claims and turns make their folders under, and while a
+    /// claim or a turn holds it, removes nothing.
+    #[test]
+    fn a_leftover_removal_keeps_what_an_ask_began_after_the_pass_read_the_asks() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = AikitHome::at(dir.path());
+        let journal = Journal::new();
+        let ended = journal.ask("ended", VACANT, None, 10);
+        close_ask(&journal, &journal.record(&ended), "declined: test", 15).unwrap();
+        let arrived = journal.ask("arrived-after", ASKED, None, 16);
+        let turn = |reference: &str| world_agent_dir(&home).join("turns").join(key_of(reference));
+        let begin = |reference: &str| {
+            assert!(claim(&home, reference));
+            std::fs::create_dir_all(turn(reference).join("work")).unwrap();
+        };
+        begin(&ended);
+        begin(&arrived);
+        // The pass's own reading came before `arrived`: it names neither.
+        assert_eq!(remove_leftovers(&home, &journal, &[]), 2);
+        assert!(claim_path(&home, &arrived).exists());
+        assert!(turn(&arrived).exists(), "an ask that waits keeps its turn");
+        assert!(!claim_path(&home, &ended).exists());
+        assert!(!turn(&ended).exists());
+
+        // While a claim or a turn makes its folder, nothing is removed.
+        begin(&ended);
+        let held = folders_lock(&home, Duration::ZERO).unwrap();
+        assert_eq!(remove_leftovers(&home, &journal, &[]), 0);
+        drop(held);
+        assert_eq!(remove_leftovers(&home, &journal, &[]), 2);
     }
 
     /// Review 2 (be2d): a sender's stamp is never arithmetic. An ask stamped at

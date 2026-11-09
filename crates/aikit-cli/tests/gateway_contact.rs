@@ -3205,6 +3205,10 @@ fn answer_of(reply: &Value) -> Value {
 const ANSWER_HARNESS: &str = r#"#!/usr/bin/env python3
 import json, os, sys
 folder = FOLDER
+if "--version" in sys.argv[1:]:
+    kept = os.path.join(folder, "version.txt")
+    print(open(kept).read().strip() if os.path.exists(kept) else "1.5.0")
+    sys.exit(0)
 turns = 0
 def send(obj):
     sys.stdout.write(json.dumps(obj) + "\n")
@@ -3278,9 +3282,23 @@ fn answer_harness_program(folder: &Path) -> String {
 
 /// `aikit --json ARGS`, the flag first (the harness argv runs to the end).
 fn json_first(body: &Body<'_>, args: &[&str]) -> (bool, Value) {
+    json_first_on_path(body, args, None)
+}
+
+/// [`json_first`] with `first` first on PATH, where AIKit resolves pi.
+fn json_first_on_path(body: &Body<'_>, args: &[&str], first: Option<&Path>) -> (bool, Value) {
     let mut all = vec!["--json"];
     all.extend_from_slice(args);
-    let output = body.command(&all).output().unwrap();
+    let mut command = body.command(&all);
+    if let Some(first) = first {
+        let rest = std::env::var_os("PATH").unwrap_or_default();
+        let path = std::env::join_paths(
+            std::iter::once(first.to_path_buf()).chain(std::env::split_paths(&rest)),
+        )
+        .unwrap();
+        command.env("PATH", path);
+    }
+    let output = command.output().unwrap();
     let stdout = String::from_utf8_lossy(&output.stdout);
     let envelope: Value = serde_json::from_str(stdout.trim()).unwrap_or_else(|_| {
         panic!(
@@ -3295,18 +3313,37 @@ fn elect_answer_harness(window: &Body<'_>) -> PathBuf {
     let folder = window.home.join("answer-harness");
     std::fs::create_dir_all(&folder).unwrap();
     let program = answer_harness_program(&folder);
-    let mut args = vec![
-        "gateway",
-        "answer-harness",
-        "--protocol",
-        "pi-rpc",
-        "--",
-        &program,
-    ];
-    args.extend(PI_CONFINED);
-    let (ok, elected) = json_first(window, &args);
+    // Another program named pi, not the one AIKit resolves, is not elected
+    // (be2f).
+    let elsewhere = window.home.join("not-resolved");
+    std::fs::create_dir_all(&elsewhere).unwrap();
+    let wrapper = answer_harness_program(&elsewhere);
+    let elect = |program: &str| {
+        let mut args = vec![
+            "gateway",
+            "answer-harness",
+            "--protocol",
+            "pi-rpc",
+            "--",
+            program,
+        ];
+        args.extend(PI_CONFINED);
+        json_first_on_path(window, &args, Some(&folder))
+    };
+    let (ok, refused) = elect(&wrapper);
+    assert!(!ok, "{refused}");
+    assert_eq!(
+        refused["error"]["code"],
+        "gateway.answer_harness_not_confined"
+    );
+    assert!(
+        refused.to_string().contains("is not the pi AIKit resolves"),
+        "{refused}"
+    );
+    let (ok, elected) = elect(&program);
     assert!(ok, "{elected}");
     assert_eq!(elected["data"]["harness"]["protocol"], "pi-rpc");
+    assert_eq!(elected["data"]["harness"]["argv"][0], program.as_str());
     folder
 }
 

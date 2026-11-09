@@ -769,6 +769,45 @@ enum PiTakes {
     TuiMode,
 }
 
+/// The pi release whose argv grammar [`PI_FLAGS`] and whose provider table
+/// ([`pi_provider_credential_variables`]) AIKit copies: pi-coding-agent and
+/// pi-ai 1.5.0. A pi of another major or minor version may read its argv
+/// otherwise, so it is not held to no tools by this reading (DLW build
+/// ruling 2026-11-09, be2f).
+pub const PI_GRAMMAR_VERSION: &str = "1.5.0";
+
+fn major_minor(version: &str) -> Option<(u64, u64)> {
+    let mut parts = version.trim_start_matches('v').split('.');
+    let major = parts.next()?.parse().ok()?;
+    let minor = parts
+        .next()?
+        .split(|c: char| !c.is_ascii_digit())
+        .next()?
+        .parse()
+        .ok()?;
+    Some((major, minor))
+}
+
+/// Whether the version a pi reports (its `--version` output) is one this
+/// reading of pi's argv was made for: the major and minor of
+/// [`PI_GRAMMAR_VERSION`]. Why not, naming both versions, when it is not.
+pub fn pi_version_fits(reported: &str) -> std::result::Result<(), String> {
+    let made_for = major_minor(PI_GRAMMAR_VERSION);
+    let read = reported
+        .split_whitespace()
+        .find_map(|word| major_minor(word).map(|version| (version, word)));
+    match read {
+        Some((version, _)) if Some(version) == made_for => Ok(()),
+        Some((_, word)) => Err(format!(
+            "this pi is version {word}, and AIKit reads pi's flags as pi {PI_GRAMMAR_VERSION} reads them, so it cannot say this pi is held to no tools"
+        )),
+        None => Err(format!(
+            "this pi reports no version AIKit can read ({:?}), and AIKit reads pi's flags as pi {PI_GRAMMAR_VERSION} reads them",
+            reported.trim()
+        )),
+    }
+}
+
 const PI_FLAGS: &[(&str, &str, PiTakes)] = &[
     ("--help", "--help", PiTakes::Nothing),
     ("-h", "--help", PiTakes::Nothing),
@@ -1017,7 +1056,7 @@ fn pi_confinement(argv: &[String]) -> std::result::Result<(), String> {
     };
     if std::path::Path::new(program).file_name() != Some(std::ffi::OsStr::new("pi")) {
         return Err(format!(
-            "the program is {program}, and only pi itself (a program named pi) is held to no tools by its flags"
+            "the program is {program}, and only pi (a program named pi, its flags read as pi {PI_GRAMMAR_VERSION} reads them) is held to no tools by its flags"
         ));
     }
     let reading = PiReading::read(&argv[1..]);
@@ -3971,7 +4010,7 @@ mod tests {
             ),
             (
                 vec!["python3", "-nt", "-ne", "-ns", "--no-mcp", "-nc"],
-                "only pi itself",
+                "only pi (a program named pi",
             ),
         ] {
             let error = pi(&args).expect_err(&format!("{args:?}"));
@@ -3980,6 +4019,26 @@ mod tests {
         // `--` ends pi's options: a confining flag after it is a message.
         let error = pi(&["pi", "--", "-nt", "-ne", "-ns", "--no-mcp", "-nc"]).unwrap_err();
         assert!(error.contains("lacks --no-tools"), "{error}");
+    }
+
+    /// be2f (review 5): the reading of pi's flags holds only for the pi it
+    /// was made for, by major and minor version; any other is named, with
+    /// both versions.
+    #[test]
+    fn pis_flags_are_read_only_for_the_pi_version_the_reading_was_made_for() {
+        for fits in ["1.5.0", "1.5.0\n", "1.5.12", "v1.5.1", "pi 1.5.0-beta.2"] {
+            assert!(pi_version_fits(fits).is_ok(), "{fits:?}");
+        }
+        for other in ["1.6.0", "1.4.9", "2.5.0", "0.84.4"] {
+            let why = pi_version_fits(other).unwrap_err();
+            assert!(
+                why.contains(&format!("this pi is version {other}"))
+                    && why.contains("as pi 1.5.0 reads them"),
+                "{other}: {why}"
+            );
+        }
+        let why = pi_version_fits("").unwrap_err();
+        assert!(why.contains("reports no version AIKit can read"), "{why}");
     }
 
     /// be2d (review 5): the provider an argv selects is read as pi keeps it,

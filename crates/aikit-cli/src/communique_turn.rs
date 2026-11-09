@@ -1449,4 +1449,56 @@ mod tests {
             .text
             .contains("Full record: aikit --json gateway message 'aikit:communique:old-header'"));
     }
+
+    /// Review 6 (be2f): a value holding a single quote stays one word. The
+    /// quote is closed, escaped and reopened, so what follows it never runs,
+    /// and a control byte is dropped.
+    #[test]
+    fn a_single_quote_in_a_value_stays_inside_its_one_word() {
+        assert_eq!(shell_word("a'b"), r"'a'\''b'");
+        assert_eq!(shell_word("a'; id; '"), r"'a'\''; id; '\'''");
+        assert_eq!(shell_word("a\u{7}'b"), r"'a'\''b'");
+        let pasted = format!("aikit gateway message {}", shell_word("x'; touch pwned; '"));
+        let words: Vec<String> = shell_words_of(&pasted);
+        assert_eq!(
+            words,
+            ["aikit", "gateway", "message", "x'; touch pwned; '"],
+            "one word, as a POSIX shell reads it"
+        );
+    }
+
+    /// How a POSIX shell splits single-quoted words outside any other
+    /// quoting: enough to read back what [`shell_word`] makes.
+    fn shell_words_of(line: &str) -> Vec<String> {
+        let (mut words, mut word, mut quoted, mut any) = (Vec::new(), String::new(), false, false);
+        let mut chars = line.chars();
+        while let Some(c) = chars.next() {
+            match (c, quoted) {
+                ('\'', _) => {
+                    quoted = !quoted;
+                    any = true;
+                }
+                ('\\', false) => {
+                    if let Some(next) = chars.next() {
+                        word.push(next);
+                        any = true;
+                    }
+                }
+                (' ', false) => {
+                    if any {
+                        words.push(std::mem::take(&mut word));
+                        any = false;
+                    }
+                }
+                (other, _) => {
+                    word.push(other);
+                    any = true;
+                }
+            }
+        }
+        if any {
+            words.push(word);
+        }
+        words
+    }
 }

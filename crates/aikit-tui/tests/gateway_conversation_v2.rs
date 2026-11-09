@@ -309,6 +309,7 @@ impl FakeGateway {
                         provenance: vec!["fixture".into()],
                     }],
                     carriers: Vec::new(),
+                    last_tick: None,
                 },
             },
             GatewayCommand::Ecology => GatewayResponse::Ecology {

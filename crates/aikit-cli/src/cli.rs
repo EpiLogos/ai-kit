@@ -2464,7 +2464,8 @@ pub enum GatewaySub {
     /// own window records it; a body at a Position may not.
     Disclose(GatewayDiscloseArgs),
     /// Elect (or clear, or read) the harness asks of a World's agent are
-    /// answered with, launched in its own no-tools mode. The person's act.
+    /// answered with: pi, launched in its own no-tools mode. The person's
+    /// act.
     AnswerHarness(GatewayAnswerHarnessArgs),
     /// Cross a Communique into obligation-bearing work: Factory assigns custody
     /// to its recipient Position and the Communique is marked escalated.
@@ -2960,22 +2961,30 @@ pub struct GatewayDiscloseArgs {
 /// `aikit gateway answer-harness`.
 #[derive(Debug, Args)]
 pub struct GatewayAnswerHarnessArgs {
-    /// `acp`, `pi-rpc` or `prime-rpc`.
+    /// `pi-rpc`: only pi is elected, because AIKit holds pi to no tools by
+    /// pi's own launch flags before its session opens. An `acp` or
+    /// `prime-rpc` harness is held to none only by its own report of its
+    /// tools, and no agent of either protocol here is yet shown to report
+    /// them, so neither is elected.
     #[arg(long, value_name = "PROTOCOL")]
     pub protocol: Option<String>,
     /// Clear the election: asks then wait.
     #[arg(long)]
     pub clear: bool,
-    /// The provider's own credential variable, the one variable beside PATH
-    /// and LANG the confined harness is given.
+    /// The one variable beside PATH and LANG the confined harness is given:
+    /// the credential variable pi itself names for the provider its argv
+    /// selects with `--provider` (for `--provider anthropic`,
+    /// `ANTHROPIC_API_KEY` or `ANTHROPIC_OAUTH_TOKEN`). Any other is refused.
     #[arg(long = "credential-env", value_name = "VARIABLE")]
     pub credential_env: Option<String>,
     #[arg(long = "from-position", value_name = "POSITION")]
     pub from_position: Option<String>,
     #[command(flatten)]
     pub carrier: GatewayQueryArgs,
-    /// The argv that launches the harness in its no-tools mode (AIKit refuses
-    /// one it cannot hold to no tools).
+    /// The argv that launches pi in its no-tools mode: `pi`, as AIKit
+    /// resolves it on PATH, and pi's own confining flags (AIKit refuses an
+    /// argv it cannot hold to no tools, and a pi whose version its reading of
+    /// pi's flags was not made for).
     #[arg(last = true, value_name = "ARGV")]
     pub argv: Vec<String>,
 }
@@ -6596,6 +6605,38 @@ pub enum SessionSpaceWorkingSurfaceCommand {
     Focus { space: String, binding: String },
     /// Replace this terminal client with attachment to the exact live provider Surface.
     Attach { space: String, binding: String },
+}
+
+#[cfg(test)]
+mod answer_harness_help_tests {
+    use super::*;
+    use clap::CommandFactory;
+
+    /// Review 10 (be2f): the help lists only what can be elected, and why
+    /// the others are not; the credential is pi's own for its provider.
+    #[test]
+    fn answer_harness_help_lists_only_pi_and_says_why() {
+        let mut cli = Cli::command();
+        let help = cli
+            .find_subcommand_mut("gateway")
+            .and_then(|gateway| gateway.find_subcommand_mut("answer-harness"))
+            .expect("aikit gateway answer-harness")
+            .render_long_help()
+            .to_string()
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(help.contains("only pi is elected"), "{help}");
+        assert!(
+            help.contains("no agent of either protocol here is yet shown to report them"),
+            "{help}"
+        );
+        assert!(!help.contains("`acp`, `pi-rpc` or `prime-rpc`"), "{help}");
+        assert!(
+            help.contains("the credential variable pi itself names for the provider"),
+            "{help}"
+        );
+    }
 }
 
 #[cfg(test)]

@@ -334,7 +334,8 @@ pub struct Communique {
     /// When this gateway's journal took it, on this gateway's own clock (DLW
     /// build ruling 2026-11-09, be2d): the bounds on asks waiting and their
     /// expiry read this, never the sender's word. A record kept before the
-    /// journal stamped it reads as received when it was sent.
+    /// journal stamped it is stamped when this gateway first loads it
+    /// (be2f).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub received_at_unix_ms: Option<u64>,
     pub state: CommuniqueState,
@@ -379,9 +380,13 @@ impl Communique {
         is_ask_body(&self.body)
     }
 
-    /// When this gateway took it, on its own clock.
+    /// When this gateway took it, on its own clock: as the journal took it,
+    /// or, for a record kept before the journal stamped what it took, as
+    /// this gateway first loaded it (be2f). Never the sender's `sent_at`: a
+    /// record no journal stamped reads as taken at the epoch, so it holds no
+    /// slot.
     pub fn received_at(&self) -> u64 {
-        self.received_at_unix_ms.unwrap_or(self.sent_at_unix_ms)
+        self.received_at_unix_ms.unwrap_or(0)
     }
 
     /// Whether an ask has waited its day, on this gateway's clock.
@@ -739,6 +744,22 @@ impl CommuniqueJournal {
             journal.push(record);
         }
         Ok(journal)
+    }
+
+    /// Stamp each record kept before the journal stamped what it took as
+    /// taken at `at_unix_ms`, the moment this gateway first loads it (DLW
+    /// build ruling 2026-11-09, be2f), never at its sender's `sent_at`. How
+    /// many were stamped: the caller keeps the stamp by persisting the
+    /// journal.
+    pub fn stamp_unreceived(&mut self, at_unix_ms: u64) -> usize {
+        let mut stamped = 0;
+        for record in &mut self.records {
+            if record.received_at_unix_ms.is_none() {
+                record.received_at_unix_ms = Some(at_unix_ms);
+                stamped += 1;
+            }
+        }
+        stamped
     }
 
     /// Accept a sender's draft. Replaying the identical draft answers the
@@ -2607,6 +2628,50 @@ mod tests {
                 10 + ASK_EXPIRES_AFTER_MS,
             )
             .unwrap();
+    }
+
+    /// Review 1 (be2f): a peer relays an ask its own journal stamped as taken
+    /// at the end of time, sent near the end of time too. This gateway takes
+    /// it at its own clock: still counted against its asker, and still
+    /// expiring a day after it arrived here.
+    #[test]
+    fn a_relayed_ask_is_taken_at_this_gateways_clock_whatever_the_peer_stamped() {
+        let mut journal = CommuniqueJournal::default();
+        for i in 1..MAX_ASKS_WAITING_PER_ASKER {
+            journal
+                .send_at(
+                    "g",
+                    ask(&format!("r{i}"), "world:mara", &format!("q{i}"), 10),
+                    10,
+                )
+                .unwrap();
+        }
+        let mut peer = CommuniqueJournal::default();
+        let (mut relayed, _) = peer
+            .send_at(
+                "agency-gateway/peer",
+                ask("r0", "world:mara", "q0", u64::MAX - 2),
+                u64::MAX - 2,
+            )
+            .unwrap();
+        relayed.received_at_unix_ms = Some(u64::MAX - 1);
+        let (taken, replayed) = journal.ingest(relayed, "agency-gateway/peer", 20).unwrap();
+        assert!(!replayed);
+        assert_eq!(taken.received_at_unix_ms, Some(20), "this gateway's clock");
+        assert_eq!(taken.sent_at_unix_ms, u64::MAX - 2, "kept for display");
+        assert!(!taken.ask_expired(19 + ASK_EXPIRES_AFTER_MS));
+        assert!(
+            taken.ask_expired(20 + ASK_EXPIRES_AFTER_MS),
+            "a day after it arrived here"
+        );
+        let error = journal
+            .send_at("g", ask("r-past", "world:mara", "one more", 21), 21)
+            .unwrap_err();
+        assert_eq!(
+            error.code(),
+            "agency_gateway.asks_waiting_full",
+            "the relayed ask is counted against its asker"
+        );
     }
 
     /// Review 7 and the review's gap (be2d): every header the journal keeps
