@@ -2930,9 +2930,21 @@ pub struct GatewayDiscloseArgs {
     /// The World that shows it, named whole (`project:NAME`).
     #[arg(long = "world", value_name = "WORLD_REF")]
     pub world_ref: String,
+    /// List what AIKit holds that World shows, as data, and change nothing
+    /// (DLW build ruling 2026-11-09, 601c): the person's window sets the field
+    /// right against it when it goes live.
+    #[arg(
+        long,
+        conflicts_with_all = ["part_ref", "star_ref", "to_field", "kind", "label", "text", "withdraw", "from_position"]
+    )]
+    pub list: bool,
     /// The part shown.
-    #[arg(long = "part", value_name = "PART_REF")]
-    pub part_ref: String,
+    #[arg(
+        long = "part",
+        value_name = "PART_REF",
+        required_unless_present = "list"
+    )]
+    pub part_ref: Option<String>,
     /// The star it is shown at.
     #[arg(long = "star", value_name = "STAR_REF")]
     pub star_ref: Option<String>,

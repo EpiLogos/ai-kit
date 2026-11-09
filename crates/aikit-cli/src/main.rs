@@ -1433,6 +1433,67 @@ fn contact_seams(
     ))
 }
 
+/// `aikit gateway send`: what it kept, or why not. Every refusal says in data
+/// whether it kept anything (601c ruling 3); one met here before anything is
+/// handed to a gateway or to Central kept nothing (606b).
+fn gateway_send(home: &AikitHome, a: GatewaySendArgs) -> Result<Value> {
+    let (owners, gateway, cwd) = contact_seams(home, &a.carrier)?;
+    let body = match (a.body, a.body_file) {
+        (Some(body), _) => body,
+        (None, Some(path)) => read_body_file(&path)?,
+        (None, None) => {
+            return Err(aikit_cli::gateway_contact::three_part(
+                "gateway.empty_body",
+                "Neither --body nor --body-file was provided.",
+                "Nothing was sent; no Communique was recorded.",
+                "Pass the words with --body TEXT or --body-file PATH (- for stdin).",
+            ))
+        }
+    };
+    let owner = aikit_cli::gateway_contact::owner_address::OwnerAsk {
+        subject: a.subject,
+        propose: a.propose,
+        proposed_owner: a.proposed_owner,
+        options: a.options,
+        now_ref: a.now_ref,
+        evidence_refs: a.evidence_refs,
+    };
+    // What is asked of the person rides only a send to the person.
+    if !a
+        .to
+        .as_deref()
+        .is_some_and(aikit_cli::gateway_contact::owner_address::is_owner_address)
+        && owner.is_asked()
+    {
+        return Err(aikit_cli::gateway_contact::three_part(
+            "gateway.owner_ask_not_owner",
+            format!(
+                "--propose, --for, --subject, --option, --now-ref and --evidence ask the person, and {} is not the owner.",
+                a.to.as_deref().unwrap_or("the sender of what you answer")
+            ),
+            "Nothing was sent; no Communique was recorded.",
+            "Send to @owner to ask the person, or drop those flags to send to a Position.",
+        ));
+    }
+    aikit_cli::gateway_contact::send(
+        home,
+        &owners,
+        &gateway,
+        &cwd,
+        aikit_cli::gateway_contact::SendRequest {
+            to: a.to.as_deref(),
+            body,
+            reply_to: a.reply_to,
+            from_position: a.from_position.as_deref(),
+            project_world: a.project_world.as_deref(),
+            instance: a.instance.as_deref(),
+            require_workcell: a.require_workcell.as_deref(),
+            handling: aikit_adapters::CommuniqueHandling::parse(&a.handling).unwrap_or_default(),
+            owner,
+        },
+    )
+}
+
 fn gateway_data(data: Value) -> Result<Reply> {
     Ok(Reply::Data {
         context: EnvelopeContext::default(),
@@ -1517,7 +1578,15 @@ fn disclose_at(mut reply: Reply, reference: &str) -> Reply {
 fn cmd_gateway_dispatch(command: GatewayCmd, cwd: &std::path::Path) -> Result<Reply> {
     use aikit_adapters::GatewayTickLoop;
     use aikit_cli::routine_cli::{gateway_tick, production_dispatcher, GatewayDispatcherTick};
-    let home = AikitHome::discover()?;
+    // A send refused before anything is handed on says it kept nothing (606b).
+    let sending = matches!(command.command, GatewaySub::Send(_));
+    let home = AikitHome::discover().map_err(|error| {
+        if sending {
+            aikit_cli::gateway_contact::refused_before_handing(error)
+        } else {
+            error
+        }
+    })?;
     match command.command {
         GatewaySub::NativeOwner(a) => {
             let target = aikit_cli::gateway_ops::carrier_target(&home, &a.carrier)?;
@@ -1779,65 +1848,9 @@ fn cmd_gateway_dispatch(command: GatewayCmd, cwd: &std::path::Path) -> Result<Re
                 a.project_world.as_deref(),
             )?)
         }
-        GatewaySub::Send(a) => {
-            let a = *a;
-            let (owners, gateway, cwd) = contact_seams(&home, &a.carrier)?;
-            let body = match (a.body, a.body_file) {
-                (Some(body), _) => body,
-                (None, Some(path)) => read_body_file(&path)?,
-                (None, None) => {
-                    return Err(aikit_cli::gateway_contact::three_part(
-                        "gateway.empty_body",
-                        "Neither --body nor --body-file was provided.",
-                        "Nothing was sent; no Communique was recorded.",
-                        "Pass the words with --body TEXT or --body-file PATH (- for stdin).",
-                    ))
-                }
-            };
-            let owner = aikit_cli::gateway_contact::owner_address::OwnerAsk {
-                subject: a.subject,
-                propose: a.propose,
-                proposed_owner: a.proposed_owner,
-                options: a.options,
-                now_ref: a.now_ref,
-                evidence_refs: a.evidence_refs,
-            };
-            // What is asked of the person rides only a send to the person.
-            if !a
-                .to
-                .as_deref()
-                .is_some_and(aikit_cli::gateway_contact::owner_address::is_owner_address)
-                && owner.is_asked()
-            {
-                return Err(aikit_cli::gateway_contact::three_part(
-                    "gateway.owner_ask_not_owner",
-                    format!(
-                        "--propose, --for, --subject, --option, --now-ref and --evidence ask the person, and {} is not the owner.",
-                        a.to.as_deref().unwrap_or("the sender of what you answer")
-                    ),
-                    "Nothing was sent; no Communique was recorded.",
-                    "Send to @owner to ask the person, or drop those flags to send to a Position.",
-                ));
-            }
-            gateway_data(aikit_cli::gateway_contact::send(
-                &home,
-                &owners,
-                &gateway,
-                &cwd,
-                aikit_cli::gateway_contact::SendRequest {
-                    to: a.to.as_deref(),
-                    body,
-                    reply_to: a.reply_to,
-                    from_position: a.from_position.as_deref(),
-                    project_world: a.project_world.as_deref(),
-                    instance: a.instance.as_deref(),
-                    require_workcell: a.require_workcell.as_deref(),
-                    handling: aikit_adapters::CommuniqueHandling::parse(&a.handling)
-                        .unwrap_or_default(),
-                    owner,
-                },
-            )?)
-        }
+        GatewaySub::Send(a) => gateway_data(
+            gateway_send(&home, *a).map_err(aikit_cli::gateway_contact::refused_before_handing)?,
+        ),
         GatewaySub::Inbox(a) => {
             let (owners, gateway, cwd) = contact_seams(&home, &a.carrier)?;
             gateway_data(aikit_cli::gateway_contact::inbox(
@@ -1947,14 +1960,23 @@ fn cmd_gateway_dispatch(command: GatewayCmd, cwd: &std::path::Path) -> Result<Re
         }
         GatewaySub::Disclose(a) => {
             // The person's own act: written through the gateway runtime, which
-            // takes it only from the person's own connection.
+            // takes it only from the person's own connection. A list only
+            // reads.
             let (_, gateway, _) = contact_seams(&home, &a.carrier)?;
+            if a.list {
+                return gateway_data(aikit_cli::gateway_contact::world_agent::list_disclosed(
+                    &gateway,
+                    &a.world_ref,
+                )?);
+            }
             gateway_data(aikit_cli::gateway_contact::world_agent::disclose(
                 &home,
                 &gateway,
                 aikit_cli::gateway_contact::world_agent::DiscloseRequest {
                     world_ref: &a.world_ref,
-                    part_ref: &a.part_ref,
+                    // clap requires --part without --list; an empty one is
+                    // refused as no plain ref.
+                    part_ref: a.part_ref.as_deref().unwrap_or_default(),
                     star_ref: a.star_ref.as_deref(),
                     to_field: a.to_field,
                     kind: a.kind.as_deref(),
