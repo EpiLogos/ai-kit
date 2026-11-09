@@ -367,6 +367,10 @@ pub struct ModelEnvironment {
     /// The exact installed Codex executable verified for a profile-derived
     /// ACP wrapper. Never taken from ambient CODEX_PATH.
     codex_path: Option<std::path::PathBuf>,
+    /// A confined launch (DLW build ruling 2026-11-09): this empty folder is
+    /// the child's HOME, and only PATH and LANG are passed beside the
+    /// delivered credentials.
+    isolated_home: Option<std::path::PathBuf>,
 }
 
 impl std::fmt::Debug for ModelEnvironment {
@@ -379,6 +383,7 @@ impl std::fmt::Debug for ModelEnvironment {
         f.debug_struct("ModelEnvironment")
             .field("credentials", &names)
             .field("codex_path", &self.codex_path)
+            .field("isolated_home", &self.isolated_home)
             .finish()
     }
 }
@@ -386,6 +391,17 @@ impl std::fmt::Debug for ModelEnvironment {
 impl ModelEnvironment {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// A confined launch: the child sees PATH, LANG and the delivered
+    /// credentials only, with `home` (an empty folder of its own) as HOME, so
+    /// no global agent instructions, MCP configuration, skills or AIKit and
+    /// occupant variables reach it.
+    pub fn isolated(home: impl Into<std::path::PathBuf>) -> Self {
+        Self {
+            isolated_home: Some(home.into()),
+            ..Self::default()
+        }
     }
 
     /// One delivered credential. The variable name is re-checked against the
@@ -461,6 +477,11 @@ impl ModelEnvironment {
         Ok(())
     }
 
+    /// The confined launch's own empty HOME, when this is one.
+    pub fn isolated_home(&self) -> Option<&Path> {
+        self.isolated_home.as_deref()
+    }
+
     /// Whether any credential would be delivered. Callers may still apply an
     /// empty environment to scrub ambient API keys for native own-login.
     pub fn is_empty(&self) -> bool {
@@ -477,6 +498,18 @@ impl ModelEnvironment {
         mut ambient: impl FnMut(&str) -> Option<std::ffi::OsString>,
     ) {
         command.env_clear();
+        if let Some(home) = &self.isolated_home {
+            for name in ["PATH", "LANG"] {
+                if let Some(value) = ambient(name) {
+                    command.env(name, value);
+                }
+            }
+            command.env("HOME", home);
+            for (name, value) in &self.credentials {
+                command.env(name, value.expose());
+            }
+            return;
+        }
         for name in [
             "HOME",
             "CODEX_HOME",

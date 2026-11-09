@@ -54,12 +54,12 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use aikit_adapters::{
-    gateway_command_within, Communique, CommuniqueDraft, CommuniqueForward,
-    CommuniqueForwardOutcome, CommuniqueHandling, CommuniqueInstance, CommuniqueInstanceHold,
-    CommuniqueRouting, CommuniqueState, GatewayAskRequest, GatewayAskRoute, GatewayCarrierTarget,
-    GatewayCommand, GatewayResponse, ListenerClass, SenderAttribution, COMMUNIQUE_REF_PREFIX,
-    GATEWAY_FEATURE_COMMUNIQUE_EXACT_INSTANCE, GATEWAY_FEATURE_COMMUNIQUE_HANDLING,
-    GATEWAY_PROTOCOL_FEATURES,
+    gateway_command_within, is_sender_of_address, sender_of_address, Communique, CommuniqueDraft,
+    CommuniqueForward, CommuniqueForwardOutcome, CommuniqueHandling, CommuniqueInstance,
+    CommuniqueInstanceHold, CommuniqueRouting, CommuniqueState, GatewayAskRequest, GatewayAskRoute,
+    GatewayCarrierTarget, GatewayCommand, GatewayResponse, ListenerClass, SenderAttribution,
+    COMMUNIQUE_REF_PREFIX, GATEWAY_FEATURE_COMMUNIQUE_EXACT_INSTANCE,
+    GATEWAY_FEATURE_COMMUNIQUE_HANDLING, GATEWAY_PROTOCOL_FEATURES,
 };
 use aikit_core::{AikitError, Result};
 use aikit_store::AikitHome;
@@ -74,6 +74,9 @@ use crate::secret_location::SecretLocation;
 
 #[path = "gateway_owner_address.rs"]
 pub mod owner_address;
+
+#[path = "gateway_world_agent.rs"]
+pub mod world_agent;
 
 pub const POPULATION_READING_SCHEMA: &str = "aikit.population-reading/v1";
 pub const GATEWAY_REMOTES_SCHEMA: &str = "aikit.gateway-remotes/v1";
@@ -166,11 +169,20 @@ impl GatewayAccess for LocalGateway {
                     return Err(error);
                 };
                 let gateway_ref = aikit_core::resource::ResourceRef::parse(&self.gateway_ref)?;
-                aikit_adapters::execute_against_state_file(
+                // No service answered, so this process is the gateway: it
+                // establishes who asks as a carrier would (DLW build ruling
+                // 2026-11-09), from its own environment, verified by this
+                // Workcell's Actuation; the draft's own attribution is never taken.
+                let occupancy = ServedOccupancy {
+                    cwd: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+                };
+                let caller = aikit_adapters::local_caller(&command, Some(&occupancy));
+                aikit_adapters::execute_against_state_file_from(
                     aikit_adapters::AgencyGateway::new(gateway_ref),
                     state_file,
                     command,
                     Duration::from_secs(2),
+                    &caller,
                 )
                 .map_err(|offline| {
                     if offline.code() == "agency_gateway_service.state_locked" {
@@ -196,6 +208,26 @@ impl GatewayAccess for LocalGateway {
             }
             Err(error) => Err(error),
         }
+    }
+}
+
+#[cfg(test)]
+impl LocalGateway {
+    /// A journal fixture: the command executed against the state file as the
+    /// gateway's own composition, so what it records is recorded as given.
+    pub(crate) fn call_as_runtime(&self, command: GatewayCommand) -> Result<GatewayResponse> {
+        let state_file = self
+            .state_file
+            .as_ref()
+            .expect("a fixture gateway has a state file");
+        aikit_adapters::execute_against_state_file(
+            aikit_adapters::AgencyGateway::new(aikit_core::resource::ResourceRef::parse(
+                &self.gateway_ref,
+            )?),
+            state_file,
+            command,
+            Duration::from_secs(2),
+        )
     }
 }
 
@@ -519,6 +551,8 @@ pub enum RemoteOutcome {
 pub struct RemoteClaim {
     pub remote: GatewayRemote,
     pub gateway_ref: String,
+    /// The Workcell the answering gateway says it serves.
+    pub answered_workcell_ref: Option<String>,
     pub generation_ref: Option<String>,
     pub tenure: Value,
 }
@@ -612,6 +646,7 @@ impl RemoteSurvey {
                     .map(|tenure| RemoteClaim {
                         remote: remote.clone(),
                         gateway_ref: reading.gateway_ref.clone(),
+                        answered_workcell_ref: reading.workcell_ref.clone(),
                         generation_ref: tenure
                             .get("generation_ref")
                             .and_then(Value::as_str)
@@ -784,6 +819,99 @@ impl aikit_adapters::GatewayOccupancyReader for ServedOccupancy {
             read_at_unix_ms: now_unix_ms(),
         }
     }
+
+    /// Whether a generation is the Position's current occupant, asked now:
+    /// the journal attributes a sender verified only on this (DLW build ruling
+    /// 2026-11-09), as [`verify_occupant`] reads it.
+    fn verify(
+        &self,
+        position_ref: &str,
+        generation_ref: &str,
+        origin_gateway_ref: Option<&str>,
+    ) -> std::result::Result<String, String> {
+        let owners = crate::gateway_owners::ProcessOwners::from_env();
+        verify_occupant(
+            &owners,
+            position_ref,
+            generation_ref,
+            origin_gateway_ref,
+            || {
+                let (local, _) = local_workcell(&owners, &self.cwd);
+                let elsewhere = AikitHome::discover()
+                    .and_then(|home| remotes_elsewhere(&home, local.as_deref()))
+                    .unwrap_or_default();
+                RemoteSurvey::ask(
+                    &elsewhere,
+                    &GatewayCommand::OccupancyRead {
+                        position_ref: position_ref.to_owned(),
+                    },
+                )
+            },
+        )
+    }
+}
+
+/// Whether `generation_ref` is the current occupant of `position_ref` (DLW
+/// build ruling 2026-11-09, be2d). This Workcell's Actuation is asked first,
+/// and its word stands: when the Position has a current occupant here, no
+/// other Workcell is asked. Only when the Position has none here (vacant) or
+/// this Workcell cannot say (unknown) is a relayed record verified by the
+/// Workcell it came from: the declared remote whose gateway is the record's
+/// origin, reading the Position current on its own Workcell for exactly that
+/// generation. A body that speaks here (`origin_gateway_ref` is `None`) is
+/// verified only here. Neither the record's claim nor whoever relayed it
+/// counts.
+fn verify_occupant(
+    owners: &dyn ContactOwners,
+    position_ref: &str,
+    generation_ref: &str,
+    origin_gateway_ref: Option<&str>,
+    remotes: impl FnOnce() -> RemoteSurvey,
+) -> std::result::Result<String, String> {
+    let here = match owners.occupancy_verify(position_ref, generation_ref) {
+        Ok(OccupancyVerdict::Current(_)) => {
+            return Ok(format!(
+                "actuation occupancy verify: {generation_ref} is the current occupant of {position_ref}"
+            ))
+        }
+        Ok(OccupancyVerdict::Refused(refusal)) => {
+            let refused = format!(
+                "Actuation refuses {generation_ref} for {position_ref} ({}): {}",
+                refusal.code, refusal.fact
+            );
+            let occupied_here = owners
+                .occupancy_read(position_ref)
+                .ok()
+                .is_some_and(|reading| tenure_in(&reading, position_ref).is_some());
+            if occupied_here {
+                return Err(format!(
+                    "{refused}; {position_ref} has a current occupant on this Workcell, so no other Workcell is asked"
+                ));
+            }
+            refused
+        }
+        Err(unavailable) => format!("occupancy could not be verified: {unavailable}"),
+    };
+    let Some(origin) = origin_gateway_ref else {
+        return Err(here);
+    };
+    remotes()
+        .claims(position_ref)
+        .into_iter()
+        .find(|claim| {
+            claim.gateway_ref == origin
+                && claim.answered_workcell_ref.as_deref() == Some(claim.remote.workcell_ref.as_str())
+                && claim.generation_ref.as_deref() == Some(generation_ref)
+        })
+        .map(|claim| {
+            format!(
+                "occupancy read of {}, the Workcell of gateway {origin} the record came from: {generation_ref} is the current occupant of {position_ref}",
+                claim.remote.workcell_ref
+            )
+        })
+        .ok_or_else(|| {
+            format!("{here}; the Workcell of gateway {origin}, where the record came from, did not read {generation_ref} current for {position_ref}")
+        })
 }
 
 // ---------------------------------------------------------------------------
@@ -898,6 +1026,24 @@ pub fn resolve_sender(
     owners: &dyn ContactOwners,
     explicit_position: Option<&str>,
 ) -> Result<SenderResolution> {
+    // A named Position is a plain ref, as the journal bounds every ref (DLW
+    // build ruling 2026-11-09): whether it is then verified or only Claimed.
+    if let Some(named) = explicit_position.filter(|named| {
+        named.trim().is_empty()
+            || named.len() > aikit_adapters::MAX_COMMUNIQUE_REF_BYTES
+            || !named.chars().all(aikit_adapters::is_safe_ref_char)
+    }) {
+        return Err(three_part(
+            "gateway.sender_position_invalid",
+            format!(
+                "--from-position names a Position of {} bytes that is not a plain ref (at most {} bytes, made only of letters, digits and ._:/@+-).",
+                named.len(),
+                aikit_adapters::MAX_COMMUNIQUE_REF_BYTES
+            ),
+            nothing_sent(),
+            "Name the Position by its ref: central:position:<world>:<role>.",
+        ));
+    }
     let position = explicit_position
         .map(str::to_owned)
         .or_else(|| env_value(POSITION_ENV));
@@ -1268,7 +1414,9 @@ fn owner_unavailable_refusal(what: &str, unavailable: &OwnerUnavailable) -> Aiki
 // ---------------------------------------------------------------------------
 
 pub struct SendRequest<'a> {
-    pub to: &'a str,
+    /// The recipient. `None` answers `reply_to` where it came from: its
+    /// sender's Position, or the line back to a sender with no Position.
+    pub to: Option<&'a str>,
     pub body: String,
     pub reply_to: Option<String>,
     pub from_position: Option<&'a str>,
@@ -1743,6 +1891,48 @@ pub fn send(
     cwd: &Path,
     request: SendRequest<'_>,
 ) -> Result<Value> {
+    // Only an ask's bounded answer turn answers it (ai-kit #601, DLW build
+    // ruling 2026-11-09): no plain send carries an answer, or replies to an ask.
+    if world_agent::is_answer_body(&request.body) {
+        return Err(world_agent::only_answer_answers(
+            "These words are shaped as an answer (oi.world-agent-answer/v1)",
+        ));
+    }
+    // What the words would answer: `--reply-to`, or the ref a line back names.
+    let line_back = request
+        .to
+        .and_then(|to| to.strip_prefix(aikit_adapters::SENDER_OF_PREFIX));
+    for answered in [request.reply_to.as_deref(), line_back]
+        .into_iter()
+        .flatten()
+    {
+        if let Ok(GatewayResponse::CommuniqueRecord { communique }) =
+            gateway.call(GatewayCommand::ReadCommunique {
+                communique_ref: answered.into(),
+            })
+        {
+            if world_agent::answers_an_ask(&communique) {
+                return Err(world_agent::only_answer_answers(&format!(
+                    "{answered} is an ask of a World's agent"
+                )));
+            }
+        }
+    }
+    send_unchecked(home, owners, gateway, cwd, request, None)
+}
+
+/// [`send`] without the ask checks: the answer turn's own way out. `sender`
+/// is the body's own resolution when its caller made it already (the answer
+/// turn's verified occupant); else it is resolved here, from
+/// `--from-position` and this body's environment.
+fn send_unchecked(
+    home: &AikitHome,
+    owners: &dyn ContactOwners,
+    gateway: &dyn GatewayAccess,
+    cwd: &Path,
+    request: SendRequest<'_>,
+    sender: Option<&SenderResolution>,
+) -> Result<Value> {
     if request.body.trim().is_empty() {
         return Err(three_part(
             "gateway.empty_body",
@@ -1751,9 +1941,30 @@ pub fn send(
             "Pass the words with --body TEXT or --body-file PATH.",
         ));
     }
+    // No recipient named: the reply goes where what it answers came from
+    // (ai-kit #601).
+    let to = match (request.to, request.reply_to.as_deref()) {
+        (Some(to), _) if is_sender_of_address(to) => {
+            return send_to_no_position(owners, gateway, cwd, request)
+        }
+        (Some(to), _) => to.to_owned(),
+        (None, Some(reply_to)) => match reply_route(gateway, reply_to)? {
+            Some(position) => position,
+            None => return send_to_no_position(owners, gateway, cwd, request),
+        },
+        (None, None) => {
+            return Err(three_part(
+                "gateway.no_recipient",
+                "Neither --to nor --reply-to names who the words are for.",
+                nothing_sent(),
+                "Name the recipient with --to POSITION|@HANDLE, or answer a Communique with --reply-to COMMUNIQUE_REF.",
+            ))
+        }
+    };
+    let to = to.as_str();
     // The person occupies no Position: addressing them is a request in
     // Central's receiving ledger, which their Inbox reads.
-    if owner_address::is_owner_address(request.to) {
+    if owner_address::is_owner_address(to) {
         return owner_address::send_to_owner(owners, &request);
     }
     if request.require_workcell.is_some() && request.instance.is_none() {
@@ -1764,8 +1975,11 @@ pub fn send(
             "Name the generation with --instance GENERATION_REF (read it from `aikit gateway who --json`), or drop --require-workcell for a durable Position route.",
         ));
     }
-    let sender = resolve_sender(owners, request.from_position)?;
-    let recipient = resolve_recipient(owners, request.to, request.project_world, cwd)?;
+    let sender = match sender {
+        Some(sender) => sender.clone(),
+        None => resolve_sender(owners, request.from_position)?,
+    };
+    let recipient = resolve_recipient(owners, to, request.project_world, cwd)?;
     let (local_workcell, workcell_basis) = local_workcell(owners, cwd);
     let now = now_unix_ms();
 
@@ -1952,6 +2166,99 @@ pub fn send(
     )
 }
 
+/// Where a reply to `reply_to` goes when no recipient is named: the Position
+/// its sender spoke from, or `None` for the line back to a sender that stood
+/// at no Position. A Communique from the person is answered through `@owner`.
+fn reply_route(gateway: &dyn GatewayAccess, reply_to: &str) -> Result<Option<String>> {
+    let answered = expect_record(gateway.call(GatewayCommand::ReadCommunique {
+        communique_ref: reply_to.into(),
+    })?)
+    .map_err(|error| {
+        three_part(
+            "gateway.reply_to_unknown",
+            format!("--reply-to names {reply_to}, which this Workcell's gateway does not hold: {error}"),
+            nothing_sent(),
+            "Answer a Communique this Workcell received (`aikit gateway inbox`), or name the recipient with --to.",
+        )
+    })?;
+    if answered.attribution == SenderAttribution::Owner {
+        return Err(three_part(
+            "gateway.reply_to_the_owner",
+            format!("{reply_to} came from the person, who occupies no Position."),
+            nothing_sent(),
+            format!("Answer them with --to @owner --reply-to {reply_to}."),
+        ));
+    }
+    Ok(answered.from_position_ref)
+}
+
+/// A reply to a sender that stood at no Position (a window, a desk; ai-kit
+/// #601): held in this Workcell's journal, where what it answers is held, on
+/// the line back to it (`aikit:sender-of:<ref>`), for whoever holds that ref
+/// to read (`aikit gateway replies`). It is nobody's Position mail: never
+/// relayed, never counted, never bound to an instance.
+fn send_to_no_position(
+    owners: &dyn ContactOwners,
+    gateway: &dyn GatewayAccess,
+    cwd: &Path,
+    request: SendRequest<'_>,
+) -> Result<Value> {
+    let Some(reply_to) = request.reply_to.clone() else {
+        return Err(three_part(
+            "gateway.no_recipient",
+            "The line back to a sender with no Position is named by what it answers, and no --reply-to was given.",
+            nothing_sent(),
+            "Answer the Communique with --reply-to COMMUNIQUE_REF and no --to.",
+        ));
+    };
+    if request.instance.is_some() {
+        return Err(three_part(
+            "gateway.instance_without_position",
+            "The sender of what you answer stood at no Position, so there is no occupancy generation to bind.",
+            nothing_sent(),
+            "Drop --instance: the reply is held for whoever holds the ref it answers.",
+        ));
+    }
+    let sender = resolve_sender(owners, request.from_position)?;
+    let (local_workcell, workcell_basis) = local_workcell(owners, cwd);
+    let line = sender_of_address(&reply_to);
+    let draft = CommuniqueDraft {
+        communique_ref: new_communique_ref(),
+        from_position_ref: sender.from_position_ref.clone(),
+        from_generation_ref: sender.from_generation_ref.clone(),
+        attribution: sender.attribution,
+        attribution_basis: sender.basis.clone(),
+        to_position_ref: line.clone(),
+        to_workcell_ref: None,
+        to_instance: None,
+        instance_hold: None,
+        body: request.body,
+        handling: request.handling,
+        sent_at_unix_ms: now_unix_ms(),
+        state: CommuniqueState::Pending,
+        state_basis: format!(
+            "held where {reply_to} is held, for whoever holds that ref: its sender stood at no Position"
+        ),
+        reply_to: Some(reply_to.clone()),
+        forward_to_workcell_ref: None,
+        routing: None,
+    };
+    accept_and_relay(
+        gateway,
+        draft,
+        None,
+        json!({
+            "recipient": {"reply_line": line, "answers": reply_to, "position_ref": null,
+                "basis": "its sender stood at no Position; the reply is read by the ref it answers (aikit gateway replies)"},
+            "sender": sender,
+            "route": "reply-to-no-position",
+            "local_workcell": { "ref": local_workcell, "basis": workcell_basis },
+            "delivery": null,
+            "remotes": [],
+        }),
+    )
+}
+
 fn new_communique_ref() -> String {
     format!(
         "{COMMUNIQUE_REF_PREFIX}{}",
@@ -2127,6 +2434,64 @@ pub fn forwarded_readback(home: &AikitHome, communique: &Communique) -> Result<O
         })?;
     forwarded_readback_via(communique, remote, remote_gateway_ref, &carrier_call).map(Some)
 }
+/// The replies held on another Workcell's gateway for a Communique this one
+/// relayed there (ai-kit #601): read from the gateway that accepted it, whose
+/// identity is checked first, as `forwarded_readback` checks it.
+pub fn forwarded_replies(
+    home: &AikitHome,
+    communique: &Communique,
+) -> Result<Option<(String, Vec<Communique>)>> {
+    let Some(CommuniqueForward::Forwarded {
+        workcell_ref,
+        remote_gateway_ref,
+        ..
+    }) = &communique.forward
+    else {
+        return Ok(None);
+    };
+    let remotes = load_remotes(home)?;
+    let remote = remotes
+        .remotes
+        .iter()
+        .find(|remote| &remote.workcell_ref == workcell_ref)
+        .ok_or_else(|| {
+            three_part(
+                "gateway.remote_undeclared",
+                "The Workcell it was relayed to has no declared route here.",
+                "Its replies are held at that Workcell's gateway.",
+                remote_command(workcell_ref),
+            )
+        })?;
+    forwarded_replies_via(communique, remote, remote_gateway_ref, &carrier_call).map(Some)
+}
+
+fn forwarded_replies_via(
+    communique: &Communique,
+    remote: &GatewayRemote,
+    expected_gateway: &str,
+    carrier: RemoteCarrier<'_>,
+) -> Result<(String, Vec<Communique>)> {
+    let GatewayResponse::Status { status } = carrier(remote, GatewayCommand::Status)? else {
+        return Err(AikitError::new(
+            "gateway.remote_replies_unreadable",
+            "Remote gateway identity could not be observed",
+        ));
+    };
+    if status.gateway_ref.as_str() != expected_gateway {
+        return Err(AikitError::new(
+            "gateway.remote_replies_changed",
+            "The gateway that accepted the relay is no longer the remote owner",
+        ));
+    }
+    let records = expect_list(carrier(
+        remote,
+        GatewayCommand::CommuniqueInbox {
+            position_ref: sender_of_address(&communique.communique_ref),
+        },
+    )?)?;
+    Ok((expected_gateway.to_owned(), records))
+}
+
 fn forwarded_readback_via(
     communique: &Communique,
     remote: &GatewayRemote,
@@ -2154,8 +2519,7 @@ fn forwarded_readback_via(
     if observed.communique_ref != communique.communique_ref
         || observed.from_position_ref != communique.from_position_ref
         || observed.from_generation_ref != communique.from_generation_ref
-        || observed.attribution != communique.attribution
-        || observed.attribution_basis != communique.attribution_basis
+        || !attribution_as_relayed(communique, &observed)
         || observed.to_position_ref != communique.to_position_ref
         || observed.to_instance != communique.to_instance
         || observed.body != communique.body
@@ -2170,8 +2534,28 @@ fn forwarded_readback_via(
     Ok(
         json!({"schema":"aikit.remote-communique-readback/v1","workcell_ref":remote.workcell_ref,"gateway_ref":expected_gateway,
         "communique_ref":observed.communique_ref,"state":observed.state,"delivered_to_generation_ref":observed.delivered_to_generation_ref,
-        "delivered_at_unix_ms":observed.delivered_at_unix_ms,"transitions":observed.transitions,"completed_work":false}),
+        "delivered_at_unix_ms":observed.delivered_at_unix_ms,"transitions":observed.transitions,
+        "attribution":observed.attribution,"attribution_basis":observed.attribution_basis,"completed_work":false}),
     )
+}
+
+/// Whether the remote holds the sent attribution, or the one its own journal
+/// set on ingest: a gateway that could not verify the relayed occupant keeps a
+/// verified record as Claimed and an owner's as Unknown, naming the relay in
+/// its basis. A readback never accepts a raise.
+fn attribution_as_relayed(sent: &Communique, observed: &Communique) -> bool {
+    if observed.attribution == sent.attribution {
+        return observed.attribution_basis == sent.attribution_basis;
+    }
+    let lowered = matches!(
+        (&sent.attribution, &observed.attribution),
+        (SenderAttribution::Verified, SenderAttribution::Claimed)
+            | (SenderAttribution::Owner, SenderAttribution::Unknown)
+    );
+    lowered
+        && observed
+            .attribution_basis
+            .starts_with("relayed by gateway ")
 }
 
 /// Whether a gateway keeps exact-instance bindings, from its `protocol`
@@ -2543,6 +2927,15 @@ fn resolve_ask_sender(owners: &dyn ContactOwners, ask: &GatewayAskRequest) -> Se
     ))
 }
 
+/// What a connector-originated ask says of its origin in its attribution basis.
+const CONNECTOR_ASK_BASIS: &str = "asked from connector conversation";
+
+/// Whether a Communique was asked from a connector conversation (`/ask`): it is
+/// answered on that chat's own path, never on a reply line.
+pub fn asked_from_a_connector(record: &Communique) -> bool {
+    record.attribution_basis.contains(CONNECTOR_ASK_BASIS)
+}
+
 /// Resolve one connector-originated ask into an accepted-shaped draft: the
 /// sender attributed from occupancy, the recipient resolved by Central, the
 /// route taken from occupancy (`route_to_occupancy` — the same decision
@@ -2584,7 +2977,7 @@ pub fn route_ask_with_owners(
         }
     };
     let attribution_basis = format!(
-        "{}; asked from connector conversation {} on {} (binding {}, agent session {}, agency \
+        "{}; {CONNECTOR_ASK_BASIS} {} on {} (binding {}, agent session {}, agency \
          {})",
         sender.basis,
         ask.conversation_id,
@@ -3297,6 +3690,122 @@ pub fn heard(
 }
 
 // ---------------------------------------------------------------------------
+// replies
+// ---------------------------------------------------------------------------
+
+/// `aikit gateway replies`'s reading.
+pub const COMMUNIQUE_REPLIES_SCHEMA: &str = "aikit.communique-replies/v1";
+
+/// The replies to one Communique its sender sent from no Position (ai-kit
+/// #601): what was answered on the line back to it, read by the ref the sender
+/// holds — whole, since the words are the sender's to read. A Communique
+/// relayed to another Workcell is answered there, where its recipient stands:
+/// `remote` reads that gateway's line, and a remote that cannot be read is
+/// said (`complete: false`), never taken for no answer. A Communique sent from
+/// a Position is answered at that Position, and refused here.
+pub fn replies(
+    gateway: &dyn GatewayAccess,
+    reference: &str,
+    remote: impl FnOnce(&Communique) -> Result<Option<(String, Vec<Communique>)>>,
+) -> Result<Value> {
+    if !reference.starts_with(COMMUNIQUE_REF_PREFIX) {
+        return Err(three_part(
+            "gateway.replies_not_a_communique",
+            format!("{reference} is not a Communique ref ({COMMUNIQUE_REF_PREFIX}…)."),
+            "Nothing was read.",
+            "Name the ref `aikit gateway send` answered.",
+        ));
+    }
+    let record = expect_record(gateway.call(GatewayCommand::ReadCommunique {
+        communique_ref: reference.into(),
+    })?)?;
+    if let Some(position) = &record.from_position_ref {
+        return Err(three_part(
+            "gateway.replies_to_a_position",
+            format!("{reference} was sent from Position {position}, so its replies are addressed to that Position."),
+            "Nothing was read.",
+            format!("Read them as its occupant: aikit gateway conversation --position {position} --with {}", record.to_position_ref),
+        ));
+    }
+    let line = sender_of_address(reference);
+    // Only the verified occupant of the Position it was sent to answers on the
+    // line back (DLW build ruling 2026-11-09): anything else held there is no
+    // reply to it, and is not read out.
+    let asked = record.to_position_ref.clone();
+    let answers = |records: Vec<Communique>| {
+        records
+            .into_iter()
+            .filter(|reply| {
+                reply.to_position_ref == line
+                    && reply.reply_to.as_deref() == Some(reference)
+                    && reply.attribution == SenderAttribution::Verified
+                    && reply.from_position_ref.as_deref() == Some(asked.as_str())
+            })
+            .collect::<Vec<_>>()
+    };
+    let mut found = answers(expect_list(gateway.call(
+        GatewayCommand::CommuniqueInbox {
+            position_ref: line.clone(),
+        },
+    )?)?);
+    let relayed = matches!(record.forward, Some(CommuniqueForward::Forwarded { .. }));
+    let (remote_replies, complete) = if relayed {
+        match remote(&record) {
+            Ok(Some((gateway_ref, records))) => {
+                for reply in answers(records) {
+                    if found
+                        .iter()
+                        .all(|kept| kept.communique_ref != reply.communique_ref)
+                    {
+                        found.push(reply);
+                    }
+                }
+                (json!({"state": "read", "gateway_ref": gateway_ref}), true)
+            }
+            Ok(None) => (Value::Null, true),
+            Err(error) => (
+                json!({"state": "unreadable", "code": error.code(), "error": error.to_string()}),
+                false,
+            ),
+        }
+    } else {
+        (Value::Null, true)
+    };
+    // An ask not yet answered waits for its World's agent, and says so; one
+    // that ended unanswered (its asker unverified, or a day waited) reads
+    // declined (DLW build ruling 2026-11-09).
+    let unanswered = found.is_empty() && world_agent::is_ask_body(&record.body);
+    let ended = unanswered
+        && ((!record.awaits_local_delivery() && !relayed)
+            // A day on this gateway's own clock (be2d), never the sender's.
+            || record.ask_expired(now_unix_ms()));
+    let waiting = (unanswered && !ended).then_some(world_agent::WAITING_WORDS);
+    let declined = ended.then(|| {
+        json!({
+            "words": world_agent::DECLINE_WORDS,
+            "basis": record
+                .transitions
+                .last()
+                .filter(|_| !record.awaits_local_delivery())
+                .map(|transition| transition.basis.clone())
+                .unwrap_or_else(|| "it waited 24 hours with no answer".into()),
+        })
+    });
+    Ok(json!({
+        "schema": COMMUNIQUE_REPLIES_SCHEMA,
+        "communique_ref": record.communique_ref,
+        "to_position_ref": record.to_position_ref,
+        "reply_line": line,
+        "waiting": waiting,
+        "declined": declined,
+        "replies": found,
+        "relayed": relayed,
+        "complete": complete,
+        "remote_replies": remote_replies,
+    }))
+}
+
+// ---------------------------------------------------------------------------
 // delegate
 // ---------------------------------------------------------------------------
 
@@ -3998,16 +4507,62 @@ impl CommuniqueRelayTick {
             gateway_ref: String::new(),
         };
         let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-        let mut report = forward_pass(&self.home, &owners, &gateway, &cwd)?;
-        // The person's decisions travel back on the same tick; a failing
-        // reply pass is reported, never allowed to stop the relay.
-        report["owner_replies"] =
-            match owner_address::owner_reply_pass(&self.home, &owners, &gateway, &cwd) {
-                Ok(replies) => replies["owner_replies"].clone(),
-                Err(error) => json!({ "error": error.to_string() }),
-            };
-        Ok(report)
+        Ok(relay_tick(
+            &self.home,
+            &owners,
+            &gateway,
+            &cwd,
+            now_unix_ms(),
+            &|home, owners, gateway, cwd| forward_pass(home, owners, gateway, cwd),
+            &|reference, position, generation| {
+                world_agent::spawn_answer(&self.target, reference, position, generation)
+            },
+        ))
     }
+}
+
+/// The relay's pass, as one tick runs it.
+type ForwardPass =
+    dyn Fn(&AikitHome, &dyn ContactOwners, &dyn GatewayAccess, &Path) -> Result<Value>;
+
+/// One tick's three passes (DLW build ruling 2026-11-09, be2d): the relay,
+/// the person's replies and the asks of a World's agent. Each runs whatever
+/// the others did, and each error is reported on its own: a relay that
+/// cannot read its remotes never stops an ask being answered, declined or
+/// ended.
+fn relay_tick(
+    home: &AikitHome,
+    owners: &dyn ContactOwners,
+    gateway: &dyn GatewayAccess,
+    cwd: &Path,
+    now: u64,
+    forward: &ForwardPass,
+    spawn: &dyn Fn(&str, &str, &str) -> std::io::Result<()>,
+) -> Value {
+    let mut report = match forward(home, owners, gateway, cwd) {
+        Ok(report) => report,
+        Err(error) => json!({ "relay": { "error": error.to_string() } }),
+    };
+    // The person's decisions travel back on the same tick.
+    report["owner_replies"] = match owner_address::owner_reply_pass(home, owners, gateway, cwd) {
+        Ok(replies) => replies["owner_replies"].clone(),
+        Err(error) => json!({ "error": error.to_string() }),
+    };
+    // The asks of a World's agent are answered from this loop, not from any
+    // occupant's prompt (DLW build ruling 2026-11-09).
+    report["world_agent"] = world_agent::answer_pass(home, owners, gateway, now, spawn);
+    report
+}
+
+/// The gateway service speaks as no body (DLW build ruling 2026-11-09, be2d):
+/// a service started from a Position's shell would otherwise present that
+/// shell's Position and generation on its own passes, and the ends it gives
+/// asks would be refused as that body's. Called once, as `serve` starts and
+/// before any carrier or tick runs; the answer turns it starts are given the
+/// asked Position's occupant explicitly.
+pub fn forget_body_identity() {
+    std::env::remove_var(POSITION_ENV);
+    std::env::remove_var(GENERATION_ENV);
 }
 
 /// The gateway service's periodic body: the Routine dispatcher pass (when
@@ -4689,6 +5244,54 @@ mod exact_instance_binding_tests {
 #[cfg(test)]
 mod forwarded_readback_tests {
     use super::*;
+
+    #[test]
+    fn a_readback_takes_the_recipients_own_lowering_and_never_a_raise() {
+        let sent = Communique {
+            attribution: SenderAttribution::Claimed,
+            attribution_basis: "named only".into(),
+            ..serde_json::from_value::<Communique>(json!({
+                "schema": "aikit.communique/v1", "communique_ref": "aikit:communique:raise",
+                "sequence": 1, "attribution": "claimed", "attribution_basis": "named only",
+                "to_position_ref": "position:child", "body": "words", "sent_at_unix_ms": 1,
+                "state": "pending", "origin_gateway_ref": "g"
+            }))
+            .unwrap()
+        };
+        let lowered = Communique {
+            attribution: SenderAttribution::Unknown,
+            attribution_basis:
+                "relayed by gateway g as the owner's; this gateway did not verify it".into(),
+            ..sent.clone()
+        };
+        let raised = Communique {
+            attribution: SenderAttribution::Verified,
+            attribution_basis: "relayed by gateway g as verified".into(),
+            ..sent.clone()
+        };
+        assert!(attribution_as_relayed(&sent, &sent));
+        assert!(!attribution_as_relayed(&sent, &lowered));
+        assert!(!attribution_as_relayed(&sent, &raised));
+        let verified = Communique {
+            attribution: SenderAttribution::Verified,
+            attribution_basis: "actual native sender generation".into(),
+            ..sent.clone()
+        };
+        let claimed = Communique {
+            attribution: SenderAttribution::Claimed,
+            attribution_basis:
+                "relayed by gateway g as verified; this gateway did not verify its occupant (x)"
+                    .into(),
+            ..sent.clone()
+        };
+        assert!(attribution_as_relayed(&verified, &claimed));
+        assert!(!attribution_as_relayed(&claimed, &verified));
+        let unexplained = Communique {
+            attribution_basis: "no relay named".into(),
+            ..claimed.clone()
+        };
+        assert!(!attribution_as_relayed(&verified, &unexplained));
+    }
     #[test]
     fn readback_observes_exact_remote_delivery_without_another_effect() {
         let sender_dir = tempfile::tempdir().unwrap();
@@ -4697,7 +5300,7 @@ mod forwarded_readback_tests {
         let recipient = LocalGateway::default_for(&AikitHome::at(recipient_dir.path()));
         let original = expect_accepted(
             sender
-                .call(GatewayCommand::SendCommunique {
+                .call_as_runtime(GatewayCommand::SendCommunique {
                     draft: Box::new(CommuniqueDraft {
                         communique_ref: "aikit:communique:remote-readback".into(),
                         from_position_ref: Some("position:parent".into()),
@@ -4750,6 +5353,13 @@ mod forwarded_readback_tests {
         )
         .unwrap();
         assert_eq!(before["state"], "pending");
+        // The recipient could not verify the relayed occupant itself, so its
+        // journal holds the record as Claimed, naming the relay.
+        assert_eq!(before["attribution"], "claimed");
+        assert!(before["attribution_basis"]
+            .as_str()
+            .unwrap()
+            .starts_with("relayed by gateway "));
         recipient
             .call(GatewayCommand::AcknowledgeCommuniques {
                 position_ref: "position:child".into(),
@@ -4932,5 +5542,306 @@ mod heard_tests {
         let error = heard(&gateway, "communique:01heard", no_remote).unwrap_err();
         assert_eq!(error.code(), "gateway.heard_not_a_communique");
         assert!(gateway.asked.borrow().is_empty());
+    }
+}
+
+#[cfg(test)]
+mod be2d_tests {
+    //! The third review of ai-kit #602 (DLW build ruling 2026-11-09, be2d):
+    //! a remote never overrides this Workcell, only the record's origin
+    //! vouches for it, and each pass of a tick runs whatever the others did.
+
+    use std::cell::Cell;
+
+    use aikit_core::resource::ResourceRef;
+
+    use super::*;
+    use crate::gateway_owners::OwnerRefusal;
+
+    const POSITION: &str = "central:position:project:O-I:steward";
+
+    /// This Workcell's Actuation: `occupant` is the current generation here,
+    /// none when the Position is vacant here.
+    struct Here {
+        occupant: Option<&'static str>,
+    }
+
+    impl ContactOwners for Here {
+        fn position_list(&self, _: Option<&str>) -> std::result::Result<Value, OwnerUnavailable> {
+            Err(unavailable())
+        }
+        fn agent_profiles(&self) -> std::result::Result<Value, OwnerUnavailable> {
+            Err(unavailable())
+        }
+        fn position_read(&self, _: &str) -> std::result::Result<PositionLookup, OwnerUnavailable> {
+            Err(unavailable())
+        }
+        fn world_here(&self, _: &Path) -> std::result::Result<Value, OwnerUnavailable> {
+            Ok(json!({"workcells": [{"ref": "workcell:a", "role": "current"}]}))
+        }
+        fn occupancy_list(&self) -> std::result::Result<Value, OwnerUnavailable> {
+            Err(unavailable())
+        }
+        fn occupancy_read(&self, position: &str) -> std::result::Result<Value, OwnerUnavailable> {
+            Ok(match self.occupant {
+                Some(generation) => json!({"position_ref": position, "state": "occupied",
+                    "current": {"generation_ref": generation, "workcell_ref": "workcell:a"}}),
+                None => json!({"position_ref": position, "state": "vacant"}),
+            })
+        }
+        fn occupancy_verify(
+            &self,
+            _: &str,
+            generation_ref: &str,
+        ) -> std::result::Result<OccupancyVerdict, OwnerUnavailable> {
+            let refused = |code: &str| {
+                Ok(OccupancyVerdict::Refused(OwnerRefusal {
+                    command: "actuation occupancy verify".into(),
+                    code: code.into(),
+                    fact: format!("{generation_ref} is not current here"),
+                    consequence: String::new(),
+                    action: String::new(),
+                }))
+            };
+            match self.occupant {
+                Some(current) if current == generation_ref => Ok(OccupancyVerdict::Current(
+                    json!({"generation_ref": current, "workcell_ref": "workcell:a"}),
+                )),
+                Some(_) => refused("occupancy.superseded"),
+                None => refused("occupancy.vacant"),
+            }
+        }
+        fn current_work(&self, _: &str, _: &Path) -> std::result::Result<Value, OwnerUnavailable> {
+            Err(unavailable())
+        }
+        fn custody_assign(
+            &self,
+            _: &CustodyAssign,
+            _: &Path,
+        ) -> std::result::Result<std::result::Result<Value, OwnerRefusal>, OwnerUnavailable>
+        {
+            Err(unavailable())
+        }
+    }
+
+    fn unavailable() -> OwnerUnavailable {
+        OwnerUnavailable {
+            command: "stub".into(),
+            reason: "not in this test".into(),
+        }
+    }
+
+    fn remote(workcell: &str) -> GatewayRemote {
+        GatewayRemote {
+            workcell_ref: workcell.into(),
+            websocket_bind: "127.0.0.1:1".into(),
+            websocket_path: "/".into(),
+            token_location: "env:NONE".into(),
+        }
+    }
+
+    /// A survey in which `declared` (a remote declared for one Workcell)
+    /// answered from `gateway`, saying it serves `serves` and that
+    /// `generation` is current for the Position there.
+    fn answered(declared: &str, gateway: &str, serves: &str, generation: &str) -> RemoteSurvey {
+        RemoteSurvey {
+            answers: vec![(
+                remote(declared),
+                RemoteOutcome::Answered(aikit_adapters::GatewayOccupancyReading {
+                    schema: "aikit.gateway-occupancy/v1".into(),
+                    position_ref: Some(POSITION.into()),
+                    gateway_ref: gateway.into(),
+                    workcell_ref: Some(serves.into()),
+                    workcell_basis: "test".into(),
+                    occupancy: Some(json!({"position_ref": POSITION, "state": "occupied",
+                        "current": {"generation_ref": generation, "workcell_ref": serves}})),
+                    unavailable: None,
+                    read_at_unix_ms: 1,
+                }),
+            )],
+        }
+    }
+
+    /// Review 1: this Workcell's Actuation refuses the generation and the
+    /// Position has a current occupant here, so no remote is asked, and a
+    /// remote's claim to the contrary never overrides it.
+    #[test]
+    fn a_remote_never_vouches_over_this_workcells_own_refusal() {
+        let asked = Cell::new(false);
+        let verdict = verify_occupant(
+            &Here {
+                occupant: Some("gen-here"),
+            },
+            POSITION,
+            "gen-claimed",
+            Some("agency-gateway/b"),
+            || {
+                asked.set(true);
+                answered(
+                    "workcell:b",
+                    "agency-gateway/b",
+                    "workcell:b",
+                    "gen-claimed",
+                )
+            },
+        );
+        let why = verdict.unwrap_err();
+        assert!(!asked.get(), "no remote is asked over a local refusal");
+        assert!(why.contains("occupancy.superseded"), "{why}");
+        assert!(
+            why.contains("has a current occupant on this Workcell"),
+            "{why}"
+        );
+        assert!(verify_occupant(
+            &Here {
+                occupant: Some("gen-here"),
+            },
+            POSITION,
+            "gen-here",
+            None,
+            || panic!("a current occupant here is verified here"),
+        )
+        .is_ok());
+    }
+
+    /// Review 1: with no occupant here, only the record's origin gateway may
+    /// vouch, and only for its own Workcell and exactly that generation. A
+    /// body that speaks here is verified here alone.
+    #[test]
+    fn only_the_origins_own_workcell_vouches_for_a_record() {
+        let vacant = Here { occupant: None };
+        let verify = |origin: Option<&str>, survey: RemoteSurvey| {
+            verify_occupant(&vacant, POSITION, "gen-x", origin, || survey)
+        };
+        for (what, origin, survey) in [
+            (
+                "a remote whose Workcell it is not",
+                Some("agency-gateway/b"),
+                answered("workcell:b", "agency-gateway/b", "workcell:c", "gen-x"),
+            ),
+            (
+                "a remote that is not the origin",
+                Some("agency-gateway/b"),
+                answered("workcell:c", "agency-gateway/c", "workcell:c", "gen-x"),
+            ),
+            (
+                "another generation",
+                Some("agency-gateway/b"),
+                answered("workcell:b", "agency-gateway/b", "workcell:b", "gen-y"),
+            ),
+        ] {
+            let why = verify(origin, survey).unwrap_err();
+            assert!(why.contains("occupancy.vacant"), "{what}: {why}");
+            assert!(why.contains("did not read gen-x current"), "{what}: {why}");
+        }
+        let asked = Cell::new(false);
+        let why = verify_occupant(&vacant, POSITION, "gen-x", None, || {
+            asked.set(true);
+            answered("workcell:b", "agency-gateway/b", "workcell:b", "gen-x")
+        })
+        .unwrap_err();
+        assert!(
+            !asked.get(),
+            "a body speaking here is verified here alone: {why}"
+        );
+        let basis = verify(
+            Some("agency-gateway/b"),
+            answered("workcell:b", "agency-gateway/b", "workcell:b", "gen-x"),
+        )
+        .unwrap();
+        assert!(
+            basis.contains("the Workcell of gateway agency-gateway/b"),
+            "{basis}"
+        );
+    }
+
+    /// The gateway journal in this process, its clock the tick's own.
+    struct Journal(std::sync::Mutex<aikit_adapters::AgencyGateway>);
+
+    impl GatewayAccess for Journal {
+        fn call(&self, command: GatewayCommand) -> Result<GatewayResponse> {
+            aikit_adapters::execute_gateway_command(&mut self.0.lock().unwrap(), command)
+        }
+    }
+
+    fn ask(journal: &Journal, reference: &str, from: Option<&str>) -> String {
+        let communique_ref = format!("{COMMUNIQUE_REF_PREFIX}{reference}");
+        let body = json!({"schema": "oi.world-agent-ask/v1", "ask_ref": format!("ask:{reference}"),
+            "star_ref": "star:rosarium", "asked_by_world_ref": format!("world:{reference}"),
+            "world_ref": "project:O-I", "words": "Which plate?", "sources": [],
+            "answer_in": "oi.world-agent-answer/v1"})
+        .to_string();
+        let draft = CommuniqueDraft {
+            communique_ref: communique_ref.clone(),
+            from_position_ref: from.map(str::to_owned),
+            from_generation_ref: None,
+            attribution: if from.is_some() {
+                SenderAttribution::Claimed
+            } else {
+                SenderAttribution::Unknown
+            },
+            attribution_basis: "test".into(),
+            to_position_ref: POSITION.into(),
+            to_workcell_ref: None,
+            to_instance: None,
+            instance_hold: None,
+            body,
+            handling: CommuniqueHandling::default(),
+            sent_at_unix_ms: 1,
+            state: CommuniqueState::Pending,
+            state_basis: "test".into(),
+            reply_to: None,
+            forward_to_workcell_ref: None,
+            routing: None,
+        };
+        journal
+            .call(GatewayCommand::SendCommunique {
+                draft: Box::new(draft),
+            })
+            .unwrap();
+        communique_ref
+    }
+
+    /// Review 4: a relay pass that errs (here a malformed
+    /// `gateway-remotes.json`) is reported on its own, and the tick's answer
+    /// pass still runs: a Claimed asker's ask is closed, and an ask that
+    /// waited its day with no occupant is declined.
+    #[test]
+    fn a_malformed_remotes_file_still_answers_and_declines_asks() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = AikitHome::at(dir.path());
+        let path = remotes_path(&home);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, "{ not the remotes").unwrap();
+        let journal = Journal(std::sync::Mutex::new(
+            aikit_adapters::AgencyGateway::new(ResourceRef::parse("agency-gateway/a").unwrap())
+                .with_clock(|| 10),
+        ));
+        let claimed = ask(
+            &journal,
+            "claimed",
+            Some("central:position:world:mara:keeper"),
+        );
+        let waited = ask(&journal, "waited", None);
+        let report = relay_tick(
+            &home,
+            &Here { occupant: None },
+            &journal,
+            dir.path(),
+            10 + aikit_adapters::ASK_EXPIRES_AFTER_MS,
+            &|home, owners, gateway, cwd| forward_pass(home, owners, gateway, cwd),
+            &|_, _, _| Ok(()),
+        );
+        assert!(
+            report["relay"]["error"]
+                .as_str()
+                .is_some_and(|error| error.contains("gateway-remotes")),
+            "{report:#}"
+        );
+        assert_eq!(
+            report["world_agent"]["closed"],
+            json!([claimed, waited]),
+            "{report:#}"
+        );
     }
 }

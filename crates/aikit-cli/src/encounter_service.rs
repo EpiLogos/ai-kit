@@ -4203,6 +4203,7 @@ mod tests {
                     opened_as: SessionOpenMode::Create,
                     model_observation: None,
                     mode_observation: None,
+                    declared_tools: None,
                     provenance: Vec::new(),
                 },
                 stop: TurnStop::Completed {

@@ -419,6 +419,7 @@ impl AgentConnectionAdapter for PiRpcConnectionAdapter {
                         .bind_agent_session(canonical);
                     binding.provenance = self.provenance.clone();
                     binding.model_observation = self.model_observation.clone();
+                    binding.declared_tools = declared_tools_of(&message["data"]);
                     self.binding = Some(binding.clone());
                     Ok(vec![
                         self.signal(ConnectionSignalKind::SessionOpened { binding })

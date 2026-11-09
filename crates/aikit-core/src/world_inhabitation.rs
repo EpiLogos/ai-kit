@@ -32,6 +32,10 @@ pub enum WorldKnowledgeStanding {
     PersonalGeneral,
     WorldLocalAgentMaintained,
     Inherited,
+    /// What a World shows at a star to whoever is gathered there, or to the
+    /// whole field: all its Agent may answer from when it is asked at that
+    /// star (`disclose_star_knowledge`). `source_world` names the World.
+    ShownAtStar,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -86,6 +90,17 @@ impl WorldKnowledgeBinding {
                     ));
                 }
             }
+            WorldKnowledgeStanding::ShownAtStar => {
+                if self.source_world.is_none() {
+                    return Err(AikitError::new(
+                        "world_knowledge.shown_world_missing",
+                        format!(
+                            "knowledge {} shown at a star names the World that showed it",
+                            self.knowledge
+                        ),
+                    ));
+                }
+            }
             WorldKnowledgeStanding::PersonalGeneral
             | WorldKnowledgeStanding::WorldLocalAgentMaintained => {}
         }
@@ -101,6 +116,86 @@ pub struct WorldKnowledgeProfile {
     pub world: ResourceRef,
     #[serde(default)]
     pub bindings: Vec<WorldKnowledgeBinding>,
+}
+
+impl WorldKnowledgeProfile {
+    /// Whether `knowledge` is within this horizon.
+    pub fn discloses(&self, knowledge: &ResourceRef) -> bool {
+        self.bindings
+            .iter()
+            .any(|binding| &binding.knowledge == knowledge)
+    }
+}
+
+/// One part a World shows, as the field gives it with an ask (O-I #858 SF10):
+/// at one star (`star_ref`), or to the whole field or the public (`None`), and
+/// so at every star.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StarShownPart {
+    pub part_ref: ResourceRef,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub star_ref: Option<ResourceRef>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+}
+
+/// The knowledge horizon of a World's Agent asked at one star (ai-kit #601):
+/// only what its World shows there and to the whole field, each part once,
+/// named and never retrieved. A part shown at another star is refused rather
+/// than dropped, so a wider horizon is never handed in unseen; the field checks
+/// what an answer cites, never its words, so the bound holds here, in the Agent.
+pub fn disclose_star_knowledge(
+    agent: ResourceRef,
+    world: ResourceRef,
+    star: &ResourceRef,
+    shown: &[StarShownPart],
+) -> Result<WorldKnowledgeProfile> {
+    let mut bindings: Vec<WorldKnowledgeBinding> = Vec::new();
+    for part in shown {
+        if let Some(elsewhere) = part.star_ref.as_ref().filter(|at| *at != star) {
+            return Err(AikitError::new(
+                "world_knowledge.shown_elsewhere",
+                format!(
+                    "{} is shown at {elsewhere}, not at {star}: an Agent asked at {star} answers only from what its World shows there",
+                    part.part_ref
+                ),
+            ));
+        }
+        if bindings
+            .iter()
+            .any(|binding| binding.knowledge == part.part_ref)
+        {
+            continue;
+        }
+        let shown_where = match &part.star_ref {
+            Some(at) => format!("shown by {world} at {at}"),
+            None => format!("shown by {world} to the whole field"),
+        };
+        let binding = WorldKnowledgeBinding {
+            knowledge: part.part_ref.clone(),
+            agent: agent.clone(),
+            world: world.clone(),
+            standing: WorldKnowledgeStanding::ShownAtStar,
+            source: SourceRef::parse(part.part_ref.as_str())?,
+            source_revision: None,
+            source_world: Some(world.clone()),
+            disclosure: WorldKnowledgeDisclosure {
+                known_to_exist: true,
+                eligible: true,
+                retrieved: false,
+            },
+            provenance: vec![shown_where],
+        };
+        binding.validate()?;
+        bindings.push(binding);
+    }
+    bindings.sort_by(|left, right| left.knowledge.cmp(&right.knowledge));
+    Ok(WorldKnowledgeProfile {
+        version: WORLD_KNOWLEDGE_VERSION.into(),
+        agent,
+        world,
+        bindings,
+    })
 }
 
 /// Select World-relative knowledge without retrieving any payload.
@@ -583,5 +678,81 @@ mod tests {
             [resource("context/decision")].into_iter().collect()
         );
         assert!(!decision.peer_prompt_history_disclosed);
+    }
+
+    /// A World's Agent asked at a star (ai-kit #601, O-I #858 SF10) knows
+    /// only what its World shows there, and what it shows the whole field:
+    /// a part shown at another star is refused, never quietly dropped, and
+    /// nothing is retrieved by being named.
+    #[test]
+    fn an_agent_asked_at_a_star_knows_only_what_its_world_shows_there() {
+        let agent = resource("central:position:world:mara:librarian");
+        let world = resource("world:mara");
+        let star = resource("star:rosarium");
+        let at_star = StarShownPart {
+            part_ref: resource("part:plate-2"),
+            star_ref: Some(star.clone()),
+            label: Some("The second plate".into()),
+        };
+        let to_the_field = StarShownPart {
+            part_ref: resource("part:essay"),
+            star_ref: None,
+            label: None,
+        };
+        let profile = disclose_star_knowledge(
+            agent.clone(),
+            world.clone(),
+            &star,
+            &[at_star.clone(), to_the_field.clone(), at_star.clone()],
+        )
+        .unwrap();
+        assert_eq!(profile.agent, agent);
+        assert_eq!(profile.world, world);
+        let known: Vec<_> = profile
+            .bindings
+            .iter()
+            .map(|binding| binding.knowledge.as_str())
+            .collect();
+        assert_eq!(known, ["part:essay", "part:plate-2"], "each once");
+        for binding in &profile.bindings {
+            assert_eq!(binding.standing, WorldKnowledgeStanding::ShownAtStar);
+            assert_eq!(binding.source_world.as_ref(), Some(&world));
+            assert!(binding.disclosure.eligible && binding.disclosure.known_to_exist);
+            assert!(
+                !binding.disclosure.retrieved,
+                "naming a part retrieves nothing"
+            );
+            binding.validate().unwrap();
+        }
+        assert!(profile.discloses(&resource("part:plate-2")));
+        assert!(!profile.discloses(&resource("part:diary")));
+        assert!(profile.bindings[1].provenance[0].contains("star:rosarium"));
+        assert!(profile.bindings[0].provenance[0].contains("whole field"));
+
+        let elsewhere = StarShownPart {
+            star_ref: Some(resource("star:other")),
+            ..at_star
+        };
+        let error =
+            disclose_star_knowledge(agent.clone(), world.clone(), &star, &[elsewhere]).unwrap_err();
+        assert_eq!(error.code(), "world_knowledge.shown_elsewhere");
+        assert!(
+            error.message().contains("star:other"),
+            "{}",
+            error.message()
+        );
+
+        // a binding shown at a star names the World that showed it
+        let mut unnamed = profile.bindings[0].clone();
+        unnamed.source_world = None;
+        assert_eq!(
+            unnamed.validate().unwrap_err().code(),
+            "world_knowledge.shown_world_missing"
+        );
+        let none = disclose_star_knowledge(agent, world, &star, &[]).unwrap();
+        assert!(
+            none.bindings.is_empty(),
+            "a World that shows nothing gives nothing to answer from"
+        );
     }
 }

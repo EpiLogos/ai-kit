@@ -462,8 +462,30 @@ pub struct NativeSessionBinding {
     /// Provider-advertised session permission modes, when the agent has any.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mode_observation: Option<NativeModeObservation>,
+    /// The tools the opened session itself reports it may call (`tools` in
+    /// its open answer); `None` when it reports none at all, which is not the
+    /// same as an empty list (DLW build ruling 2026-11-09).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub declared_tools: Option<Vec<String>>,
     #[serde(default)]
     pub provenance: Vec<String>,
+}
+
+/// The tool names a session's open answer reports (`tools`: names, or
+/// objects with a `name`); `None` when it reports no list.
+pub fn declared_tools_of(answer: &Value) -> Option<Vec<String>> {
+    let tools = answer.get("tools")?.as_array()?;
+    Some(
+        tools
+            .iter()
+            .map(|tool| {
+                tool.as_str()
+                    .or_else(|| tool.get("name").and_then(Value::as_str))
+                    .unwrap_or("<unnamed tool>")
+                    .to_owned()
+            })
+            .collect(),
+    )
 }
 
 impl NativeSessionBinding {
@@ -475,6 +497,7 @@ impl NativeSessionBinding {
             opened_as,
             model_observation: None,
             mode_observation: None,
+            declared_tools: None,
             provenance: Vec::new(),
         }
     }

@@ -36,8 +36,9 @@ use serde_json::{json, Map, Value};
 
 use crate::gateway_communique::{
     Communique, CommuniqueCount, CommuniqueDraft, CommuniqueForwardOutcome, CommuniqueInstanceHold,
-    CommuniqueJournal, CommuniqueRouting, CommuniqueState,
+    CommuniqueJournal, CommuniqueRouting, CommuniqueState, SenderAttribution,
 };
+use crate::gateway_posture::CarrierScope;
 
 pub const AGENCY_GATEWAY_VERSION: &str = "aikit.agency-gateway/v1";
 pub const ACTUATION_STREAM_SCHEMA: &str = "actuation.stream/v1";
@@ -636,6 +637,11 @@ pub struct GatewaySnapshot {
     /// files restore unchanged.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub communiques: Vec<Communique>,
+    /// The records a World's Agent answers by, kept for the person (what a
+    /// World shows at stars, the harness asks are answered with; ai-kit #601),
+    /// by key. Absent from older snapshots.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub world_agent: BTreeMap<String, Value>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -666,6 +672,11 @@ pub struct AgencyGateway {
     delivery_receipts: Vec<DeliveryReceipt>,
     next_operation_sequence: u64,
     communiques: CommuniqueJournal,
+    world_agent: BTreeMap<String, Value>,
+    /// The clock this gateway stamps every Communique it takes by (DLW build
+    /// ruling 2026-11-09, be2d): the system's, unless a composition keeps a
+    /// logical one of its own.
+    clock: Box<dyn Fn() -> u64 + Send + Sync>,
 }
 
 impl AgencyGateway {
@@ -681,12 +692,48 @@ impl AgencyGateway {
             delivery_receipts: Vec::new(),
             next_operation_sequence: 1,
             communiques: CommuniqueJournal::default(),
+            world_agent: BTreeMap::new(),
+            clock: Box::new(communique_now_unix_ms),
         }
+    }
+
+    /// Stamp what this gateway takes by `clock` instead of the system's
+    /// clock: a composition that keeps one logical clock, as tests do.
+    pub fn with_clock(mut self, clock: impl Fn() -> u64 + Send + Sync + 'static) -> Self {
+        self.clock = Box::new(clock);
+        self
     }
 
     /// The Communique journal this gateway keeps.
     pub fn communiques(&self) -> &CommuniqueJournal {
         &self.communiques
+    }
+
+    /// Record, or clear, one World's Agent record (ai-kit #601). The key is a
+    /// plain ref; a record is at most [`MAX_WORLD_AGENT_RECORD_BYTES`].
+    pub fn set_world_agent_record(&mut self, key: &str, record: Option<Value>) -> Result<()> {
+        if key.trim().is_empty() || key.len() > 512 || key.chars().any(char::is_control) {
+            return Err(AikitError::new(
+                "agency_gateway.world_agent_record_invalid",
+                "a World's Agent record is kept under a plain key of at most 512 bytes",
+            ));
+        }
+        match record {
+            Some(record) => {
+                let bytes = serde_json::to_vec(&record).map_or(usize::MAX, |bytes| bytes.len());
+                if bytes > MAX_WORLD_AGENT_RECORD_BYTES {
+                    return Err(AikitError::new(
+                        "agency_gateway.world_agent_record_too_large",
+                        format!("a World's Agent record is at most {MAX_WORLD_AGENT_RECORD_BYTES} bytes ({bytes} given)"),
+                    ));
+                }
+                self.world_agent.insert(key.to_owned(), record);
+            }
+            None => {
+                self.world_agent.remove(key);
+            }
+        }
+        Ok(())
     }
 
     pub fn gateway_ref(&self) -> &ResourceRef {
@@ -1401,6 +1448,7 @@ impl AgencyGateway {
             delivery_receipts: self.delivery_receipts.clone(),
             next_operation_sequence: self.next_operation_sequence,
             communiques: self.communiques.records().to_vec(),
+            world_agent: self.world_agent.clone(),
         }
     }
 
@@ -1454,6 +1502,7 @@ impl AgencyGateway {
         gateway.delivery_receipts = snapshot.delivery_receipts;
         gateway.next_operation_sequence = snapshot.next_operation_sequence;
         gateway.communiques = CommuniqueJournal::restore(snapshot.communiques)?;
+        gateway.world_agent = snapshot.world_agent;
         Ok(gateway)
     }
 }
@@ -1651,6 +1700,28 @@ pub enum GatewayCommand {
         communique: Box<Communique>,
         relayed_by: String,
     },
+    /// Record, or clear (`record` absent), one World's Agent record the
+    /// person keeps (ai-kit #601): what a World shows at stars, or the harness
+    /// asks are answered with. Accepted only from the person's own connection
+    /// (DLW build ruling 2026-11-09).
+    SetWorldAgentRecord {
+        key: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        record: Option<Value>,
+    },
+    ReadWorldAgentRecord {
+        key: String,
+    },
+    /// Every ask of a World's Agent still waiting here, in journal order.
+    WaitingAsks,
+    /// End an ask with no answer sent (a Claimed asker, or 24 hours waited):
+    /// its asker reads it declined. Accepted from the person's own connection,
+    /// or the asked Position's verified occupant.
+    CloseAsk {
+        communique_ref: String,
+        basis: String,
+        at_unix_ms: u64,
+    },
     /// Undelivered Communiques addressed to one Position.
     CommuniqueInbox {
         position_ref: String,
@@ -1748,6 +1819,8 @@ impl GatewayCommand {
                 | Self::ReadCommunique { .. }
                 | Self::CommuniqueCounts
                 | Self::CommuniqueForwardQueue
+                | Self::ReadWorldAgentRecord { .. }
+                | Self::WaitingAsks
                 | Self::OccupancyRead { .. }
                 | Self::OccupancyList
         ) || matches!(
@@ -1869,6 +1942,11 @@ pub enum GatewayResponse {
     CommuniqueRecord {
         communique: Communique,
     },
+    WorldAgentRecord {
+        key: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        record: Option<Value>,
+    },
     CommuniqueCounts {
         counts: Vec<CommuniqueCount>,
     },
@@ -1882,7 +1960,288 @@ pub enum GatewayResponse {
     Shutdown,
 }
 
+/// The longest World's Agent record the kernel keeps.
+pub const MAX_WORLD_AGENT_RECORD_BYTES: usize = 256 * 1024;
+
+/// What a connecting body presents of itself, read from its own environment:
+/// the Position it was launched into and its occupant generation. Presented,
+/// not proven: the carrier that takes the request verifies it.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GatewayCallerIdentity {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub position_ref: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub generation_ref: Option<String>,
+}
+
+/// The environment a body at a Position is launched with.
+pub const OCCUPANT_POSITION_ENV: &str = "OI_POSITION_REF";
+pub const OCCUPANT_GENERATION_ENV: &str = "OI_OCCUPANT_GENERATION";
+
+impl GatewayCallerIdentity {
+    /// This process's own: `OI_POSITION_REF` and `OI_OCCUPANT_GENERATION`.
+    pub fn from_env() -> Self {
+        let read = |name: &str| {
+            std::env::var(name)
+                .ok()
+                .map(|value| value.trim().to_owned())
+                .filter(|value| !value.is_empty())
+        };
+        Self {
+            position_ref: read(OCCUPANT_POSITION_ENV),
+            generation_ref: read(OCCUPANT_GENERATION_ENV),
+        }
+    }
+
+    /// Presents neither a Position nor a generation.
+    pub fn is_empty(&self) -> bool {
+        self.position_ref.is_none() && self.generation_ref.is_none()
+    }
+}
+
+/// An occupant generation the carrier's occupancy owner verified current for
+/// its Position, for one request, and how.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VerifiedOccupant {
+    pub position_ref: String,
+    pub generation_ref: String,
+    pub basis: String,
+}
+
+/// One request over a carrier, as that carrier established it.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct GatewayConnection {
+    /// `Owner`: the owner-only Unix socket, or this process; `Peer`: a
+    /// network carrier.
+    pub scope: CarrierScope,
+    pub presented: GatewayCallerIdentity,
+    /// What the carrier's occupancy owner verified for this request.
+    pub verified: Vec<VerifiedOccupant>,
+}
+
+/// Who a request comes from (DLW build ruling 2026-11-09). The journal sets
+/// a Communique's attribution from this, never from the draft.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GatewayCaller {
+    /// The gateway's own composition in this process (its conversation
+    /// engine, its pumps): what it drafts is its own word.
+    Runtime,
+    Connection(GatewayConnection),
+}
+
+impl GatewayConnection {
+    /// The person's own act is taken only from a connection on the owner's
+    /// carrier that presents no Position or occupant generation (DLW build
+    /// ruling 2026-11-09, be2d). An honest body, which presents its own, is
+    /// refused. A process of the person's own user that hides its Position is
+    /// not stopped: that is the machine's trust boundary, the same-user
+    /// boundary, named here and not crossed. Nothing here authenticates the
+    /// person.
+    pub fn is_the_person(&self) -> bool {
+        self.not_the_person_because().is_none()
+    }
+
+    /// Why this connection's request is not taken as the person's own act:
+    /// a peer's carrier, or a body presenting a Position or generation.
+    fn not_the_person_because(&self) -> Option<String> {
+        if self.scope != CarrierScope::Owner {
+            return Some("it came over a peer's carrier, which never speaks for the person".into());
+        }
+        let presented = [
+            self.presented
+                .position_ref
+                .as_deref()
+                .map(|position| format!("Position {position}")),
+            self.presented
+                .generation_ref
+                .as_deref()
+                .map(|generation| format!("occupant generation {generation}")),
+        ]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>();
+        (!presented.is_empty()).then(|| {
+            format!(
+                "the body that sent it presents {}, so it is that body's, not the person's",
+                presented.join(" and ")
+            )
+        })
+    }
+
+    fn verified_as(&self, position: &str, generation: &str) -> Option<&VerifiedOccupant> {
+        self.verified
+            .iter()
+            .find(|v| v.position_ref == position && v.generation_ref == generation)
+    }
+
+    /// The body's own verified occupancy, when the carrier verified it.
+    pub fn verified_occupant(&self) -> Option<&VerifiedOccupant> {
+        match (&self.presented.position_ref, &self.presented.generation_ref) {
+            (Some(position), Some(generation)) => self.verified_as(position, generation),
+            _ => None,
+        }
+    }
+
+    /// The Position a draft speaks from: the one it names, else the one the
+    /// body presents.
+    pub fn named_position(&self, draft: &CommuniqueDraft) -> Option<String> {
+        draft
+            .from_position_ref
+            .clone()
+            .or_else(|| self.presented.position_ref.clone())
+    }
+
+    /// Set a sender's attribution from this connection. Verified only when
+    /// the carrier verified the body's own presented generation for the
+    /// Position the draft speaks from; a Position only named is Claimed; the
+    /// owner's decision only from the person's own connection; else Unknown.
+    pub fn attribute(&self, draft: &mut CommuniqueDraft) {
+        let named = self.named_position(draft);
+        if let (Some(position), Some(generation)) = (&named, &self.presented.generation_ref) {
+            if let Some(verified) = self.verified_as(position, generation) {
+                draft.from_position_ref = Some(verified.position_ref.clone());
+                draft.from_generation_ref = Some(verified.generation_ref.clone());
+                draft.attribution = SenderAttribution::Verified;
+                draft.attribution_basis = verified.basis.clone();
+                return;
+            }
+        }
+        let (attribution, basis) = match &named {
+            Some(_) => (
+                SenderAttribution::Claimed,
+                "the Position was named, and this gateway did not verify its occupant",
+            ),
+            None if draft.attribution == SenderAttribution::Owner && self.is_the_person() => {
+                return;
+            }
+            None => (
+                SenderAttribution::Unknown,
+                "sent from no Position this gateway verified",
+            ),
+        };
+        if draft.attribution != attribution {
+            draft.attribution_basis = basis.into();
+        }
+        draft.attribution = attribution;
+        // A generation this gateway did not verify is no part of the record
+        // (DLW build ruling 2026-11-09, be2d): a Claimed sender keeps none.
+        draft.from_generation_ref = None;
+        draft.from_position_ref = named;
+    }
+
+    /// A relayed record's attribution is the relaying peer's claim: kept
+    /// verified only when this gateway's occupancy owner verified it itself.
+    pub fn attribute_relayed(&self, communique: &mut Communique, relayed_by: &str) {
+        let verified = match (
+            &communique.from_position_ref,
+            &communique.from_generation_ref,
+        ) {
+            (Some(position), Some(generation)) => self.verified_as(position, generation).is_some(),
+            _ => false,
+        };
+        match communique.attribution {
+            SenderAttribution::Verified if !verified => {
+                communique.attribution = SenderAttribution::Claimed;
+                communique.attribution_basis = format!(
+                    "relayed by gateway {relayed_by} as verified; this gateway did not verify its occupant ({})",
+                    communique.attribution_basis
+                );
+            }
+            SenderAttribution::Owner => {
+                communique.attribution = SenderAttribution::Unknown;
+                communique.attribution_basis = format!(
+                    "relayed by gateway {relayed_by} as the owner's; this gateway did not verify it"
+                );
+            }
+            _ => {}
+        }
+    }
+}
+
+fn not_the_person(what: &str, connection: &GatewayConnection) -> AikitError {
+    let because = connection
+        .not_the_person_because()
+        .unwrap_or_else(|| "it is not the person's own act".into());
+    AikitError::new(
+        "agency_gateway.not_the_person",
+        format!(
+            "{what} is the person's own act, taken only from a connection on the owner's carrier that presents no Position or occupant generation; {because}"
+        ),
+    )
+}
+
+/// Execute one command as the gateway's own composition.
 pub fn execute_gateway_command(
+    gateway: &mut AgencyGateway,
+    command: GatewayCommand,
+) -> Result<GatewayResponse> {
+    execute_gateway_command_from(gateway, command, &GatewayCaller::Runtime)
+}
+
+/// Execute one command for `caller` (DLW build ruling 2026-11-09): a
+/// Communique's attribution is set from the caller's connection, and the
+/// person's own acts are accepted only from the person's own connection.
+pub fn execute_gateway_command_from(
+    gateway: &mut AgencyGateway,
+    command: GatewayCommand,
+    caller: &GatewayCaller,
+) -> Result<GatewayResponse> {
+    let GatewayCaller::Connection(connection) = caller else {
+        return execute_admitted(gateway, command);
+    };
+    let command = match command {
+        GatewayCommand::SendCommunique { mut draft } => {
+            connection.attribute(&mut draft);
+            GatewayCommand::SendCommunique { draft }
+        }
+        GatewayCommand::IngestCommunique {
+            mut communique,
+            relayed_by,
+        } => {
+            connection.attribute_relayed(&mut communique, &relayed_by);
+            GatewayCommand::IngestCommunique {
+                communique,
+                relayed_by,
+            }
+        }
+        GatewayCommand::SetWorldAgentRecord { .. } if !connection.is_the_person() => {
+            return Err(not_the_person(
+                "Recording what a World's Agent answers by",
+                connection,
+            ));
+        }
+        // Ended by the person, or by the asked Position's verified occupant,
+        // whose generation the ask then names as the one that ended it.
+        GatewayCommand::CloseAsk {
+            communique_ref,
+            basis,
+            at_unix_ms,
+        } => {
+            let occupant = connection.verified_occupant().filter(|occupant| {
+                gateway
+                    .communiques
+                    .get(&communique_ref)
+                    .is_ok_and(|ask| ask.to_position_ref == occupant.position_ref)
+            });
+            if occupant.is_none() && !connection.is_the_person() {
+                return Err(not_the_person("Ending an ask unanswered", connection));
+            }
+            let closed_by = occupant.map(|occupant| occupant.generation_ref.as_str());
+            return Ok(GatewayResponse::CommuniqueRecord {
+                communique: gateway.communiques.close_ask(
+                    &communique_ref,
+                    &basis,
+                    at_unix_ms,
+                    closed_by,
+                )?,
+            });
+        }
+        other => other,
+    };
+    execute_admitted(gateway, command)
+}
+
+fn execute_admitted(
     gateway: &mut AgencyGateway,
     command: GatewayCommand,
 ) -> Result<GatewayResponse> {
@@ -1992,7 +2351,8 @@ pub fn execute_gateway_command(
         }
         GatewayCommand::SendCommunique { draft } => {
             let gateway_ref = gateway.gateway_ref.to_string();
-            let (communique, replayed) = gateway.communiques.send(&gateway_ref, *draft)?;
+            let at = (gateway.clock)();
+            let (communique, replayed) = gateway.communiques.send_at(&gateway_ref, *draft, at)?;
             Ok(GatewayResponse::CommuniqueAccepted {
                 communique,
                 replayed,
@@ -2003,7 +2363,7 @@ pub fn execute_gateway_command(
             communique,
             relayed_by,
         } => {
-            let at = communique_now_unix_ms();
+            let at = (gateway.clock)();
             let (communique, replayed) = gateway.communiques.ingest(*communique, &relayed_by, at)?;
             Ok(GatewayResponse::CommuniqueAccepted {
                 communique,
@@ -2013,6 +2373,26 @@ pub fn execute_gateway_command(
         }
         GatewayCommand::CommuniqueInbox { position_ref } => Ok(GatewayResponse::CommuniqueList {
             communiques: gateway.communiques.inbox(&position_ref),
+        }),
+        GatewayCommand::SetWorldAgentRecord { key, record } => {
+            gateway.set_world_agent_record(&key, record.clone())?;
+            Ok(GatewayResponse::WorldAgentRecord { key, record })
+        }
+        GatewayCommand::ReadWorldAgentRecord { key } => Ok(GatewayResponse::WorldAgentRecord {
+            record: gateway.world_agent.get(&key).cloned(),
+            key,
+        }),
+        GatewayCommand::WaitingAsks => Ok(GatewayResponse::CommuniqueList {
+            communiques: gateway.communiques.asks_waiting(),
+        }),
+        GatewayCommand::CloseAsk {
+            communique_ref,
+            basis,
+            at_unix_ms,
+        } => Ok(GatewayResponse::CommuniqueRecord {
+            communique: gateway
+                .communiques
+                .close_ask(&communique_ref, &basis, at_unix_ms, None)?,
         }),
         GatewayCommand::AcknowledgeCommuniques {
             position_ref,
@@ -2118,6 +2498,11 @@ pub struct GatewayRequestEnvelope {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub request_id: Option<String>,
     pub command: GatewayCommand,
+    /// What the requesting body presents of itself (DLW build ruling
+    /// 2026-11-09). The carrier verifies it; a request without it presents
+    /// nothing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub caller: Option<GatewayCallerIdentity>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -2588,6 +2973,7 @@ mod tests {
         let request = GatewayRequestEnvelope {
             request_id: Some("req-1".into()),
             command: GatewayCommand::Protocol,
+            caller: None,
         };
         let encoded = serde_json::to_string(&request).unwrap();
         let decoded: GatewayRequestEnvelope = serde_json::from_str(&encoded).unwrap();
@@ -2810,6 +3196,7 @@ mod tests {
         let encoded = serde_json::to_value(GatewayRequestEnvelope {
             request_id: None,
             command: GatewayCommand::Ecology,
+            caller: None,
         })
         .unwrap();
         assert_eq!(encoded["command"]["type"], "ecology");

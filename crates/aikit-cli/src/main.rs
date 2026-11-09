@@ -1562,6 +1562,7 @@ fn cmd_gateway_dispatch(command: GatewayCmd, cwd: &std::path::Path) -> Result<Re
             })?)
         }
         GatewaySub::Serve(a) => {
+            aikit_cli::gateway_contact::forget_body_identity();
             let config = aikit_cli::gateway_ops::serve_config(&home, &a)?;
             // The running process publishes its own posture — which build it
             // executes, which carriers it serves — for `gateway doctor` and
@@ -1619,10 +1620,15 @@ fn cmd_gateway_dispatch(command: GatewayCmd, cwd: &std::path::Path) -> Result<Re
                 config.websocket_bind.clone().unwrap_or_default(),
                 config.websocket_bearer_token.clone().unwrap_or_default(),
             );
+            // The service's period: AIKIT_GATEWAY_TICK_MS when set (at least
+            // 100 ms), else the Routine dispatcher's own interval.
+            let tick_ms = std::env::var("AIKIT_GATEWAY_TICK_MS")
+                .ok()
+                .and_then(|raw| raw.trim().parse::<u64>().ok())
+                .filter(|ms| *ms >= 100)
+                .unwrap_or(aikit_cli::routine_dispatch::TICK_INTERVAL_MS as u64);
             let ticks = Some(GatewayTickLoop {
-                interval: std::time::Duration::from_millis(
-                    aikit_cli::routine_dispatch::TICK_INTERVAL_MS as u64,
-                ),
+                interval: std::time::Duration::from_millis(tick_ms),
                 hook: Box::new(aikit_cli::gateway_contact::GatewayServiceTick {
                     dispatcher,
                     relay: aikit_cli::gateway_contact::CommuniqueRelayTick {
@@ -1797,14 +1803,17 @@ fn cmd_gateway_dispatch(command: GatewayCmd, cwd: &std::path::Path) -> Result<Re
                 evidence_refs: a.evidence_refs,
             };
             // What is asked of the person rides only a send to the person.
-            if !aikit_cli::gateway_contact::owner_address::is_owner_address(&a.to)
+            if !a
+                .to
+                .as_deref()
+                .is_some_and(aikit_cli::gateway_contact::owner_address::is_owner_address)
                 && owner.is_asked()
             {
                 return Err(aikit_cli::gateway_contact::three_part(
                     "gateway.owner_ask_not_owner",
                     format!(
                         "--propose, --for, --subject, --option, --now-ref and --evidence ask the person, and {} is not the owner.",
-                        a.to
+                        a.to.as_deref().unwrap_or("the sender of what you answer")
                     ),
                     "Nothing was sent; no Communique was recorded.",
                     "Send to @owner to ask the person, or drop those flags to send to a Position.",
@@ -1816,7 +1825,7 @@ fn cmd_gateway_dispatch(command: GatewayCmd, cwd: &std::path::Path) -> Result<Re
                 &gateway,
                 &cwd,
                 aikit_cli::gateway_contact::SendRequest {
-                    to: &a.to,
+                    to: a.to.as_deref(),
                     body,
                     reply_to: a.reply_to,
                     from_position: a.from_position.as_deref(),
@@ -1913,6 +1922,64 @@ fn cmd_gateway_dispatch(command: GatewayCmd, cwd: &std::path::Path) -> Result<Re
                 &a.communique_ref,
                 |record| aikit_cli::gateway_contact::forwarded_readback(&home, record),
             )?)
+        }
+        GatewaySub::Replies(a) => {
+            let target = aikit_cli::gateway_ops::carrier_target(&home, &a.carrier)?;
+            let gateway = aikit_cli::gateway_contact::LocalGateway::for_home(&home, target);
+            gateway_data(aikit_cli::gateway_contact::replies(
+                &gateway,
+                &a.communique_ref,
+                |record| aikit_cli::gateway_contact::forwarded_replies(&home, record),
+            )?)
+        }
+        GatewaySub::Answer(a) => {
+            let (owners, gateway, cwd) = contact_seams(&home, &a.carrier)?;
+            gateway_data(aikit_cli::gateway_contact::world_agent::answer(
+                &home,
+                &owners,
+                &gateway,
+                &cwd,
+                aikit_cli::gateway_contact::world_agent::AnswerRequest {
+                    communique_ref: &a.communique_ref,
+                    from_position: a.from_position.as_deref(),
+                },
+            )?)
+        }
+        GatewaySub::Disclose(a) => {
+            // The person's own act: written through the gateway runtime, which
+            // takes it only from the person's own connection.
+            let (_, gateway, _) = contact_seams(&home, &a.carrier)?;
+            gateway_data(aikit_cli::gateway_contact::world_agent::disclose(
+                &home,
+                &gateway,
+                aikit_cli::gateway_contact::world_agent::DiscloseRequest {
+                    world_ref: &a.world_ref,
+                    part_ref: &a.part_ref,
+                    star_ref: a.star_ref.as_deref(),
+                    to_field: a.to_field,
+                    kind: a.kind.as_deref(),
+                    label: a.label.as_deref(),
+                    text: a.text.as_deref(),
+                    withdraw: a.withdraw,
+                    from_position: a.from_position.as_deref(),
+                },
+            )?)
+        }
+        GatewaySub::AnswerHarness(a) => {
+            let (_, gateway, _) = contact_seams(&home, &a.carrier)?;
+            gateway_data(
+                aikit_cli::gateway_contact::world_agent::elect_answer_harness(
+                    &home,
+                    &gateway,
+                    aikit_cli::gateway_contact::world_agent::ElectHarness {
+                        protocol: a.protocol.as_deref(),
+                        argv: a.argv,
+                        credential_env: a.credential_env.as_deref(),
+                        clear: a.clear,
+                        from_position: a.from_position.as_deref(),
+                    },
+                )?,
+            )
         }
         GatewaySub::Delegate(a) => {
             let (owners, gateway, cwd) = contact_seams(&home, &a.carrier)?;
@@ -2184,6 +2251,10 @@ fn cmd_gateway_dispatch(command: GatewayCmd, cwd: &std::path::Path) -> Result<Re
                 | GatewaySub::Team { .. }
                 | GatewaySub::Conversation(_)
                 | GatewaySub::Heard(_)
+                | GatewaySub::Replies(_)
+                | GatewaySub::Answer(_)
+                | GatewaySub::Disclose(_)
+                | GatewaySub::AnswerHarness(_)
                 | GatewaySub::Delegate(_)
                 | GatewaySub::Forward(_)
                 | GatewaySub::Remote(_)
@@ -2218,6 +2289,10 @@ fn cmd_gateway_dispatch(command: GatewayCmd, cwd: &std::path::Path) -> Result<Re
                 | GatewaySub::Team { .. }
                 | GatewaySub::Conversation(_)
                 | GatewaySub::Heard(_)
+                | GatewaySub::Replies(_)
+                | GatewaySub::Answer(_)
+                | GatewaySub::Disclose(_)
+                | GatewaySub::AnswerHarness(_)
                 | GatewaySub::Delegate(_)
                 | GatewaySub::Forward(_)
                 | GatewaySub::Remote(_)

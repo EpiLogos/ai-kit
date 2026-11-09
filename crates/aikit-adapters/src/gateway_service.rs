@@ -29,15 +29,17 @@ use aikit_core::resource::ResourceRef;
 use aikit_core::{AikitError, Result};
 use serde::{Deserialize, Serialize};
 
+use crate::gateway_communique::SenderAttribution;
 use crate::gateway_connector_config::GatewayConnectorFactory;
 use crate::gateway_connector_pump::{spawn_connector_workers, ConnectorQueues};
 use crate::gateway_posture::{
     unix_listener_reading, CarrierScope, GatewayListenerReading, ListenerClass, ListenerState,
 };
 use crate::gateway_runtime::{
-    execute_gateway_command, AgencyGateway, GatewayCommand, GatewayIngressResult,
-    GatewayOccupancyReading, GatewayRequestEnvelope, GatewayResponse, GatewayResponseEnvelope,
-    GatewayStreamEvent,
+    execute_gateway_command_from, AgencyGateway, GatewayCaller, GatewayCallerIdentity,
+    GatewayCommand, GatewayConnection, GatewayIngressResult, GatewayOccupancyReading,
+    GatewayRequestEnvelope, GatewayResponse, GatewayResponseEnvelope, GatewayStreamEvent,
+    VerifiedOccupant,
 };
 
 pub const GATEWAY_SERVICE_CARRIER_VERSION: &str = "aikit.gateway-service-carrier/v1";
@@ -354,10 +356,29 @@ pub fn execute_against_state_file(
     command: GatewayCommand,
     lock_timeout: Duration,
 ) -> Result<GatewayResponse> {
+    execute_against_state_file_from(
+        fresh,
+        state_file,
+        command,
+        lock_timeout,
+        &GatewayCaller::Runtime,
+    )
+}
+
+/// [`execute_against_state_file`] for one caller's connection (DLW build
+/// ruling 2026-11-09): the process executing offline is the gateway, and
+/// `caller` is what it established of the body asking.
+pub fn execute_against_state_file_from(
+    fresh: AgencyGateway,
+    state_file: &Path,
+    command: GatewayCommand,
+    lock_timeout: Duration,
+    caller: &GatewayCaller,
+) -> Result<GatewayResponse> {
     let _lock = acquire_gateway_state_lock(state_file, lock_timeout, "offline gateway command")?;
     let mut gateway = restore_gateway_state(fresh, Some(state_file))?;
     let read_only = command.is_read_only();
-    let response = execute_gateway_command(&mut gateway, command)?;
+    let response = execute_gateway_command_from(&mut gateway, command, caller)?;
     if !read_only {
         persist_gateway_state(&gateway, Some(state_file))?;
     }
@@ -550,6 +571,101 @@ fn take_tick_loop(tick_loop: &Mutex<Option<TickLoopHandle>>) -> Option<TickLoopH
 pub trait GatewayOccupancyReader: Send + Sync + 'static {
     /// `position_ref: None` asks for the whole listing.
     fn read(&self, gateway_ref: &str, position_ref: Option<&str>) -> GatewayOccupancyReading;
+
+    /// Whether `generation_ref` is the current occupant of `position_ref`,
+    /// asked of the occupancy owner at that moment: the basis when it is, why
+    /// not when it is not or could not be read. The journal attributes a
+    /// sender verified only on this (DLW build ruling 2026-11-09).
+    /// `origin_gateway_ref` is the gateway a relayed record names as its
+    /// origin, the only other gateway whose Workcell may vouch for it (be2d);
+    /// `None` for a body that speaks here.
+    fn verify(
+        &self,
+        _position_ref: &str,
+        _generation_ref: &str,
+        _origin_gateway_ref: Option<&str>,
+    ) -> std::result::Result<String, String> {
+        Err("this gateway's occupancy owner verifies no occupant".into())
+    }
+}
+
+/// The caller of a command this process executes against the state file
+/// itself, no service having answered (DLW build ruling 2026-11-09): this
+/// process, on the owner's machine, as it presents itself from its own
+/// environment, verified by `occupancy` as a carrier would verify it.
+pub fn local_caller(
+    command: &GatewayCommand,
+    occupancy: Option<&dyn GatewayOccupancyReader>,
+) -> GatewayCaller {
+    GatewayCaller::Connection(connection_of(
+        command,
+        GatewayCallerIdentity::from_env(),
+        crate::gateway_posture::CarrierScope::Owner,
+        occupancy,
+    ))
+}
+
+/// What a carrier establishes of the body behind one request: its scope, what
+/// it presents of itself, and the occupancy its occupancy owner verified for
+/// this request (the body's own, or a relayed sender's), asked outside the
+/// state lock.
+fn connection_of(
+    command: &GatewayCommand,
+    presented: GatewayCallerIdentity,
+    scope: crate::gateway_posture::CarrierScope,
+    occupancy: Option<&dyn GatewayOccupancyReader>,
+) -> GatewayConnection {
+    let plain = |raw: &str| raw.len() <= 512 && !raw.chars().any(char::is_control);
+    let (pair, origin) = match command {
+        // The Position a draft speaks from, with the generation the body
+        // itself presents: a generation named only in the draft proves nothing.
+        GatewayCommand::SendCommunique { draft } => (
+            draft
+                .from_position_ref
+                .clone()
+                .or_else(|| presented.position_ref.clone())
+                .zip(presented.generation_ref.clone()),
+            None,
+        ),
+        GatewayCommand::CloseAsk { .. } => (
+            presented
+                .position_ref
+                .clone()
+                .zip(presented.generation_ref.clone()),
+            None,
+        ),
+        GatewayCommand::IngestCommunique { communique, .. }
+            if communique.attribution == SenderAttribution::Verified =>
+        {
+            (
+                communique
+                    .from_position_ref
+                    .clone()
+                    .zip(communique.from_generation_ref.clone()),
+                Some(communique.origin_gateway_ref.as_str()),
+            )
+        }
+        _ => (None, None),
+    };
+    let verified = pair
+        .filter(|(position, generation)| plain(position) && plain(generation))
+        .and_then(|(position_ref, generation_ref)| {
+            let basis = occupancy?
+                .verify(&position_ref, &generation_ref, origin)
+                .ok()?;
+            Some(VerifiedOccupant {
+                position_ref,
+                generation_ref,
+                basis,
+            })
+        })
+        .into_iter()
+        .collect();
+    GatewayConnection {
+        scope,
+        presented,
+        verified,
+    }
 }
 
 /// This Workcell's encounter owner, reached on behalf of a peer gateway. The
@@ -1513,6 +1629,7 @@ fn handle_websocket_connection(
                     state_file,
                     occupancy,
                     &mut subscriptions,
+                    crate::gateway_posture::CarrierScope::Peer,
                 )?;
                 // The shutdown lands before the answer: a client that shuts
                 // the gateway down may hang up without waiting for it, and a
@@ -1761,6 +1878,7 @@ where
             state_file,
             occupancy,
             &mut subscriptions,
+            crate::gateway_posture::CarrierScope::Owner,
         )?;
         // The shutdown lands before the answer: a client that shuts the
         // gateway down may hang up without waiting for the answer, and the
@@ -1818,6 +1936,7 @@ where
 /// a successful `subscribe` — the connection's new subscription sink. The
 /// sink's gate opens once the carrier has written the replay answer, so a
 /// subscriber always sees replay first, then live pushes, never a gap.
+#[allow(clippy::too_many_arguments)] // the carrier's facts are distinct; a bundle would only rename them
 fn execute_serialized_request(
     gateway: &Arc<Mutex<AgencyGateway>>,
     runtime: &GatewayServiceRuntime,
@@ -1825,6 +1944,7 @@ fn execute_serialized_request(
     state_file: Option<&Path>,
     occupancy: Option<&dyn GatewayOccupancyReader>,
     subscriptions: &mut ConnectionSubscriptions,
+    scope: crate::gateway_posture::CarrierScope,
 ) -> Result<(String, bool, Option<Arc<SubscriptionSink>>)> {
     let request = match serde_json::from_str::<GatewayRequestEnvelope>(input) {
         Ok(request) => request,
@@ -1972,13 +2092,21 @@ fn execute_serialized_request(
         }
     }
     let should_shutdown = request.command.is_shutdown();
+    // Who asks is established before the state lock: the occupancy owner is
+    // asked at this moment, and a slow owner never stalls the journal.
+    let caller = GatewayCaller::Connection(connection_of(
+        &request.command,
+        request.caller.clone().unwrap_or_default(),
+        scope,
+        occupancy,
+    ));
     let mut gateway = gateway.lock().map_err(|_| {
         AikitError::new(
             "agency_gateway_service.poisoned",
             "gateway state lock was poisoned",
         )
     })?;
-    let mut result = execute_gateway_command(&mut gateway, request.command.clone());
+    let mut result = execute_gateway_command_from(&mut gateway, request.command.clone(), &caller);
     // The kernel knows no carriers; the service answering knows its own.
     if let Ok(GatewayResponse::Status { status }) = &mut result {
         status.carriers = runtime.carriers.readings();
@@ -2390,6 +2518,7 @@ fn io_error(context: &'static str) -> impl FnOnce(io::Error) -> AikitError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::gateway_runtime::execute_gateway_command;
     use std::{
         net::SocketAddr,
         os::unix::net::UnixStream,
@@ -2477,6 +2606,193 @@ mod tests {
             forward_to_workcell_ref: None,
             routing: None,
         }
+    }
+
+    /// The occupancy owner of a test: one current occupant, verified.
+    struct OneOccupant(&'static str, &'static str);
+
+    impl GatewayOccupancyReader for OneOccupant {
+        fn read(&self, _: &str, _: Option<&str>) -> GatewayOccupancyReading {
+            unimplemented!("only verify is asked here")
+        }
+        fn verify(
+            &self,
+            position: &str,
+            generation: &str,
+            _: Option<&str>,
+        ) -> std::result::Result<String, String> {
+            if (position, generation) == (self.0, self.1) {
+                Ok(format!(
+                    "{generation} is the current occupant of {position}"
+                ))
+            } else {
+                Err(format!(
+                    "{generation} is not the current occupant of {position}"
+                ))
+            }
+        }
+    }
+
+    const ASKED: &str = "central:position:project:O-I:scribe";
+
+    /// One request over a carrier, as the carrier would take it.
+    fn over_carrier(
+        gateway: &Arc<Mutex<AgencyGateway>>,
+        command: Value,
+        caller: Value,
+        scope: crate::gateway_posture::CarrierScope,
+    ) -> Value {
+        let runtime = test_runtime();
+        let mut subscriptions = ConnectionSubscriptions::new(Arc::clone(&runtime.hub));
+        let input = serde_json::json!({"request_id": "r", "command": command, "caller": caller})
+            .to_string();
+        let (response, _, _) = execute_serialized_request(
+            gateway,
+            &runtime,
+            &input,
+            None,
+            Some(&OneOccupant(ASKED, "gen-scribe")),
+            &mut subscriptions,
+            scope,
+        )
+        .unwrap();
+        serde_json::from_str(&response).unwrap()
+    }
+
+    /// Review 4 (DLW build ruling 2026-11-09): the journal sets a sender's
+    /// attribution from the connection, never from the draft. A draft that
+    /// says "verified" is stored Claimed unless the carrier's occupancy owner
+    /// verified the body's own presented generation; a relayed "verified"
+    /// record the gateway did not verify itself is Claimed too.
+    #[test]
+    fn the_journal_sets_attribution_from_the_connection_never_from_the_draft() {
+        use crate::gateway_communique::{CommuniqueState, SenderAttribution};
+        use crate::gateway_posture::CarrierScope;
+        let gateway = Arc::new(Mutex::new(gateway()));
+        let forged = |reference: &str| {
+            let mut draft = communique_draft(reference);
+            draft.from_position_ref = Some(ASKED.into());
+            draft.from_generation_ref = Some("gen-scribe".into());
+            draft.attribution = SenderAttribution::Verified;
+            draft.attribution_basis = "I say so".into();
+            draft.state = CommuniqueState::Pending;
+            serde_json::json!({"type": "send-communique", "draft": draft})
+        };
+        let stored = |reference: &str| {
+            gateway
+                .lock()
+                .unwrap()
+                .communiques()
+                .get(&format!("aikit:communique:{reference}"))
+                .unwrap()
+                .clone()
+        };
+        for (reference, caller) in [
+            ("bare", Value::Null),
+            (
+                "stale",
+                serde_json::json!({"position_ref": ASKED, "generation_ref": "gen-old"}),
+            ),
+        ] {
+            let answer = over_carrier(&gateway, forged(reference), caller, CarrierScope::Owner);
+            assert_eq!(answer["ok"], true, "{answer}");
+            let record = stored(reference);
+            assert_eq!(
+                record.attribution,
+                SenderAttribution::Claimed,
+                "{reference}"
+            );
+            assert_ne!(record.attribution_basis, "I say so");
+            // Review 13 (be2d): a generation this gateway did not verify is
+            // no part of a Claimed record.
+            assert_eq!(
+                record.from_generation_ref, None,
+                "a Claimed draft keeps no generation ({reference})"
+            );
+        }
+        let answer = over_carrier(
+            &gateway,
+            forged("presented"),
+            serde_json::json!({"position_ref": ASKED, "generation_ref": "gen-scribe"}),
+            CarrierScope::Owner,
+        );
+        assert_eq!(answer["ok"], true, "{answer}");
+        let record = stored("presented");
+        assert_eq!(record.attribution, SenderAttribution::Verified);
+        assert!(
+            record.attribution_basis.contains("current occupant"),
+            "{}",
+            record.attribution_basis
+        );
+
+        let mut relayed = stored("presented");
+        relayed.communique_ref = "aikit:communique:relayed".into();
+        relayed.from_generation_ref = Some("gen-elsewhere".into());
+        let answer = over_carrier(
+            &gateway,
+            serde_json::json!({"type": "ingest-communique", "communique": relayed, "relayed_by": "agency-gateway/peer"}),
+            Value::Null,
+            CarrierScope::Peer,
+        );
+        assert_eq!(answer["ok"], true, "{answer}");
+        assert_eq!(stored("relayed").attribution, SenderAttribution::Claimed);
+    }
+
+    /// Review 5 (be2d): recording what a World's agent answers by is the
+    /// person's own act, taken only from a connection on the owner's carrier
+    /// that presents no Position or occupant generation. An honest body is
+    /// refused: one that unsets OI_POSITION_REF still presents its
+    /// generation. So is any peer. Each refusal names its own cause. A
+    /// connection presenting nothing is taken (the same-user boundary,
+    /// pinned in `tests/gateway_contact.rs`).
+    #[test]
+    fn the_persons_record_is_taken_only_from_a_connection_presenting_no_position_or_generation() {
+        use crate::gateway_posture::CarrierScope;
+        let gateway = Arc::new(Mutex::new(gateway()));
+        let record = serde_json::json!({"type": "set-world-agent-record", "key": "answer-harness",
+            "record": {"protocol": "pi-rpc"}});
+        for (what, caller, scope) in [
+            (
+                "env -u OI_POSITION_REF",
+                serde_json::json!({"generation_ref": "gen-scribe"}),
+                CarrierScope::Owner,
+            ),
+            (
+                "a Position body",
+                serde_json::json!({"position_ref": ASKED, "generation_ref": "gen-scribe"}),
+                CarrierScope::Owner,
+            ),
+            ("a peer", Value::Null, CarrierScope::Peer),
+        ] {
+            let answer = over_carrier(&gateway, record.clone(), caller, scope);
+            assert_eq!(answer["ok"], false, "{what}: {answer}");
+            assert_eq!(
+                answer["error"]["code"], "agency_gateway.not_the_person",
+                "{what}"
+            );
+            let why = answer["error"]["message"].as_str().unwrap_or_default();
+            let cause = match what {
+                "a peer" => "it came over a peer's carrier".to_owned(),
+                "env -u OI_POSITION_REF" => "presents occupant generation gen-scribe".to_owned(),
+                _ => format!("presents Position {ASKED} and occupant generation gen-scribe"),
+            };
+            assert!(why.contains(&cause), "{what}: {answer}");
+            assert!(!why.contains("authenticat"), "{what}: {answer}");
+        }
+        let read = serde_json::json!({"type": "read-world-agent-record", "key": "answer-harness"});
+        let answer = over_carrier(&gateway, read.clone(), Value::Null, CarrierScope::Owner);
+        assert!(
+            answer["response"]["record"].is_null(),
+            "nothing refused was kept: {answer}"
+        );
+
+        let answer = over_carrier(&gateway, record, Value::Null, CarrierScope::Owner);
+        assert_eq!(answer["ok"], true, "{answer}");
+        let answer = over_carrier(&gateway, read, Value::Null, CarrierScope::Owner);
+        assert_eq!(
+            answer["response"]["record"]["protocol"], "pi-rpc",
+            "{answer}"
+        );
     }
 
     #[test]

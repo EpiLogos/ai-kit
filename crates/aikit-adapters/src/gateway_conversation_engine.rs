@@ -736,6 +736,391 @@ pub enum ConversationHarnessProtocol {
     PrimeRpc,
 }
 
+/// The pi flags that launch it with nothing to call: no tools (built-in or
+/// extension), no extensions, no skills, no MCP and no context files.
+const PI_CONFINING_FLAGS: [&str; 5] = [
+    "--no-tools",
+    "--no-extensions",
+    "--no-skills",
+    "--no-mcp",
+    "--no-context-files",
+];
+/// The pi flags that would give a confined launch something to call again.
+const PI_WIDENING_FLAGS: [&str; 4] = ["--tools", "--extension", "--skill", "--no-builtin-tools"];
+
+/// pi's flags as its own parser reads them (pi-coding-agent 1.5.0,
+/// `dist/cli/args.js` `parseArgs`): each spelling, the long name it means,
+/// and how it takes the argument after it.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PiTakes {
+    /// A flag with no value.
+    Nothing,
+    /// The next argument, whatever it is, when there is one.
+    Next,
+    /// The next argument unless it is absent or starts with `-` (pi reports
+    /// an error then, and takes nothing).
+    NextUnlessFlag,
+    /// `--print`: the next argument as a message, unless it starts with `@`,
+    /// or with `-` but not `---`.
+    PrintMessage,
+    /// `--list-models`: the next argument unless it starts with `-` or `@`.
+    PatternUnlessFlag,
+    /// `--tui-mode`: the next argument unless it is absent or starts with `-`.
+    TuiMode,
+}
+
+const PI_FLAGS: &[(&str, &str, PiTakes)] = &[
+    ("--help", "--help", PiTakes::Nothing),
+    ("-h", "--help", PiTakes::Nothing),
+    ("--version", "--version", PiTakes::Nothing),
+    ("-v", "--version", PiTakes::Nothing),
+    ("--mode", "--mode", PiTakes::NextUnlessFlag),
+    ("--continue", "--continue", PiTakes::Nothing),
+    ("-c", "--continue", PiTakes::Nothing),
+    ("--resume", "--resume", PiTakes::Nothing),
+    ("-r", "--resume", PiTakes::Nothing),
+    ("--provider", "--provider", PiTakes::Next),
+    ("--model", "--model", PiTakes::Next),
+    ("--api-key", "--api-key", PiTakes::Next),
+    ("--system-prompt", "--system-prompt", PiTakes::Next),
+    (
+        "--append-system-prompt",
+        "--append-system-prompt",
+        PiTakes::Next,
+    ),
+    ("--name", "--name", PiTakes::Next),
+    ("-n", "--name", PiTakes::Next),
+    ("--no-session", "--no-session", PiTakes::Nothing),
+    ("--session", "--session", PiTakes::Next),
+    ("--session-id", "--session-id", PiTakes::Next),
+    ("--fork", "--fork", PiTakes::Next),
+    ("--session-dir", "--session-dir", PiTakes::Next),
+    ("--models", "--models", PiTakes::Next),
+    ("--no-tools", "--no-tools", PiTakes::Nothing),
+    ("-nt", "--no-tools", PiTakes::Nothing),
+    ("--no-builtin-tools", "--no-builtin-tools", PiTakes::Nothing),
+    ("-nbt", "--no-builtin-tools", PiTakes::Nothing),
+    ("--tools", "--tools", PiTakes::Next),
+    ("-t", "--tools", PiTakes::Next),
+    ("--exclude-tools", "--exclude-tools", PiTakes::Next),
+    ("-xt", "--exclude-tools", PiTakes::Next),
+    ("--thinking", "--thinking", PiTakes::Next),
+    ("--print", "--print", PiTakes::PrintMessage),
+    ("-p", "--print", PiTakes::PrintMessage),
+    ("--export", "--export", PiTakes::Next),
+    ("--extension", "--extension", PiTakes::Next),
+    ("-e", "--extension", PiTakes::Next),
+    ("--no-extensions", "--no-extensions", PiTakes::Nothing),
+    ("-ne", "--no-extensions", PiTakes::Nothing),
+    ("--no-mcp", "--no-mcp", PiTakes::Nothing),
+    ("--skill", "--skill", PiTakes::Next),
+    ("--prompt-template", "--prompt-template", PiTakes::Next),
+    ("--theme", "--theme", PiTakes::Next),
+    ("--use-theme", "--use-theme", PiTakes::NextUnlessFlag),
+    ("--no-skills", "--no-skills", PiTakes::Nothing),
+    ("-ns", "--no-skills", PiTakes::Nothing),
+    (
+        "--no-prompt-templates",
+        "--no-prompt-templates",
+        PiTakes::Nothing,
+    ),
+    ("-np", "--no-prompt-templates", PiTakes::Nothing),
+    ("--no-themes", "--no-themes", PiTakes::Nothing),
+    ("--no-context-files", "--no-context-files", PiTakes::Nothing),
+    ("-nc", "--no-context-files", PiTakes::Nothing),
+    ("--list-models", "--list-models", PiTakes::PatternUnlessFlag),
+    ("--tui-mode", "--tui-mode", PiTakes::TuiMode),
+    ("--verbose", "--verbose", PiTakes::Nothing),
+    ("--approve", "--approve", PiTakes::Nothing),
+    ("-a", "--approve", PiTakes::Nothing),
+    ("--no-approve", "--no-approve", PiTakes::Nothing),
+    ("-na", "--no-approve", PiTakes::Nothing),
+    ("--offline", "--offline", PiTakes::Nothing),
+];
+
+/// What pi reads from the arguments after its program, read by its own
+/// grammar: the flags it takes as flags, each value a flag took and which
+/// flag took it, the files it attaches, the messages it is given, and what
+/// it reports as an error.
+#[derive(Debug, Default)]
+struct PiReading<'a> {
+    flags: Vec<&'static str>,
+    values: Vec<(&'a str, &'a str)>,
+    files: Vec<&'a str>,
+    messages: Vec<&'a str>,
+    errors: Vec<String>,
+}
+
+impl<'a> PiReading<'a> {
+    fn read(args: &'a [String]) -> Self {
+        let mut reading = Self::default();
+        let mut index = 0;
+        while index < args.len() {
+            let arg = args[index].as_str();
+            let next = args.get(index + 1).map(String::as_str);
+            index += 1;
+            if arg == "--" {
+                for rest in &args[index..] {
+                    match rest.strip_prefix('@') {
+                        Some(file) => reading.files.push(file),
+                        None => reading.messages.push(rest),
+                    }
+                }
+                break;
+            }
+            if let Some((_, long, takes)) = PI_FLAGS.iter().find(|(spelling, _, takes)| {
+                *spelling == arg && (*takes != PiTakes::Next || next.is_some())
+            }) {
+                let flag_like = |value: &str| value.starts_with('-');
+                let took = match (takes, next) {
+                    (PiTakes::Nothing, _) => None,
+                    (PiTakes::Next, Some(value)) => Some(value),
+                    (PiTakes::NextUnlessFlag | PiTakes::TuiMode, Some(value))
+                        if !flag_like(value) =>
+                    {
+                        Some(value)
+                    }
+                    (PiTakes::NextUnlessFlag | PiTakes::TuiMode, _) => {
+                        reading.errors.push(format!("{long} requires a value"));
+                        None
+                    }
+                    (PiTakes::PrintMessage, Some(value))
+                        if !value.starts_with('@')
+                            && (!flag_like(value) || value.starts_with("---")) =>
+                    {
+                        reading.messages.push(value);
+                        index += 1;
+                        reading.flags.push(*long);
+                        continue;
+                    }
+                    (PiTakes::PatternUnlessFlag, Some(value))
+                        if !flag_like(value) && !value.starts_with('@') =>
+                    {
+                        Some(value)
+                    }
+                    _ => None,
+                };
+                if let Some(value) = took {
+                    index += 1;
+                    reading.values.push((*long, value));
+                    if *long == "--mode" && !["text", "json", "rpc"].contains(&value) {
+                        reading
+                            .errors
+                            .push(format!("--mode {value} is not text, json or rpc"));
+                    }
+                } else {
+                    reading.flags.push(*long);
+                }
+                continue;
+            }
+            if let Some(file) = arg.strip_prefix('@') {
+                reading.files.push(file);
+            } else if let Some(name) = arg.strip_prefix("--") {
+                // An unknown long flag: `--x=y`, or `--x` taking the next
+                // argument unless that starts with `-` or `@`.
+                if name.contains('=') {
+                    continue;
+                }
+                if let Some(value) = next.filter(|value| !value.starts_with(['-', '@'])) {
+                    index += 1;
+                    reading.values.push((arg, value));
+                }
+            } else if arg.starts_with('-') {
+                reading
+                    .errors
+                    .push(format!("{arg} is not an option pi knows"));
+            } else {
+                reading.messages.push(arg);
+            }
+        }
+        reading
+    }
+
+    fn has(&self, flag: &str) -> bool {
+        self.flags.contains(&flag) || self.values.iter().any(|(took, _)| *took == flag)
+    }
+
+    /// The last value `flag` took, as pi keeps it.
+    fn value(&self, flag: &str) -> Option<&'a str> {
+        self.values
+            .iter()
+            .rev()
+            .find(|(took, _)| *took == flag)
+            .map(|(_, value)| *value)
+    }
+}
+
+/// The provider a pi argv selects (`--provider`, its last value as pi
+/// keeps it), read by pi's own grammar from the arguments after its program.
+pub fn pi_selected_provider(argv: &[String]) -> Option<String> {
+    PiReading::read(argv.get(1..).unwrap_or_default())
+        .value("--provider")
+        .map(str::to_owned)
+}
+
+/// The variables pi reads a provider's key from (pi-ai 1.5.0,
+/// `dist/env-api-keys.js` `getApiKeyEnvVars`, less `ANTHROPIC_AUTH_TOKEN`,
+/// which pi never reads as a key). AIKit's own pi profile names none, since
+/// pi keeps its keys in its own store; an answer turn's empty HOME has no
+/// such store, so the person names the variable, and it must be one of these
+/// for the provider the argv selects.
+pub fn pi_provider_credential_variables(provider: &str) -> &'static [&'static str] {
+    match provider {
+        "github-copilot" => &["COPILOT_GITHUB_TOKEN"],
+        "anthropic" => &["ANTHROPIC_OAUTH_TOKEN", "ANTHROPIC_API_KEY"],
+        "ant-ling" => &["ANT_LING_API_KEY"],
+        "qwen-token-plan" | "qwen-token-plan-individual" => &["QWEN_TOKEN_PLAN_API_KEY"],
+        "qwen-token-plan-cn" => &["QWEN_TOKEN_PLAN_CN_API_KEY"],
+        "openai" => &["OPENAI_API_KEY"],
+        "azure" => &["AZURE_OPENAI_API_KEY"],
+        "nvidia" => &["NVIDIA_API_KEY"],
+        "deepseek" => &["DEEPSEEK_API_KEY"],
+        "google" => &["GEMINI_API_KEY"],
+        "google-vertex" => &["GOOGLE_CLOUD_API_KEY"],
+        "groq" => &["GROQ_API_KEY"],
+        "cerebras" => &["CEREBRAS_API_KEY"],
+        "xai" => &["XAI_API_KEY"],
+        "typesafe" => &["TYPESAFE_API_KEY"],
+        "radius" => &["RADIUS_API_KEY"],
+        "openrouter" => &["OPENROUTER_API_KEY"],
+        "vercel-ai-gateway" => &["AI_GATEWAY_API_KEY"],
+        "zai" => &["ZAI_API_KEY"],
+        "zai-coding-cn" => &["ZAI_CODING_CN_API_KEY"],
+        "mistral" => &["MISTRAL_API_KEY"],
+        "minimax" => &["MINIMAX_API_KEY"],
+        "minimax-cn" => &["MINIMAX_CN_API_KEY"],
+        "moonshotai" | "moonshotai-cn" => &["MOONSHOT_API_KEY"],
+        "huggingface" => &["HF_TOKEN"],
+        "fireworks" => &["FIREWORKS_API_KEY"],
+        "together" => &["TOGETHER_API_KEY"],
+        "baseten" => &["BASETEN_API_KEY"],
+        "opencode" | "opencode-go" => &["OPENCODE_API_KEY"],
+        "kimi-coding" => &["KIMI_API_KEY"],
+        "meta" => &["META_API_KEY"],
+        "cloudflare-workers-ai" | "cloudflare-ai-gateway" => &["CLOUDFLARE_API_KEY"],
+        "xiaomi" => &["XIAOMI_API_KEY"],
+        "xiaomi-token-plan-cn" => &["XIAOMI_TOKEN_PLAN_CN_API_KEY"],
+        "xiaomi-token-plan-ams" => &["XIAOMI_TOKEN_PLAN_AMS_API_KEY"],
+        "xiaomi-token-plan-sgp" => &["XIAOMI_TOKEN_PLAN_SGP_API_KEY"],
+        _ => &[],
+    }
+}
+
+/// Why a pi argv cannot be held to no tools, read by pi's own grammar (DLW
+/// build ruling 2026-11-09, be2d): its program is pi; pi reports no error in
+/// it; every confining flag is read as a flag, never as another flag's value;
+/// none that widens it again; no key on the argv; and no file or message
+/// before the prompt, which is a turn's only input.
+fn pi_confinement(argv: &[String]) -> std::result::Result<(), String> {
+    let Some(program) = argv.first() else {
+        return Err("the argv names no program".into());
+    };
+    if std::path::Path::new(program).file_name() != Some(std::ffi::OsStr::new("pi")) {
+        return Err(format!(
+            "the program is {program}, and only pi itself (a program named pi) is held to no tools by its flags"
+        ));
+    }
+    let reading = PiReading::read(&argv[1..]);
+    if !reading.errors.is_empty() {
+        return Err(format!(
+            "pi would refuse this argv: {}",
+            reading.errors.join("; ")
+        ));
+    }
+    for flag in PI_CONFINING_FLAGS {
+        if reading.flags.contains(&flag) {
+            continue;
+        }
+        let taken_by = reading.values.iter().find(|(_, value)| {
+            PI_FLAGS
+                .iter()
+                .any(|(spelling, long, _)| spelling == value && *long == flag)
+        });
+        return Err(match taken_by {
+            Some((by, value)) => format!(
+                "pi reads {value} as the value of {by}, not as {flag}, so this argv lacks {flag}"
+            ),
+            None => format!(
+                "pi is held to no tools only by its own launch flags, and this argv lacks {}",
+                PI_CONFINING_FLAGS
+                    .iter()
+                    .filter(|flag| !reading.flags.contains(flag))
+                    .copied()
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+        });
+    }
+    if let Some(flag) = PI_WIDENING_FLAGS.iter().find(|flag| reading.has(flag)) {
+        return Err(format!(
+            "this pi argv names {flag}, which gives the turn something to call"
+        ));
+    }
+    if reading.has("--api-key") {
+        return Err(
+            "this pi argv carries a key (--api-key); name the provider's variable with --credential-env instead"
+                .into(),
+        );
+    }
+    if let Some(file) = reading.files.first() {
+        return Err(format!(
+            "pi would attach the file {file} before the prompt, which is an answer turn's only input"
+        ));
+    }
+    if let Some(message) = reading.messages.first() {
+        return Err(format!(
+            "pi would take {message} as a message before the prompt, which is an answer turn's only input"
+        ));
+    }
+    Ok(())
+}
+
+impl ConversationHarnessProtocol {
+    /// How AIKit holds this protocol's harness to no tools before any prompt
+    /// (DLW build ruling 2026-11-09), or why it cannot for this argv:
+    ///
+    /// - pi, by its own launch flags, read by pi's own grammar
+    ///   ([`pi_confinement`]);
+    /// - ACP, by the session it opens reporting an empty tool list: the
+    ///   agent's own declaration;
+    /// - Prime RPC, by the session it attaches to reporting an empty tool
+    ///   registry.
+    pub fn confines(self, argv: &[String]) -> std::result::Result<&'static str, String> {
+        match self {
+            Self::PiRpc => pi_confinement(argv).map(|()| {
+                "pi launched with its tools, extensions, skills, MCP and context files disabled"
+            }),
+            Self::Acp => Ok("an ACP agent whose session reports an empty tool list when it opens"),
+            Self::PrimeRpc => {
+                Ok("a Prime session that reports an empty tool registry when it is attached")
+            }
+        }
+    }
+
+    /// Whether this protocol's session reports its own tools (and must, for
+    /// a turn that takes none).
+    fn session_reports_tools(self) -> bool {
+        matches!(self, Self::Acp | Self::PrimeRpc)
+    }
+}
+
+/// Whether a signal is a tool at work: its call, its result, a provider
+/// update about one, or a Prime child run.
+fn is_tool_event(kind: &ConnectionSignalKind) -> bool {
+    match kind {
+        ConnectionSignalKind::ToolCall { .. } | ConnectionSignalKind::ToolResult { .. } => true,
+        ConnectionSignalKind::ProviderUpdate { session_update, .. } => {
+            session_update.contains("tool")
+        }
+        ConnectionSignalKind::Status { message } => message.starts_with("prime-rlm-child:"),
+        _ => false,
+    }
+}
+
+/// How long a tool-less turn's harness may take to start (launch, handshake
+/// and session open) unless the source is given its own bound.
+pub const TOOL_LESS_STARTUP_BOUND: Duration = Duration::from_secs(60);
+
 /// A turn source backed by a real [`AgentSessionHost`] driving a real harness
 /// process. The host launches lazily on the first prompt; one host carries the
 /// binding's agent sessions. A canonical New with a regenerated
@@ -752,7 +1137,20 @@ pub struct AgentHostTurnSource {
     /// `None` means the standard roots: the home `~/.agents/skills` and the
     /// working directory's `.agents/skills`.
     skill_roots: Option<Vec<PathBuf>>,
+    /// Whether this source's turns take no tool (`without_tools`).
+    tool_less: bool,
+    /// The launch environment; `None` inherits this process's.
+    environment: Option<crate::connection_process::ModelEnvironment>,
+    /// The bound on starting the harness (launch, handshake, session open).
+    startup_bound: Option<Duration>,
 }
+
+/// Why a tool-less turn was not prompted: its harness is not held to none.
+pub const HARNESS_NOT_CONFINED: &str = "gateway_conversation.harness_not_confined";
+
+/// How a tool-less turn ends when its harness calls a tool anyway.
+pub const TOOL_LESS_TURN_USED_A_TOOL: &str =
+    "the turn called a tool, and this turn takes none: it was stopped, and nothing it said is its answer";
 
 impl AgentHostTurnSource {
     pub fn new(
@@ -768,6 +1166,101 @@ impl AgentHostTurnSource {
             cwd,
             host: Arc::new(OnceLock::new()),
             skill_roots: None,
+            tool_less: false,
+            environment: None,
+            startup_bound: None,
+        }
+    }
+
+    /// Turns that take no tool (ai-kit #601: a World's agent answering an ask
+    /// only from what its World shows): no Agent Skills root is carried, and a
+    /// turn whose harness calls a tool all the same is interrupted at that call
+    /// and ends `Failed` with [`TOOL_LESS_TURN_USED_A_TOOL`], so nothing a tool
+    /// reached becomes its reply. Launch the harness in its own no-tools mode
+    /// as well; this is the bound held here, at the seam, whatever it was given.
+    ///
+    /// Confined before the prompt, not interrupted after it (DLW build ruling
+    /// 2026-11-09): the harness is launched with PATH and LANG only, an empty
+    /// HOME of its own (beside the working folder, `<cwd>.home`) and no MCP
+    /// servers, within [`TOOL_LESS_STARTUP_BOUND`]; a protocol whose argv
+    /// cannot be confined is refused before launch, and a session that reports
+    /// tools (or, where its protocol reports them, reports none) is refused
+    /// before the prompt. The guard stays as the backstop, on every tool
+    /// event: a call, a result, a provider update about one, a Prime child run.
+    pub fn without_tools(mut self) -> Self {
+        self.skill_roots = Some(Vec::new());
+        self.tool_less = true;
+        // A host launched before is not confined: this source launches its own.
+        self.host = Arc::new(OnceLock::new());
+        let home = self.cwd.with_file_name(format!(
+            "{}.home",
+            self.cwd
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_else(|| "turn".into())
+        ));
+        self.environment = Some(crate::connection_process::ModelEnvironment::isolated(home));
+        self.startup_bound = Some(TOOL_LESS_STARTUP_BOUND);
+        self
+    }
+
+    /// Launch under this environment instead (a confined one carrying the
+    /// provider's own credential variable, say).
+    pub fn with_launch_environment(
+        mut self,
+        environment: crate::connection_process::ModelEnvironment,
+    ) -> Self {
+        self.environment = Some(environment);
+        self.host = Arc::new(OnceLock::new());
+        self
+    }
+
+    /// Bound the harness's start (launch, handshake, session open).
+    pub fn with_startup_bound(mut self, bound: Duration) -> Self {
+        self.startup_bound = Some(bound);
+        self
+    }
+
+    /// Refuse a tool-less turn whose harness is not held to no tools.
+    fn check_confined_argv(&self) -> Result<()> {
+        if !self.tool_less {
+            return Ok(());
+        }
+        self.protocol
+            .confines(&self.argv)
+            .map(|_| ())
+            .map_err(|why| {
+                AikitError::new(
+                    HARNESS_NOT_CONFINED,
+                    format!(
+                        "the {} harness cannot be held to no tools: {why}",
+                        self.harness_name
+                    ),
+                )
+            })
+    }
+
+    /// After the session opened and before the prompt: a tool-less turn's
+    /// session must declare no tools.
+    fn check_confined_session(&self, lane: &crate::agent_session_host::SessionLane) -> Result<()> {
+        if !self.tool_less {
+            return Ok(());
+        }
+        let refuse = |why: String| {
+            Err(AikitError::new(
+                HARNESS_NOT_CONFINED,
+                format!("the {} harness was not prompted: {why}", self.harness_name),
+            ))
+        };
+        match &lane.binding().declared_tools {
+            Some(tools) if !tools.is_empty() => refuse(format!(
+                "its session reports the tools {}, and this turn takes none",
+                tools.join(", ")
+            )),
+            None if self.protocol.session_reports_tools() => {
+                refuse("its session reports no tool list, so AIKit cannot hold it to none".into())
+            }
+            _ => Ok(()),
         }
     }
 
@@ -791,48 +1284,101 @@ impl AgentHostTurnSource {
     }
 
     fn host(&self) -> Result<&Mutex<AgentSessionHost>> {
+        self.host_before(None)
+    }
+
+    fn host_before(&self, deadline: Option<Instant>) -> Result<&Mutex<AgentSessionHost>> {
         if let Some(host) = self.host.get() {
             return Ok(host);
         }
+        self.check_confined_argv()?;
+        let isolated_home = self
+            .environment
+            .as_ref()
+            .and_then(crate::connection_process::ModelEnvironment::isolated_home);
+        if self.tool_less && isolated_home.is_none() {
+            return Err(AikitError::new(
+                HARNESS_NOT_CONFINED,
+                format!(
+                    "the {} harness takes no tool, so it is launched only in an isolated environment of its own",
+                    self.harness_name
+                ),
+            ));
+        }
+        if let Some(home) = isolated_home {
+            std::fs::create_dir_all(home).map_err(|error| {
+                AikitError::new(
+                    "gateway_conversation.isolated_home",
+                    format!("the harness's own empty HOME could not be made: {error}"),
+                )
+            })?;
+        }
+        let environment = self.environment.as_ref();
+        let cwd = Some(self.cwd.as_path());
+        let limits = AgentSessionHostLimits::default;
         let connection_ref = ResourceRef::parse("agent-connection/gateway-conversation")?;
         let provenance = vec!["gateway conversation engine".into()];
         let host = match self.protocol {
-            ConversationHarnessProtocol::Acp => AgentSessionHost::launch(
-                crate::interactive_connection::AcpStableConnectionAdapter::new(
-                    connection_ref,
-                    provenance,
-                ),
-                &self.argv,
-                Some(self.cwd.as_path()),
-                AgentSessionHostLimits::default(),
-            )?,
-            ConversationHarnessProtocol::PiRpc => AgentSessionHost::launch(
-                crate::pi_rpc_connection::PiRpcConnectionAdapter::new(
-                    connection_ref,
-                    self.cwd.display().to_string(),
-                    provenance,
-                ),
-                &self.argv,
-                Some(self.cwd.as_path()),
-                AgentSessionHostLimits::default(),
-            )?,
-            ConversationHarnessProtocol::PrimeRpc => AgentSessionHost::launch(
-                crate::prime_rpc_connection::PrimeRpcConnectionAdapter::new(
-                    connection_ref,
-                    self.cwd.display().to_string(),
-                    provenance,
-                ),
-                &self.argv,
-                Some(self.cwd.as_path()),
-                AgentSessionHostLimits::default(),
-            )?,
+            ConversationHarnessProtocol::Acp => {
+                AgentSessionHost::launch_with_journal_and_environment(
+                    crate::interactive_connection::AcpStableConnectionAdapter::new(
+                        connection_ref,
+                        provenance,
+                    ),
+                    &self.argv,
+                    cwd,
+                    limits(),
+                    None,
+                    environment,
+                )?
+            }
+            ConversationHarnessProtocol::PiRpc => {
+                AgentSessionHost::launch_with_journal_and_environment(
+                    crate::pi_rpc_connection::PiRpcConnectionAdapter::new(
+                        connection_ref,
+                        self.cwd.display().to_string(),
+                        provenance,
+                    ),
+                    &self.argv,
+                    cwd,
+                    limits(),
+                    None,
+                    environment,
+                )?
+            }
+            ConversationHarnessProtocol::PrimeRpc => {
+                AgentSessionHost::launch_with_journal_and_environment(
+                    crate::prime_rpc_connection::PrimeRpcConnectionAdapter::new(
+                        connection_ref,
+                        self.cwd.display().to_string(),
+                        provenance,
+                    ),
+                    &self.argv,
+                    cwd,
+                    limits(),
+                    None,
+                    environment,
+                )?
+            }
         };
-        host.initialize()?;
+        match deadline {
+            Some(deadline) => host.initialize_before(deadline)?,
+            None => host.initialize()?,
+        };
         let _ = self.host.set(Mutex::new(host));
         self.host.get().ok_or_else(poisoned)
     }
 
     fn open_lane(&self, host: &Mutex<AgentSessionHost>, agent_session: &ResourceRef) -> Result<()> {
+        self.open_lane_before(host, agent_session, None)
+    }
+
+    fn open_lane_before(
+        &self,
+        host: &Mutex<AgentSessionHost>,
+        agent_session: &ResourceRef,
+        deadline: Option<Instant>,
+    ) -> Result<()> {
         let locked = host.lock().map_err(|_| poisoned())?;
         if locked.lane(agent_session).is_ok() {
             return Ok(());
@@ -848,14 +1394,18 @@ impl AgentHostTurnSource {
                 SessionOpenMode::Attach
             }
         };
-        locked.open_session(SessionOpenRequest {
+        let request = SessionOpenRequest {
             mode,
             native_session_id: None,
             cwd: self.cwd.display().to_string(),
             additional_directories: Vec::new(),
             mcp_servers: Vec::new(),
             agent_session: Some(agent_session.clone()),
-        })?;
+        };
+        match deadline {
+            Some(deadline) => locked.open_session_before(request, deadline)?,
+            None => locked.open_session(request)?,
+        };
         Ok(())
     }
 
@@ -933,20 +1483,32 @@ impl ConversationTurnSource for AgentHostTurnSource {
     }
 
     fn prompt(&self, request: ConversationTurnRequest) -> Result<Arc<dyn ConversationTurn>> {
-        let host = self.host()?;
-        self.open_lane(host, &request.agent_session_ref)?;
+        // One bound for the whole start: launch, handshake and session open.
+        let deadline = self.startup_bound.map(|bound| Instant::now() + bound);
+        let host = self.host_before(deadline)?;
+        self.open_lane_before(host, &request.agent_session_ref, deadline)?;
         let locked = host.lock().map_err(|_| poisoned())?;
         let lane = locked.lane(&request.agent_session_ref)?;
+        self.check_confined_session(&lane)?;
         let handle = lane.prompt(self.prompt_payload(&request.prompt))?;
         drop(locked);
         let slot = Arc::new(TurnSlot::with_progress(Arc::new(TurnProgress::new())));
         let reader_slot = Arc::clone(&slot);
         let progress = slot.progress();
         let reader_handle = handle.clone();
+        let tool_less = self.tool_less;
         thread::spawn(move || {
             let mut text = String::new();
+            let mut used_a_tool = false;
             loop {
                 let outcome = match reader_handle.recv() {
+                    Some(HostEvent::Signal(signal)) if tool_less && is_tool_event(&signal.kind) => {
+                        if !used_a_tool {
+                            used_a_tool = true;
+                            let _ = reader_handle.interrupt(Some("this turn takes no tool".into()));
+                        }
+                        continue;
+                    }
                     Some(HostEvent::Signal(signal)) => {
                         match signal.kind {
                             // Fine-grained deltas accumulate the turn's final
@@ -970,6 +1532,11 @@ impl ConversationTurnSource for AgentHostTurnSource {
                             _ => {}
                         }
                         continue;
+                    }
+                    Some(HostEvent::TurnEnded(_)) if used_a_tool => {
+                        ConversationTurnOutcome::Failed {
+                            reason: TOOL_LESS_TURN_USED_A_TOOL.into(),
+                        }
                     }
                     Some(HostEvent::TurnEnded(record)) => match record.stop {
                         TurnStop::Completed { .. } => ConversationTurnOutcome::Replied { text },
@@ -3280,4 +3847,216 @@ fn unexpected_answer(response: &GatewayResponse) -> AikitError {
                 .unwrap_or_else(|| "an unknown response".into())
         ),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::agent_connection::AgentConnectionAdapter;
+
+    fn argv(args: &[&str]) -> Vec<String> {
+        args.iter().map(|arg| arg.to_string()).collect()
+    }
+
+    const CONFINED: [&str; 8] = [
+        "pi",
+        "--mode",
+        "rpc",
+        "--no-tools",
+        "--no-extensions",
+        "--no-skills",
+        "--no-mcp",
+        "--no-context-files",
+    ];
+
+    /// be2d (review 5): pi is held to no tools only by flags pi's own parser
+    /// reads as flags. A confining flag read as another flag's value, a flag
+    /// pi would refuse, a key, a file or a message before the prompt, or a
+    /// program that is not pi, are each refused in words.
+    #[test]
+    fn pi_is_held_to_no_tools_only_by_flags_its_own_grammar_reads() {
+        let pi = |args: &[&str]| ConversationHarnessProtocol::PiRpc.confines(&argv(args));
+        assert!(pi(&CONFINED).is_ok());
+        assert!(pi(&["/opt/bin/pi", "-nt", "-ne", "-ns", "--no-mcp", "-nc"]).is_ok());
+        for (args, why) in [
+            (
+                vec![
+                    "pi",
+                    "--system-prompt",
+                    "--no-tools",
+                    "-ne",
+                    "-ns",
+                    "--no-mcp",
+                    "-nc",
+                ],
+                "pi reads --no-tools as the value of --system-prompt",
+            ),
+            (
+                vec!["pi", "--name", "-nt", "-ne", "-ns", "--no-mcp", "-nc"],
+                "pi reads -nt as the value of --name",
+            ),
+            (
+                vec![
+                    "pi",
+                    "--tools",
+                    "--no-tools",
+                    "-ne",
+                    "-ns",
+                    "--no-mcp",
+                    "-nc",
+                ],
+                "the value of --tools",
+            ),
+            (
+                vec!["pi", "-nt", "-ne", "-ns", "--no-mcp", "-nc", "-x"],
+                "-x is not an option pi knows",
+            ),
+            (
+                vec!["pi", "-nt", "-ne", "-ns", "--no-mcp", "-nc", "--mode", "-p"],
+                "--mode requires a value",
+            ),
+            (
+                vec!["pi", "-nt", "-ne", "-ns", "--no-mcp", "-nc", "-e", "x.ts"],
+                "names --extension",
+            ),
+            (
+                vec!["pi", "-nt", "-ne", "-ns", "--no-mcp", "-nc", "-nbt"],
+                "names --no-builtin-tools",
+            ),
+            (
+                vec![
+                    "pi",
+                    "-nt",
+                    "-ne",
+                    "-ns",
+                    "--no-mcp",
+                    "-nc",
+                    "--api-key",
+                    "k",
+                ],
+                "carries a key",
+            ),
+            (
+                vec!["pi", "-nt", "-ne", "-ns", "--no-mcp", "-nc", "@/etc/hosts"],
+                "attach the file /etc/hosts",
+            ),
+            (
+                vec![
+                    "pi",
+                    "-nt",
+                    "-ne",
+                    "-ns",
+                    "--no-mcp",
+                    "-nc",
+                    "--",
+                    "--no-tools",
+                ],
+                "take --no-tools as a message",
+            ),
+            (
+                vec![
+                    "pi",
+                    "-nt",
+                    "-ne",
+                    "-ns",
+                    "--no-mcp",
+                    "-nc",
+                    "read /etc/hosts",
+                ],
+                "as a message",
+            ),
+            (
+                vec!["pi", "-nt", "-ne", "-ns", "--no-mcp", "-nc", "-p", "hello"],
+                "as a message",
+            ),
+            (
+                vec!["python3", "-nt", "-ne", "-ns", "--no-mcp", "-nc"],
+                "only pi itself",
+            ),
+        ] {
+            let error = pi(&args).expect_err(&format!("{args:?}"));
+            assert!(error.contains(why), "{args:?}: {error}");
+        }
+        // `--` ends pi's options: a confining flag after it is a message.
+        let error = pi(&["pi", "--", "-nt", "-ne", "-ns", "--no-mcp", "-nc"]).unwrap_err();
+        assert!(error.contains("lacks --no-tools"), "{error}");
+    }
+
+    /// be2d (review 5): the provider an argv selects is read as pi keeps it,
+    /// and only pi's own variable for it is that provider's credential.
+    #[test]
+    fn a_pi_argv_selects_its_provider_and_pi_names_its_credential() {
+        let mut args = argv(&CONFINED);
+        assert_eq!(pi_selected_provider(&args), None);
+        args.extend(argv(&["--provider", "openai", "--provider", "anthropic"]));
+        assert_eq!(pi_selected_provider(&args).as_deref(), Some("anthropic"));
+        assert_eq!(
+            pi_selected_provider(&argv(&["pi", "--system-prompt", "--provider", "x"])),
+            None,
+            "a value, not the flag"
+        );
+        assert_eq!(
+            pi_provider_credential_variables("anthropic"),
+            ["ANTHROPIC_OAUTH_TOKEN", "ANTHROPIC_API_KEY"]
+        );
+        assert_eq!(pi_provider_credential_variables("zai"), ["ZAI_API_KEY"]);
+        assert!(pi_provider_credential_variables("nobody").is_empty());
+    }
+
+    /// Review gap (be2d): the guard ends a tool-less turn on exactly what each
+    /// adapter makes of a tool at work: pi's and Prime's tool results, and
+    /// Prime's child run, as well as a tool call.
+    #[test]
+    fn the_guard_reads_each_adapters_own_tool_signals() {
+        let connection = ResourceRef::parse("connection/test/guard").unwrap();
+        let mut pi = crate::pi_rpc_connection::PiRpcConnectionAdapter::new(
+            connection.clone(),
+            "/work".into(),
+            vec![],
+        );
+        let mut prime = crate::prime_rpc_connection::PrimeRpcConnectionAdapter::new(
+            connection,
+            "/work".into(),
+            vec![],
+        );
+        let kinds = |signals: Vec<crate::agent_connection::ConnectionSignal>| {
+            signals
+                .into_iter()
+                .map(|signal| signal.kind)
+                .collect::<Vec<_>>()
+        };
+        for (adapter, wire) in [
+            (
+                "pi",
+                json!({"type": "tool_execution_end", "toolCallId": "t1"}),
+            ),
+            (
+                "pi",
+                json!({"type": "tool_execution_start", "toolCallId": "t1"}),
+            ),
+            (
+                "prime",
+                json!({"type": "tool_execution_end", "toolCallId": "t1"}),
+            ),
+            ("prime", json!({"type": "rlm_child_update", "child": "c1"})),
+        ] {
+            let signals = if adapter == "pi" {
+                kinds(pi.ingest(wire.clone()).unwrap())
+            } else {
+                kinds(prime.ingest(wire.clone()).unwrap())
+            };
+            assert_eq!(signals.len(), 1, "{adapter} {wire}");
+            assert!(
+                is_tool_event(&signals[0]),
+                "{adapter} {wire}: {:?}",
+                signals[0]
+            );
+        }
+        let said = kinds(
+            pi.ingest(json!({"type": "message_update",
+                "assistantMessageEvent": {"type": "text_delta", "delta": "hello"}}))
+                .unwrap(),
+        );
+        assert!(!is_tool_event(&said[0]), "words are no tool");
+    }
 }

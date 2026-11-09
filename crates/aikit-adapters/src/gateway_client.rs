@@ -21,13 +21,21 @@ use aikit_core::{AikitError, Result};
 
 use crate::gateway_runtime::GatewayResponseEnvelope;
 use crate::gateway_runtime::{
-    GatewayCommand, GatewayReplay, GatewayRequestEnvelope, GatewayResponse, GatewayStreamEvent,
+    GatewayCallerIdentity, GatewayCommand, GatewayReplay, GatewayRequestEnvelope, GatewayResponse,
+    GatewayStreamEvent,
 };
 use crate::gateway_service::{base64_encode, sha1, WEBSOCKET_GUID};
 
 pub const GATEWAY_CLIENT_VERSION: &str = "aikit.gateway-client/v1";
 const CARRIER_TIMEOUT: Duration = Duration::from_secs(10);
 static REQUEST_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+/// What this process presents of itself on every request: its own Position and
+/// occupant generation, when it was launched into one (DLW build ruling
+/// 2026-11-09). The carrier verifies it; nothing here is taken as proof.
+fn presented_caller() -> Option<GatewayCallerIdentity> {
+    Some(GatewayCallerIdentity::from_env()).filter(|caller| !caller.is_empty())
+}
 
 /// Where a gateway query is addressed: the two carriers the service exposes.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -74,6 +82,7 @@ pub fn gateway_request_within(
     let request = GatewayRequestEnvelope {
         request_id,
         command,
+        caller: presented_caller(),
     };
     let encoded = serde_json::to_string(&request).map_err(|error| {
         AikitError::new(
@@ -544,6 +553,7 @@ pub fn gateway_subscribe(
             after_sequence,
             limit,
         },
+        caller: presented_caller(),
     };
     let encoded = serde_json::to_string(&request).map_err(|error| {
         AikitError::new(
