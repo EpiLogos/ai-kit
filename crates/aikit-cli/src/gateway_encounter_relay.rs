@@ -396,7 +396,30 @@ mod native_cache_tests {
 
     struct NativeFixture {
         material: Option<tempfile::TempDir>,
+        /// Where a gateway's unix socket stands: a short folder of its own,
+        /// so the socket's path fits the platform's bound (104 bytes on
+        /// macOS) wherever the repository is checked out.
+        sockets: tempfile::TempDir,
         gateways: Vec<LiveGateway>,
+    }
+
+    /// The bound on a unix socket's path, terminator included, on macOS and
+    /// the BSDs (Linux allows 108).
+    const SOCKET_PATH_BOUND: usize = 104;
+
+    /// A short temporary folder for unix sockets: the system's temporary
+    /// folder when a socket under it fits the bound, else `/tmp`.
+    fn short_socket_folder() -> tempfile::TempDir {
+        use std::os::unix::ffi::OsStrExt;
+        let system = std::env::temp_dir();
+        // A separator, "gw-" and six random characters, a separator, the
+        // socket's name and the terminator take 13 bytes; 24 leaves room.
+        let fits = system.as_os_str().as_bytes().len() + 24 < SOCKET_PATH_BOUND;
+        let base = if fits { system } else { PathBuf::from("/tmp") };
+        tempfile::Builder::new()
+            .prefix("gw-")
+            .tempdir_in(base)
+            .unwrap()
     }
 
     impl NativeFixture {
@@ -412,6 +435,7 @@ mod native_cache_tests {
                         .tempdir_in(scratch)
                         .unwrap(),
                 ),
+                sockets: short_socket_folder(),
                 gateways: Vec::new(),
             }
         }
@@ -438,10 +462,10 @@ mod native_cache_tests {
             // it was handed.
             let listener = TcpListener::bind("127.0.0.1:0").unwrap();
             let address = listener.local_addr().unwrap().to_string();
-            let socket = root.join("s");
+            let socket = self.sockets.path().join("s");
             if allocate_in_service {
                 use std::os::unix::ffi::OsStrExt;
-                assert!(socket.as_os_str().as_bytes().len() < 104);
+                assert!(socket.as_os_str().as_bytes().len() < SOCKET_PATH_BOUND);
             }
             let config = GatewayServiceConfig {
                 websocket_bind: Some(address.clone()),

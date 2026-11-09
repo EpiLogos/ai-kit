@@ -3195,48 +3195,86 @@ fn answer_of(reply: &Value) -> Value {
     serde_json::from_str(reply["body"].as_str().unwrap()).unwrap()
 }
 
-/// The answer harness: a stdlib-only ACP agent that keeps each prompt it is
-/// given (`prompt-N.txt`) and the environment it was launched in
-/// (`env-PID.json`), and says what `reply.txt` holds; `TOOL` calls a tool
-/// first, as a harness that ignores its no-tools mode would; its session
-/// reports the tools `tools.json` names (none without it).
-const ANSWER_HARNESS: &str = r#"
+/// The answer harness: a stdlib-only program named `pi` that speaks pi's RPC
+/// wire, keeps each prompt it is given (`prompt-N.txt`) and the environment
+/// it was launched in (`env-PID.json`), and says what `reply.txt` holds;
+/// `TOOL` runs a tool first, as a pi that ignored its no-tools flags would;
+/// its session reports the tools `tools.json` names (no list without it).
+/// Only pi is elected (DLW build ruling 2026-11-09, be2d), so the fake is pi
+/// by name and wire; `FOLDER` is where it keeps what it saw.
+const ANSWER_HARNESS: &str = r#"#!/usr/bin/env python3
 import json, os, sys
-folder = sys.argv[1]
+folder = FOLDER
 turns = 0
 def send(obj):
     sys.stdout.write(json.dumps(obj) + "\n")
     sys.stdout.flush()
+def answer(message, data=None):
+    reply = {"type": "response", "id": message["id"], "command": message["type"], "success": True}
+    if data is not None:
+        reply["data"] = data
+    send(reply)
 for line in sys.stdin:
     line = line.strip()
     if not line:
         continue
     message = json.loads(line)
-    method = message.get("method")
-    if method == "initialize":
-        send({"jsonrpc": "2.0", "id": message["id"], "result": {"protocolVersion": 1,
-              "agentCapabilities": {"loadSession": True, "sessionCapabilities": {"resume": {}}}}})
-    elif method in ("session/new", "session/load", "session/resume"):
-        tools = [] if not os.path.exists(os.path.join(folder, "tools.json")) else json.load(open(os.path.join(folder, "tools.json")))
-        send({"jsonrpc": "2.0", "id": message["id"], "result": {"sessionId": "answer-1", "tools": tools}})
+    kind = message.get("type")
+    if kind == "get_available_models":
+        answer(message, {"models": []})
+    elif kind == "get_state":
+        state = {"sessionId": "answer-1", "isStreaming": False, "isCompacting": False,
+                 "pendingMessageCount": 0, "model": None}
+        if os.path.exists(os.path.join(folder, "tools.json")):
+            state["tools"] = json.load(open(os.path.join(folder, "tools.json")))
+        answer(message, state)
         with open(os.path.join(folder, "env-%d.json" % os.getpid()), "w") as kept:
-            json.dump({"env": sorted(os.environ), "home": os.environ.get("HOME"), "cwd": os.getcwd()}, kept)
-    elif method == "session/prompt":
+            json.dump({"env": sorted(os.environ), "home": os.environ.get("HOME"), "cwd": os.getcwd(),
+                       "argv": sys.argv[1:]}, kept)
+    elif kind == "prompt":
         turns += 1
-        text = "".join(p.get("text", "") if isinstance(p, dict) else str(p) for p in message["params"]["prompt"])
         with open(os.path.join(folder, "prompt-%d.txt" % turns), "w") as kept:
-            kept.write(text)
+            kept.write(message["message"])
         with open(os.path.join(folder, "reply.txt")) as said:
             reply = said.read()
+        answer(message)
         if reply.startswith("TOOL"):
-            send({"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "answer-1",
-                  "update": {"sessionUpdate": "tool_call", "toolCallId": "read-1", "title": "Read",
-                             "kind": "read", "status": "pending", "rawInput": {"path": "/etc/hosts"}}}})
+            send({"type": "tool_execution_start", "toolCallId": "read-1", "toolName": "read",
+                  "args": {"path": "/etc/hosts"}})
             reply = reply[4:]
-        send({"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "answer-1",
-              "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": reply}}}})
-        send({"jsonrpc": "2.0", "id": message["id"], "result": {"stopReason": "end_turn"}})
+        send({"type": "message_update", "assistantMessageEvent": {"type": "text_delta", "delta": reply}})
+        send({"type": "message_end", "message": {"role": "assistant", "stopReason": "stop",
+              "content": [{"type": "text", "text": reply}]}})
+        send({"type": "agent_settled"})
+    elif kind == "abort":
+        answer(message)
 "#;
+
+/// The confined pi argv after its program: the flags that hold pi to no
+/// tools, read by pi's own grammar.
+const PI_CONFINED: [&str; 8] = [
+    "--mode",
+    "rpc",
+    "--no-session",
+    "--no-tools",
+    "--no-extensions",
+    "--no-skills",
+    "--no-mcp",
+    "--no-context-files",
+];
+
+/// The fake pi, written where it keeps what it saw: its program path.
+fn answer_harness_program(folder: &Path) -> String {
+    let program = folder.join("pi");
+    let script = ANSWER_HARNESS.replace("FOLDER", &format!("{:?}", folder.display().to_string()));
+    std::fs::write(&program, script).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    program.display().to_string()
+}
 
 /// `aikit --json ARGS`, the flag first (the harness argv runs to the end).
 fn json_first(body: &Body<'_>, args: &[&str]) -> (bool, Value) {
@@ -3256,22 +3294,19 @@ fn json_first(body: &Body<'_>, args: &[&str]) -> (bool, Value) {
 fn elect_answer_harness(window: &Body<'_>) -> PathBuf {
     let folder = window.home.join("answer-harness");
     std::fs::create_dir_all(&folder).unwrap();
-    let folder_arg = folder.display().to_string();
-    let args = [
+    let program = answer_harness_program(&folder);
+    let mut args = vec![
         "gateway",
         "answer-harness",
         "--protocol",
-        "acp",
+        "pi-rpc",
         "--",
-        "python3",
-        "-u",
-        "-c",
-        ANSWER_HARNESS,
-        &folder_arg,
+        &program,
     ];
+    args.extend(PI_CONFINED);
     let (ok, elected) = json_first(window, &args);
     assert!(ok, "{elected}");
-    assert_eq!(elected["data"]["harness"]["protocol"], "acp");
+    assert_eq!(elected["data"]["harness"]["protocol"], "pi-rpc");
     folder
 }
 
@@ -3377,6 +3412,89 @@ fn reference_of(sent: &Value) -> String {
         .to_owned()
 }
 
+/// Review 4 (DLW build ruling 2026-11-09, be2d): the gateway service speaks
+/// as no body. Started from a Position's own shell, its tick still ends the
+/// asks it may end: it scrubs the shell's Position and generation at start,
+/// so the person's act of closing a Claimed asker's ask is never refused as
+/// that body's.
+#[test]
+fn a_service_started_from_a_positions_shell_speaks_as_no_body() {
+    let world = World::new();
+    world.claim(SCRIBE, "scribe-1", "workcell:a");
+    let window = body(&world, "a", "workcell:a", "agency-gateway/a");
+    let scribe = window.as_occupant(SCRIBE, "scribe-1");
+    let _service = Gateway::serve_ticking(&scribe, None, Some(200));
+    let asked = window.ok(&[
+        "gateway",
+        "send",
+        "--to",
+        STEWARD,
+        "--from-position",
+        "central:position:world:mara:keeper",
+        "--body",
+        &world_agent_ask(),
+    ]);
+    assert_eq!(asked["communique"]["attribution"], "claimed");
+    // The ask as the gateway keeps it: its replies are the keeper's to read.
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let closed = loop {
+        let record = by_ref(&window.home, &asked);
+        if record["state"] == "delivered" {
+            break record;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the service's own pass never closed it: {record}"
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    };
+    assert!(
+        closed["transitions"].as_array().unwrap().last().unwrap()["basis"]
+            .as_str()
+            .unwrap()
+            .contains("did not verify"),
+        "{closed}"
+    );
+}
+
+/// The same-user boundary, pinned as it is (DLW build ruling 2026-11-09,
+/// be2d): the person's own act is taken only from a connection that presents
+/// no Position or occupant generation. An honest body is refused. A process
+/// of the person's own user that unsets both variables presents nothing, and
+/// is taken as the person: that is the machine's trust boundary, which this
+/// gate does not cross. The real fix, a person's credential no body carries,
+/// is a follow-up of its own.
+#[test]
+fn the_same_user_boundary_a_body_that_unsets_both_variables_is_taken_as_the_person() {
+    let world = World::new();
+    world.claim(SCRIBE, "scribe-1", "workcell:a");
+    let window = body(&world, "a", "workcell:a", "agency-gateway/a");
+    let scribe = window.as_occupant(SCRIBE, "scribe-1");
+    let _service = Gateway::serve(&window, None);
+    let part = ["--part", "part:boundary", "--field"];
+    let mut args = vec!["gateway", "disclose", "--world", "project:O-I"];
+    args.extend(part);
+    assert_eq!(
+        scribe.refused(&args)["code"],
+        "gateway.world_agent_not_the_person",
+        "an honest body is refused"
+    );
+    let hidden = Body {
+        position: None,
+        generation: None,
+        ..scribe.clone()
+    };
+    let shown = hidden.ok(&args);
+    assert!(
+        shown["disclosure"]["parts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|shown| shown["part_ref"] == "part:boundary"),
+        "a body that hides both is not stopped: {shown}"
+    );
+}
+
 #[test]
 fn a_worlds_agent_answers_an_ask_in_one_bounded_turn_from_what_its_world_shows_at_that_star() {
     let world = World::new();
@@ -3424,26 +3542,24 @@ fn a_worlds_agent_answers_an_ask_in_one_bounded_turn_from_what_its_world_shows_a
         ])["code"],
         "gateway.world_agent_not_the_person"
     );
-    let (ok, refused) = json_first(
-        &unset,
-        &[
-            "gateway",
-            "answer-harness",
-            "--protocol",
-            "acp",
-            "--",
-            "true",
-        ],
-    );
+    let mut elect_pi = vec![
+        "gateway",
+        "answer-harness",
+        "--protocol",
+        "pi-rpc",
+        "--",
+        "pi",
+    ];
+    elect_pi.extend(PI_CONFINED);
+    let (ok, refused) = json_first(&unset, &elect_pi);
     assert!(!ok);
     assert_eq!(
         refused["error"]["code"],
         "gateway.world_agent_not_the_person"
     );
+    // Its own cause, in words (be2d): the generation it presents.
     assert!(
-        refused
-            .to_string()
-            .contains("presents a Position or an occupant generation"),
+        refused.to_string().contains("presents occupant generation"),
         "{refused}"
     );
     the_world_shows(&window);
@@ -3504,23 +3620,13 @@ fn a_worlds_agent_answers_an_ask_in_one_bounded_turn_from_what_its_world_shows_a
     assert!(!turn.contains(&ask_ref), "{turn}");
     assert!(
         turn.contains(&format!(
-            "Reply: aikit gateway send --reply-to \"{plain_ref}\" --body \"...\""
+            "Reply: aikit gateway send --reply-to '{plain_ref}' --body '...'"
         )),
         "{turn}"
     );
 
     // The person elects the harness; a body at a Position may not.
-    let (ok, refused) = json_first(
-        &scribe,
-        &[
-            "gateway",
-            "answer-harness",
-            "--protocol",
-            "acp",
-            "--",
-            "true",
-        ],
-    );
+    let (ok, refused) = json_first(&scribe, &elect_pi);
     assert!(!ok);
     assert_eq!(
         refused["error"]["code"],
@@ -3561,7 +3667,7 @@ fn a_worlds_agent_answers_an_ask_in_one_bounded_turn_from_what_its_world_shows_a
     let prompt = &kept[0];
     assert!(prompt.contains("  | Which plate is this?"), "{prompt}");
     assert!(
-        prompt.contains("- part:plate-2\n  kind: page\n  | The second plate\n"),
+        prompt.contains("- part:plate-2\n  kind:\n    | page\n  | The second plate\n"),
         "{prompt}"
     );
     assert!(prompt.contains("- part:essay\n"), "{prompt}");
@@ -3852,7 +3958,7 @@ fn an_ask_is_answered_or_declined_once_and_only_where_it_truly_came_from() {
     assert_eq!(declined["answered"], false);
     let why = declined["declined"]["why"].as_str().unwrap();
     assert!(
-        why.contains("acp (python3)") && why.contains("reports the tools Read"),
+        why.contains("pi-rpc (") && why.contains("reports the tools Read"),
         "{why}"
     );
     assert_eq!(prompts_kept(&harness).len(), turns, "never prompted");

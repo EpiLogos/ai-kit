@@ -673,6 +673,10 @@ pub struct AgencyGateway {
     next_operation_sequence: u64,
     communiques: CommuniqueJournal,
     world_agent: BTreeMap<String, Value>,
+    /// The clock this gateway stamps every Communique it takes by (DLW build
+    /// ruling 2026-11-09, be2d): the system's, unless a composition keeps a
+    /// logical one of its own.
+    clock: Box<dyn Fn() -> u64 + Send + Sync>,
 }
 
 impl AgencyGateway {
@@ -689,7 +693,15 @@ impl AgencyGateway {
             next_operation_sequence: 1,
             communiques: CommuniqueJournal::default(),
             world_agent: BTreeMap::new(),
+            clock: Box::new(communique_now_unix_ms),
         }
+    }
+
+    /// Stamp what this gateway takes by `clock` instead of the system's
+    /// clock: a composition that keeps one logical clock, as tests do.
+    pub fn with_clock(mut self, clock: impl Fn() -> u64 + Send + Sync + 'static) -> Self {
+        self.clock = Box::new(clock);
+        self
     }
 
     /// The Communique journal this gateway keeps.
@@ -2018,12 +2030,42 @@ pub enum GatewayCaller {
 }
 
 impl GatewayConnection {
-    /// The person's own connection: the owner's carrier, presenting no
-    /// Position and no occupant generation. On one machine, every process of
-    /// its user can open that carrier; this is the same-user boundary, named,
-    /// not crossed.
+    /// The person's own act is taken only from a connection on the owner's
+    /// carrier that presents no Position or occupant generation (DLW build
+    /// ruling 2026-11-09, be2d). An honest body, which presents its own, is
+    /// refused. A process of the person's own user that hides its Position is
+    /// not stopped: that is the machine's trust boundary, the same-user
+    /// boundary, named here and not crossed. Nothing here authenticates the
+    /// person.
     pub fn is_the_person(&self) -> bool {
-        self.scope == CarrierScope::Owner && self.presented.is_empty()
+        self.not_the_person_because().is_none()
+    }
+
+    /// Why this connection's request is not taken as the person's own act:
+    /// a peer's carrier, or a body presenting a Position or generation.
+    fn not_the_person_because(&self) -> Option<String> {
+        if self.scope != CarrierScope::Owner {
+            return Some("it came over a peer's carrier, which never speaks for the person".into());
+        }
+        let presented = [
+            self.presented
+                .position_ref
+                .as_deref()
+                .map(|position| format!("Position {position}")),
+            self.presented
+                .generation_ref
+                .as_deref()
+                .map(|generation| format!("occupant generation {generation}")),
+        ]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>();
+        (!presented.is_empty()).then(|| {
+            format!(
+                "the body that sent it presents {}, so it is that body's, not the person's",
+                presented.join(" and ")
+            )
+        })
     }
 
     fn verified_as(&self, position: &str, generation: &str) -> Option<&VerifiedOccupant> {
@@ -2081,9 +2123,9 @@ impl GatewayConnection {
             draft.attribution_basis = basis.into();
         }
         draft.attribution = attribution;
-        if named.is_none() {
-            draft.from_generation_ref = None;
-        }
+        // A generation this gateway did not verify is no part of the record
+        // (DLW build ruling 2026-11-09, be2d): a Claimed sender keeps none.
+        draft.from_generation_ref = None;
         draft.from_position_ref = named;
     }
 
@@ -2116,11 +2158,14 @@ impl GatewayConnection {
     }
 }
 
-fn not_the_person(what: &str) -> AikitError {
+fn not_the_person(what: &str, connection: &GatewayConnection) -> AikitError {
+    let because = connection
+        .not_the_person_because()
+        .unwrap_or_else(|| "it is not the person's own act".into());
     AikitError::new(
         "agency_gateway.not_the_person",
         format!(
-            "{what} is the person's own act: it is accepted only from the person's own connection, which presents no Position and no occupant generation"
+            "{what} is the person's own act, taken only from a connection on the owner's carrier that presents no Position or occupant generation; {because}"
         ),
     )
 }
@@ -2160,7 +2205,10 @@ pub fn execute_gateway_command_from(
             }
         }
         GatewayCommand::SetWorldAgentRecord { .. } if !connection.is_the_person() => {
-            return Err(not_the_person("Recording what a World's Agent answers by"));
+            return Err(not_the_person(
+                "Recording what a World's Agent answers by",
+                connection,
+            ));
         }
         // Ended by the person, or by the asked Position's verified occupant,
         // whose generation the ask then names as the one that ended it.
@@ -2176,7 +2224,7 @@ pub fn execute_gateway_command_from(
                     .is_ok_and(|ask| ask.to_position_ref == occupant.position_ref)
             });
             if occupant.is_none() && !connection.is_the_person() {
-                return Err(not_the_person("Ending an ask unanswered"));
+                return Err(not_the_person("Ending an ask unanswered", connection));
             }
             let closed_by = occupant.map(|occupant| occupant.generation_ref.as_str());
             return Ok(GatewayResponse::CommuniqueRecord {
@@ -2303,7 +2351,8 @@ fn execute_admitted(
         }
         GatewayCommand::SendCommunique { draft } => {
             let gateway_ref = gateway.gateway_ref.to_string();
-            let (communique, replayed) = gateway.communiques.send(&gateway_ref, *draft)?;
+            let at = (gateway.clock)();
+            let (communique, replayed) = gateway.communiques.send_at(&gateway_ref, *draft, at)?;
             Ok(GatewayResponse::CommuniqueAccepted {
                 communique,
                 replayed,
@@ -2314,7 +2363,7 @@ fn execute_admitted(
             communique,
             relayed_by,
         } => {
-            let at = communique_now_unix_ms();
+            let at = (gateway.clock)();
             let (communique, replayed) = gateway.communiques.ingest(*communique, &relayed_by, at)?;
             Ok(GatewayResponse::CommuniqueAccepted {
                 communique,

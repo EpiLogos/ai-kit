@@ -1562,6 +1562,7 @@ fn cmd_gateway_dispatch(command: GatewayCmd, cwd: &std::path::Path) -> Result<Re
             })?)
         }
         GatewaySub::Serve(a) => {
+            aikit_cli::gateway_contact::forget_body_identity();
             let config = aikit_cli::gateway_ops::serve_config(&home, &a)?;
             // The running process publishes its own posture — which build it
             // executes, which carriers it serves — for `gateway doctor` and

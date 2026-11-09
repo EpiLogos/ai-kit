@@ -276,6 +276,24 @@ fn header(value: &str) -> String {
     }
 }
 
+/// A value as one word of a command line the occupant may paste into a
+/// shell (DLW build ruling 2026-11-09, be2d): single-quoted, so nothing in
+/// it runs (`$(…)`, a backtick), a quote inside closed and escaped, and cut at
+/// the journal's ref bound. The journal already takes only refs of letters,
+/// digits and `._:/@+-`; this holds for a record kept before it did.
+fn shell_word(value: &str) -> String {
+    let mut end = value.len().min(aikit_adapters::MAX_COMMUNIQUE_REF_BYTES);
+    while !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    let word = value[..end]
+        .chars()
+        .filter(|c| !c.is_control())
+        .collect::<String>()
+        .replace('\'', "'\\''");
+    format!("'{word}'")
+}
+
 fn render(
     occupant: &TurnOccupant,
     records: &[Communique],
@@ -356,23 +374,23 @@ fn render(
         }
         out.push_str(&format!(
             "   Full record: aikit --json gateway message {}\n",
-            header(&record.communique_ref)
+            shell_word(&record.communique_ref)
         ));
         // Reply is offered only where a reply reaches someone: a sender's
         // Position, or the field's window at no Position. A connector's `/ask`
         // is answered on its own chat path (DLW build ruling 2026-11-09).
         match (&record.from_position_ref, record.attribution) {
             (Some(from), _) => out.push_str(&format!(
-                "   Reply: aikit gateway send --to {} --reply-to {} --body \"...\"\n",
-                header(from),
-                header(&record.communique_ref)
+                "   Reply: aikit gateway send --to {} --reply-to {} --body '...'\n",
+                shell_word(from),
+                shell_word(&record.communique_ref)
             )),
             (None, aikit_adapters::SenderAttribution::Unknown)
                 if !crate::gateway_contact::asked_from_a_connector(record) =>
             {
                 out.push_str(&format!(
-                    "   Reply: aikit gateway send --reply-to {} --body \"...\"\n",
-                    header(&record.communique_ref)
+                    "   Reply: aikit gateway send --reply-to {} --body '...'\n",
+                    shell_word(&record.communique_ref)
                 ))
             }
             (None, _) => {}
@@ -1278,7 +1296,7 @@ mod tests {
         );
         assert!(delivery
             .text
-            .contains("Full record: aikit --json gateway message \"aikit:communique:oversize\""));
+            .contains("Full record: aikit --json gateway message 'aikit:communique:oversize'"));
         assert!(delivery.text.contains("   | The one behind."));
         assert!(!delivery.text.contains("ask:big"), "{}", delivery.text);
         assert!(!delivery.text.contains("www"), "{}", delivery.text);
@@ -1334,18 +1352,16 @@ mod tests {
             .unwrap()
             .text;
         assert!(
-            text.contains(
-                "Reply: aikit gateway send --reply-to \"aikit:communique:window\" --body"
-            ),
+            text.contains("Reply: aikit gateway send --reply-to 'aikit:communique:window' --body"),
             "{text}"
         );
         assert!(
-            !text.contains("aikit:communique:connector\" --body"),
+            !text.contains("aikit:communique:connector' --body"),
             "{text}"
         );
         assert!(
             text.contains(&format!(
-                "Reply: aikit gateway send --to \"{sender}\" --reply-to \"aikit:communique:positioned\" --body"
+                "Reply: aikit gateway send --to '{sender}' --reply-to 'aikit:communique:positioned' --body"
             )),
             "{text}"
         );
@@ -1429,8 +1445,8 @@ mod tests {
             .expect("never nothing carried while records wait");
         assert_eq!(carried.communique_refs, ["aikit:communique:old-header"]);
         assert_eq!(carried.whole, ["aikit:communique:old-header"]);
-        assert!(carried.text.contains(
-            r#"Full record: aikit --json gateway message "aikit:communique:old-header""#
-        ));
+        assert!(carried
+            .text
+            .contains("Full record: aikit --json gateway message 'aikit:communique:old-header'"));
     }
 }

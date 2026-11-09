@@ -166,13 +166,14 @@ pub use gateway_coexistence::{
     GatewayCoexistenceGate, GATEWAY_COEXISTENCE_FILE_NAME, GATEWAY_COEXISTENCE_SCHEMA,
 };
 pub use gateway_communique::{
-    body_schema, is_answer_body, is_ask_body, is_sender_of_address, sender_of_address, Communique,
-    CommuniqueCount, CommuniqueDraft, CommuniqueForward, CommuniqueForwardOutcome,
-    CommuniqueHandling, CommuniqueInstance, CommuniqueInstanceHold, CommuniqueJournal,
-    CommuniqueRouting, CommuniqueState, CommuniqueTransition, SenderAttribution,
+    body_schema, is_answer_body, is_ask_body, is_safe_ref_char, is_sender_of_address,
+    sender_of_address, Communique, CommuniqueCount, CommuniqueDraft, CommuniqueForward,
+    CommuniqueForwardOutcome, CommuniqueHandling, CommuniqueInstance, CommuniqueInstanceHold,
+    CommuniqueJournal, CommuniqueRouting, CommuniqueState, CommuniqueTransition, SenderAttribution,
     ASKS_WAITING_FULL_WORDS, ASK_EXPIRES_AFTER_MS, COMMUNIQUE_REF_PREFIX, COMMUNIQUE_SCHEMA,
     MAX_ASKS_WAITING_PER_ASKER, MAX_ASKS_WAITING_PER_POSITION, MAX_COMMUNIQUE_BODY_BYTES,
-    MAX_COMMUNIQUE_REF_BYTES, SENDER_OF_PREFIX, WORLD_AGENT_ANSWER_SCHEMA, WORLD_AGENT_ASK_SCHEMA,
+    MAX_COMMUNIQUE_REF_BYTES, MAX_UNVERIFIED_ASKS_WAITING_PER_POSITION, SENDER_OF_PREFIX,
+    WORLD_AGENT_ANSWER_SCHEMA, WORLD_AGENT_ASK_SCHEMA,
 };
 pub use gateway_connector::{
     verify_connector_descriptor, ConnectorCapabilities, ConnectorConformance,
@@ -196,12 +197,12 @@ pub use gateway_connector_specimen::{
 };
 pub use gateway_connector_wire::StdioWireConnector;
 pub use gateway_conversation_engine::{
-    parse_slash, AgentHostTurnSource, ConversationHarnessProtocol, ConversationTurn,
-    ConversationTurnOutcome, ConversationTurnRequest, ConversationTurnSource, DrainReport,
-    DrainedTurn, EnginePolicy, FixtureScript, FixtureTurnSource, GatewayAskRequest,
-    GatewayAskRoute, GatewayAskRouter, GatewayConversationEngine, GatewayTurnSourceResolver,
-    SlashParse, StreamTiming, TurnProgress, TurnStreamItem, HARNESS_NOT_CONFINED,
-    TOOL_LESS_STARTUP_BOUND, TOOL_LESS_TURN_USED_A_TOOL,
+    parse_slash, pi_provider_credential_variables, pi_selected_provider, AgentHostTurnSource,
+    ConversationHarnessProtocol, ConversationTurn, ConversationTurnOutcome,
+    ConversationTurnRequest, ConversationTurnSource, DrainReport, DrainedTurn, EnginePolicy,
+    FixtureScript, FixtureTurnSource, GatewayAskRequest, GatewayAskRoute, GatewayAskRouter,
+    GatewayConversationEngine, GatewayTurnSourceResolver, SlashParse, StreamTiming, TurnProgress,
+    TurnStreamItem, HARNESS_NOT_CONFINED, TOOL_LESS_STARTUP_BOUND, TOOL_LESS_TURN_USED_A_TOOL,
 };
 pub use gateway_posture::{
     sha256_of_file, CarrierScope, GatewayBuildIdentity, GatewayLifecycle, GatewayListenerReading,

@@ -39,11 +39,12 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use aikit_adapters::connection_process::ModelEnvironment;
+use aikit_adapters::{pi_provider_credential_variables, pi_selected_provider};
 use aikit_adapters::{
     AgentHostTurnSource, CommuniqueDraft, CommuniqueHandling, CommuniqueState,
     ConversationHarnessProtocol, ConversationTurnOutcome, ConversationTurnRequest,
     ConversationTurnSource, GatewayCommand, GatewayResponse, SenderAttribution,
-    ASK_EXPIRES_AFTER_MS, OCCUPANT_GENERATION_ENV, OCCUPANT_POSITION_ENV,
+    OCCUPANT_GENERATION_ENV, OCCUPANT_POSITION_ENV,
 };
 use aikit_core::application_context::world_inhabitation::{disclose_star_knowledge, StarShownPart};
 use aikit_core::credential::SecretValue;
@@ -324,19 +325,20 @@ fn write_record(gateway: &dyn GatewayAccess, key: &str, record: Option<Value>) -
         Ok(other) => Err(unexpected(&other)),
         Err(error) if gateway_code(&error) == "agency_gateway.not_the_person" => Err(three_part(
             "gateway.world_agent_not_the_person",
-            format!(
-                "The gateway refused it: {} This body presents a Position or an occupant generation.",
-                error.message()
-            ),
+            format!("The gateway refused it: {}.", error.message()),
             "Nothing was recorded.",
-            "Do it from the person's own window, which stands at no Position and presents no occupant generation.",
+            "Do it from the person's own window, on the owner's carrier, presenting no Position or occupant generation. This gate refuses an honest body; it is not proof of the person, and a process of the person's own user that hides its Position is not stopped (the machine's trust boundary).",
         )),
         Err(error) => Err(error),
     }
 }
 
-/// The person refuses for themself: a body naming a Position speaks for no
-/// person, so it may not record what a World shows nor elect its harness.
+/// The person's own act is taken only from a connection that presents no
+/// Position or occupant generation (DLW build ruling 2026-11-09, be2d): a
+/// body naming a Position is refused here before anything is asked, as the
+/// gateway refuses a body that presents one. An honest body is refused; a
+/// process of the person's own user that hides its Position is not stopped,
+/// which is the machine's trust boundary.
 fn the_persons_own(from_position: Option<&str>, what: &str) -> Result<()> {
     match from_position {
         None => Ok(()),
@@ -530,6 +532,55 @@ pub fn answer_harness(gateway: &dyn GatewayAccess) -> Result<Option<AnswerHarnes
         .transpose()
 }
 
+/// How the person elects the one harness AIKit holds to no tools.
+const ELECT_EXAMPLE: &str = "aikit gateway answer-harness --protocol pi-rpc --credential-env ANTHROPIC_API_KEY -- pi --mode rpc --provider anthropic --no-session --no-tools --no-extensions --no-skills --no-mcp --no-context-files";
+
+/// Only a harness AIKit holds to no tools before its session opens is
+/// elected or prompted (DLW build ruling 2026-11-09, be2d): pi, by its own
+/// launch flags. An ACP or Prime harness is held to none only by its own
+/// declaration of its tools, and no agent of either protocol here is yet
+/// shown to report them.
+fn electable(protocol: ConversationHarnessProtocol) -> std::result::Result<(), String> {
+    match protocol {
+        ConversationHarnessProtocol::PiRpc => Ok(()),
+        ConversationHarnessProtocol::Acp => Err(
+            "This harness cannot yet be held to no tools: no ACP agent here reports its tools."
+                .into(),
+        ),
+        ConversationHarnessProtocol::PrimeRpc => Err(
+            "This harness cannot yet be held to no tools: no Prime agent here reports its tools."
+                .into(),
+        ),
+    }
+}
+
+/// Why `name` may not be the elected harness's credential variable, if it
+/// may not (DLW build ruling 2026-11-09, be2d): only the variable pi names
+/// for the provider its argv selects, read by pi's own grammar; never any
+/// other key or token, and none of AIKit's, Central's or an occupant's own.
+fn credential_refused(name: &str, argv: &[String]) -> Option<String> {
+    let provider = pi_selected_provider(argv);
+    let named = provider
+        .as_deref()
+        .map(pi_provider_credential_variables)
+        .unwrap_or_default();
+    if lawful_credential_env(name) && named.contains(&name) {
+        return None;
+    }
+    Some(match provider {
+        Some(provider) if !named.is_empty() => format!(
+            "{name} is not the credential variable pi names for the provider this argv selects (--provider {provider} reads {})",
+            named.join(" or ")
+        ),
+        Some(provider) => format!(
+            "pi names no credential variable for the provider {provider}, so {name} is not given to it"
+        ),
+        None => format!(
+            "{name} is given only as the credential variable pi names for the provider its argv selects, and this argv selects none (--provider)"
+        ),
+    })
+}
+
 /// A credential variable an answer harness may be given: a lawful credential
 /// name, and none of AIKit's, Central's or an occupant's own.
 fn lawful_credential_env(name: &str) -> bool {
@@ -571,12 +622,7 @@ pub fn elect_answer_harness(
     }
     let raw = request.protocol.unwrap_or_default();
     let refuse = |code: &'static str, fact: String| {
-        three_part(
-            code,
-            fact,
-            "Nothing was elected.",
-            "aikit gateway answer-harness --protocol pi-rpc --credential-env ANTHROPIC_API_KEY -- pi --mode rpc --no-session --no-tools --no-extensions --no-skills --no-mcp --no-context-files",
-        )
+        three_part(code, fact, "Nothing was elected.", ELECT_EXAMPLE)
     };
     let Some(protocol) = protocol_of(raw).filter(|_| !request.argv.is_empty()) else {
         return Err(refuse(
@@ -584,20 +630,20 @@ pub fn elect_answer_harness(
             format!("A harness is named by its protocol (acp, pi-rpc or prime-rpc; {raw} given) and the argv that launches it."),
         ));
     };
+    if let Err(why) = electable(protocol) {
+        return Err(refuse("gateway.answer_harness_not_confined", why));
+    }
     if let Err(why) = protocol.confines(&request.argv) {
         return Err(refuse(
             "gateway.answer_harness_not_confined",
             format!("AIKit cannot hold this {raw} harness to no tools: {why}."),
         ));
     }
-    if let Some(name) = request
+    if let Some(why) = request
         .credential_env
-        .filter(|name| !lawful_credential_env(name))
+        .and_then(|name| credential_refused(name, &request.argv))
     {
-        return Err(refuse(
-            "gateway.answer_harness_invalid",
-            format!("{name} is not a provider's credential variable this harness may be given (a credential name, none of OI_, CENTRAL_ or AIKIT_)."),
-        ));
+        return Err(refuse("gateway.answer_harness_invalid", format!("{why}.")));
     }
     let harness = AnswerHarness {
         schema: ANSWER_HARNESS_SCHEMA.into(),
@@ -643,7 +689,8 @@ pub fn resolve_parts(
                 .text
                 .as_deref()
                 .is_none_or(|text| plain_words(text, MAX_PART_TEXT_CHARS))
-            && part.star_ref.as_deref().is_none_or(plain_ref);
+            && part.star_ref.as_deref().is_none_or(plain_ref)
+            && part.kind.as_deref().is_none_or(plain_label);
         let made = well_formed
             .then(|| {
                 Some(StarShownPart {
@@ -711,14 +758,20 @@ pub fn resolve_parts(
 
 // ---- the answer turn --------------------------------------------------------------
 
-/// Who asks, as the journal attributed the ask: a verified Position, or the
-/// World the ask names as asking, which is its own claim.
+/// Who asks, as the journal attributed the ask (DLW build ruling 2026-11-09,
+/// be2d): for a verified Position, the World read from that Position itself;
+/// for any other asker, the World the ask names as asking, which is its own
+/// claim and said to be so.
 pub fn asker_of(record: &aikit_adapters::Communique, ask: &WorldAgentAsk) -> String {
     match (record.attribution, &record.from_position_ref) {
-        (SenderAttribution::Verified, Some(position)) => format!(
-            "world {} (sent from Position {position}, whose occupant this gateway verified)",
-            ask.asked_by_world_ref
-        ),
+        (SenderAttribution::Verified, Some(position)) => match world_of_position(position) {
+            Some(world) => format!(
+                "world {world}, read from Position {position}, whose occupant this gateway verified"
+            ),
+            None => format!(
+                "Position {position}, whose occupant this gateway verified; it names no World"
+            ),
+        },
         _ => format!(
             "world {} (as the ask names its asker: its own claim, not verified)",
             ask.asked_by_world_ref
@@ -756,7 +809,8 @@ pub fn answer_prompt(ask: &WorldAgentAsk, parts: &AnswerParts, asker: &str) -> S
         for part in &parts.parts {
             out.push_str(&format!("- {}\n", part.part_ref));
             if let Some(kind) = &part.kind {
-                out.push_str(&format!("  kind: {kind}\n"));
+                out.push_str("  kind:\n");
+                out.push_str(&quoted(kind, "    "));
             }
             if let Some(label) = &part.label {
                 out.push_str(&quoted(label, "  "));
@@ -890,17 +944,33 @@ pub fn take_answer_turn(
             .map(String::as_str)
             .unwrap_or("no argv")
     );
+    electable(protocol)?;
     protocol
         .confines(&harness.argv)
         .map_err(|why| format!("AIKit cannot hold the {name} harness to no tools: {why}"))?;
+    if let Some(why) = harness
+        .credential_env
+        .as_deref()
+        .and_then(|variable| credential_refused(variable, &harness.argv))
+    {
+        return Err(format!(
+            "the {name} harness is not given its credential: {why}"
+        ));
+    }
     let key = key_of(ask_communique);
+    let reference = |raw: String| ResourceRef::parse(&raw).map_err(|error| error.to_string());
+    let binding_ref = reference("gateway-binding/world-agent-answer".into())?;
+    let agent_session_ref = reference(format!("agent-session/world-agent-answer-{key}"))?;
     let root = world_agent_dir(home).join("turns").join(&key);
     let mut environment = ModelEnvironment::isolated(root.join("work.home"));
     if let Some(variable) = &harness.credential_env {
-        let value = std::env::var(variable).map_err(|_| {
-            format!(
+        let value = std::env::var(variable).map_err(|error| match error {
+            std::env::VarError::NotPresent => format!(
                 "the {name} harness's credential {variable} is not set where the answer turn runs"
-            )
+            ),
+            std::env::VarError::NotUnicode(_) => format!(
+                "the {name} harness's credential {variable} is set where the answer turn runs, but not as valid Unicode, so it cannot be given"
+            ),
         })?;
         environment = environment
             .with_credential(
@@ -909,23 +979,25 @@ pub fn take_answer_turn(
             )
             .map_err(|error| error.message().to_owned())?;
     }
+    // Every return from here on goes through `finish`, which removes the
+    // turn's folder (DLW build ruling 2026-11-09, be2d).
+    let finish = |outcome: std::result::Result<String, String>| {
+        let _ = std::fs::remove_dir_all(&root);
+        outcome
+    };
     let _ = std::fs::remove_dir_all(&root);
     let work = root.join("work");
-    std::fs::create_dir_all(&work)
-        .map_err(|error| format!("the turn's folder could not be made: {error}"))?;
+    if let Err(error) = std::fs::create_dir_all(&work) {
+        return finish(Err(format!("the turn's folder could not be made: {error}")));
+    }
     let started = Instant::now();
     let source = AgentHostTurnSource::new(name, protocol, harness.argv.clone(), work)
         .without_tools()
         .with_launch_environment(environment)
         .with_startup_bound(ANSWER_TURN_TIMEOUT);
-    let reference = |raw: String| ResourceRef::parse(&raw).map_err(|error| error.to_string());
-    let finish = |outcome: std::result::Result<String, String>| {
-        let _ = std::fs::remove_dir_all(&root);
-        outcome
-    };
     let turn = match source.prompt(ConversationTurnRequest {
-        binding_ref: reference("gateway-binding/world-agent-answer".into())?,
-        agent_session_ref: reference(format!("agent-session/world-agent-answer-{key}"))?,
+        binding_ref,
+        agent_session_ref,
         prompt,
         in_reply_to_sequence: 0,
     }) {
@@ -1001,7 +1073,10 @@ fn destination(record: &aikit_adapters::Communique) -> Result<Option<String>> {
 }
 
 /// The replies to `ask` from `asked` already sent where an answer goes,
-/// delivered or not (the journal's conversation between the two).
+/// delivered or not (the journal's conversation between the two), that the
+/// journal stored Verified: as the journal and `replies` count an answer, a
+/// reply only claimed from the asked Position is none (DLW build ruling
+/// 2026-11-09, be2d).
 fn answers_given(
     gateway: &dyn GatewayAccess,
     ask: &aikit_adapters::Communique,
@@ -1020,6 +1095,7 @@ fn answers_given(
         .filter(|reply| {
             reply.reply_to.as_deref() == Some(ask.communique_ref.as_str())
                 && reply.from_position_ref.as_deref() == Some(asked)
+                && reply.attribution == SenderAttribution::Verified
         })
         .collect(),
     )
@@ -1046,6 +1122,25 @@ fn close_ask(
         basis: basis.into(),
         at_unix_ms: now,
     })?)
+}
+
+/// The code a turn lock held by another turn is refused with; any other
+/// refusal is the lock's own I/O failing.
+const LOCK_BUSY: &str = "lock.busy";
+
+/// The refusal for a turn lock that could not be taken for an I/O reason
+/// (DLW build ruling 2026-11-09, be2d): named as I/O, never as a turn that
+/// runs.
+fn turn_lock_failed(asked: &str, reference: &str, error: &AikitError) -> AikitError {
+    three_part(
+        "gateway.answer_turn_lock_failed",
+        format!(
+            "The lock that keeps {asked} to one answer turn at a time could not be taken, an I/O error and not another turn: {}. {reference} waits.",
+            error.message()
+        ),
+        "Nothing was sent.",
+        "Repair the gateway's state folder. The gateway's own pass declines the ask when its day has passed, whether or not the lock is repaired.",
+    )
 }
 
 /// The one answer turn at a time for a Position (DLW build ruling
@@ -1099,21 +1194,23 @@ pub fn answer_with(
     let reference = request.communique_ref;
     let answered = resolve_sender(owners, request.from_position)
         .and_then(|sender| answer_as(home, owners, gateway, cwd, reference, &sender, now, turn));
-    // An ask answered or declined needs its claim no longer, and one that did
-    // not start is left for the gateway's next pass. Any other failure keeps
-    // its claim until it goes stale, so the pass does not retry it every tick.
-    if answered.as_ref().map_or_else(
-        |error| {
-            matches!(
-                error.code(),
-                "gateway.answer_turn_busy" | "gateway.answer_waiting"
-            )
-        },
-        |_| true,
-    ) {
+    if releases_claim(answered.as_ref().err().map(AikitError::code)) {
         unclaim(home, reference);
     }
     answered
+}
+
+/// Whether a start gives up its claim, by its error's code (`None` when it
+/// answered or declined). An ask answered or declined needs its claim no
+/// longer, and one that did not start is left for the gateway's next pass.
+/// Any other failure keeps its claim until it goes stale, so the pass does
+/// not retry it every tick; an answer the journal stored unverified is one
+/// (be2d), so the next pass starts it again once the claim goes stale.
+fn releases_claim(error_code: Option<&str>) -> bool {
+    matches!(
+        error_code,
+        None | Some("gateway.answer_turn_busy" | "gateway.answer_waiting")
+    )
 }
 
 /// [`answer_with`] for a sender already resolved.
@@ -1136,7 +1233,7 @@ fn answer_as(
             "gateway.answer_not_an_ask",
             format!("{reference} is not an ask of a World's agent ({WORLD_AGENT_ASK_SCHEMA})."),
             format!(
-                "Reply to it with words: aikit gateway send --reply-to {reference} --body \"...\""
+                "Reply to it with words: aikit gateway send --reply-to '{reference}' --body '...'"
             ),
         ));
     }
@@ -1154,13 +1251,17 @@ fn answer_as(
             format!("Answer it from the body that occupies {asked}, launched with its {OCCUPANT_POSITION_ENV} and {OCCUPANT_GENERATION_ENV}."),
         ));
     }
-    let Ok(_turn) = turn_lock(home, &asked) else {
-        return Err(three_part(
-            "gateway.answer_turn_busy",
-            format!("Another answer turn runs for {asked} now, so {reference} waits for it."),
-            "Nothing was sent.",
-            "It is answered when that turn ends: the gateway's own pass starts it.",
-        ));
+    let _turn = match turn_lock(home, &asked) {
+        Ok(lock) => lock,
+        Err(error) if error.code() == LOCK_BUSY => {
+            return Err(three_part(
+                "gateway.answer_turn_busy",
+                format!("Another answer turn runs for {asked} now, so {reference} waits for it."),
+                "Nothing was sent.",
+                "It is answered when that turn ends: the gateway's own pass starts it.",
+            ))
+        }
+        Err(error) => return Err(turn_lock_failed(&asked, reference, &error)),
     };
     // Under the turn lock, the ask as it stands now.
     let record = expect_record(gateway.call(GatewayCommand::ReadCommunique {
@@ -1212,7 +1313,7 @@ fn answer_as(
         )
     };
     // A day waited: declined, so the asker never waits on it longer.
-    if now >= record.sent_at_unix_ms.saturating_add(ASK_EXPIRES_AFTER_MS) {
+    if record.ask_expired(now) {
         return decline(
             "it waited 24 hours with no answer".into(),
             AnswerParts::default(),
@@ -1245,7 +1346,7 @@ fn answer_as(
                 "gateway.answer_waiting",
                 format!("No harness is elected to answer asks of a World's agent, so {reference} waits; its asker reads \"{WAITING_WORDS}\""),
                 "Nothing was sent.",
-                "Elect one: aikit gateway answer-harness --protocol pi-rpc --credential-env ANTHROPIC_API_KEY -- pi --mode rpc --no-session --no-tools --no-extensions --no-skills --no-mcp --no-context-files",
+                format!("Elect one: {ELECT_EXAMPLE}"),
             ))
         }
         Err(error) => {
@@ -1349,6 +1450,7 @@ fn send_reply(
                 owner: super::owner_address::OwnerAsk::default(),
                 handling: CommuniqueHandling::default(),
             },
+            Some(sender),
         ),
         None => {
             let (local_workcell, workcell_basis) = local_workcell(owners, cwd);
@@ -1390,7 +1492,7 @@ fn send_reply(
             )
         }
     };
-    sent.map_err(|error| {
+    let sent = sent.map_err(|error| {
         if gateway_code(&error) == "agency_gateway.ask_answered_already" {
             refused(
                 "gateway.answer_already_given",
@@ -1403,7 +1505,42 @@ fn send_reply(
         } else {
             error
         }
-    })
+    })?;
+    stored_verified(gateway, record, &sent)?;
+    Ok(sent)
+}
+
+/// The answer as the journal stored it must be Verified to count (DLW build
+/// ruling 2026-11-09, be2d). Read back; one stored otherwise is said in
+/// words, and the start keeps its claim, so the gateway's next pass starts
+/// it again once the claim goes stale, or declines it when its day has
+/// passed.
+fn stored_verified(
+    gateway: &dyn GatewayAccess,
+    record: &aikit_adapters::Communique,
+    sent: &Value,
+) -> Result<()> {
+    let stored_ref = sent["communique"]["communique_ref"]
+        .as_str()
+        .unwrap_or_default();
+    let stored = expect_record(gateway.call(GatewayCommand::ReadCommunique {
+        communique_ref: stored_ref.into(),
+    })?)?;
+    if stored.attribution == SenderAttribution::Verified {
+        return Ok(());
+    }
+    Err(three_part(
+        "gateway.answer_not_verified",
+        format!(
+            "The answer to {} was stored as {}, {}, not Verified: {}.",
+            record.communique_ref,
+            stored.communique_ref,
+            stored.attribution.as_str(),
+            stored.attribution_basis
+        ),
+        "It does not count as the ask's answer, and the ask still waits.",
+        "The gateway's own pass starts it again once this start's claim goes stale, or declines it when its day has passed.",
+    ))
 }
 
 /// Whether a reply to `record` would answer an ask (only `answer` does).
@@ -1483,8 +1620,12 @@ fn current_occupant(owners: &dyn ContactOwners, position: &str) -> Option<String
 /// - an ask whose Position has a current occupant starts `aikit gateway
 ///   answer` as that occupant, one Position's turn at a time, once per ask
 ///   (with no harness elected it waits, until its day has passed);
-/// - an ask that waited 24 hours with no occupant to answer it is closed,
-///   declined.
+/// - an ask that waited 24 hours, on this gateway's clock, with no occupant
+///   to answer it, or whose turn lock fails for an I/O reason, is closed,
+///   declined;
+/// - each Position's occupancy is read once a pass (be2d), and what a pass
+///   left of an ask no longer waiting (its turn folder, its claim) is
+///   removed.
 pub fn answer_pass(
     home: &AikitHome,
     owners: &dyn ContactOwners,
@@ -1501,11 +1642,14 @@ pub fn answer_pass(
     };
     let elected = answer_harness(gateway).is_ok_and(|harness| harness.is_some());
     let (mut started, mut closed, mut waiting) = (Vec::new(), Vec::new(), Vec::new());
+    let mut errors: Vec<Value> = Vec::new();
     let mut turning: Vec<String> = Vec::new();
+    let mut occupants: std::collections::HashMap<String, Option<String>> =
+        std::collections::HashMap::new();
     for ask in asks {
         let reference = ask.communique_ref.clone();
         let asked = ask.to_position_ref.clone();
-        let expired = now >= ask.sent_at_unix_ms.saturating_add(ASK_EXPIRES_AFTER_MS);
+        let expired = ask.ask_expired(now);
         if ask.attribution == SenderAttribution::Claimed {
             let basis = "declined: its asker named a Position this gateway did not verify, so no answer may go there";
             if close_ask(gateway, &ask, basis, now).is_ok() {
@@ -1513,17 +1657,46 @@ pub fn answer_pass(
             }
             continue;
         }
-        match current_occupant(owners, &asked) {
+        let occupant = occupants
+            .entry(asked.clone())
+            .or_insert_with(|| current_occupant(owners, &asked))
+            .clone();
+        match occupant {
             Some(generation) if elected || expired => {
-                let busy = turning.contains(&asked) || turn_lock(home, &asked).is_err();
-                if !busy
-                    && claim(home, &reference)
-                    && spawn(&reference, &asked, &generation).is_ok()
-                {
-                    turning.push(asked);
-                    started.push(reference);
+                let lock = if turning.contains(&asked) {
+                    Err(None)
                 } else {
-                    waiting.push(reference);
+                    match turn_lock(home, &asked) {
+                        Ok(_) => Ok(()),
+                        Err(error) if error.code() == LOCK_BUSY => Err(None),
+                        Err(error) => Err(Some(error)),
+                    }
+                };
+                match lock {
+                    Ok(())
+                        if claim(home, &reference)
+                            && spawn(&reference, &asked, &generation).is_ok() =>
+                    {
+                        turning.push(asked);
+                        started.push(reference);
+                    }
+                    Err(Some(error)) if expired => {
+                        let basis = format!(
+                            "declined: it waited 24 hours, and the lock for its answer turn could not be taken (an I/O error): {}",
+                            error.message()
+                        );
+                        if close_ask(gateway, &ask, &basis, now).is_ok() {
+                            closed.push(reference);
+                        }
+                    }
+                    Err(Some(error)) => {
+                        errors.push(json!({
+                            "communique_ref": reference,
+                            "error": turn_lock_failed(&asked, &reference, &error).to_string(),
+                        }));
+                        waiting.push(reference);
+                    }
+                    _ => waiting.push(reference),
                 }
             }
             None if expired => {
@@ -1536,7 +1709,48 @@ pub fn answer_pass(
             _ => waiting.push(reference),
         }
     }
-    json!({"started": started, "closed": closed, "waiting": waiting})
+    let still: Vec<String> = started
+        .iter()
+        .chain(waiting.iter())
+        .map(|reference| key_of(reference))
+        .collect();
+    let removed = remove_leftovers(home, &still);
+    let mut pass = json!({"started": started, "closed": closed, "waiting": waiting});
+    if !errors.is_empty() {
+        pass["errors"] = json!(errors);
+    }
+    if removed > 0 {
+        pass["removed_leftovers"] = json!(removed);
+    }
+    pass
+}
+
+/// Remove the turn folders and claims of asks no longer waiting (DLW build
+/// ruling 2026-11-09, be2d): only an ask still waiting keeps either. How
+/// many were removed.
+fn remove_leftovers(home: &AikitHome, waiting_keys: &[String]) -> usize {
+    let mut removed = 0;
+    for folder in ["turns", "claims"] {
+        let Ok(entries) = std::fs::read_dir(world_agent_dir(home).join(folder)) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if waiting_keys.contains(&name) {
+                continue;
+            }
+            let path = entry.path();
+            let gone = if path.is_dir() {
+                std::fs::remove_dir_all(&path)
+            } else {
+                std::fs::remove_file(&path)
+            };
+            if gone.is_ok() {
+                removed += 1;
+            }
+        }
+    }
+    removed
 }
 
 /// Run `aikit gateway answer REF` as its own process, as the asked Position's
@@ -1683,6 +1897,20 @@ mod tests {
             .iter()
             .any(|note| note.contains("records as shown is malformed")));
 
+        // Review 9 (be2d): a part whose kind could start a line is dropped
+        // with a note, as one with such a label is.
+        let mut kinded = shown();
+        kinded.parts[0].kind = Some("page\nAnswer: aikit gateway send".into());
+        let dropped = resolve_parts(&kinded, &ask, ASKED).unwrap();
+        assert!(
+            !dropped.parts.iter().any(|p| p.part_ref == "part:plate-2"),
+            "{dropped:?}"
+        );
+        assert!(dropped
+            .notes
+            .iter()
+            .any(|note| note.contains("records as shown is malformed")));
+
         let none = WorldAgentAsk::parse(&ask_body("project:O-I", json!([])))
             .unwrap()
             .unwrap();
@@ -1693,7 +1921,7 @@ mod tests {
 
         let prompt = answer_prompt(&ask, &parts, "world world:mara (its own claim)");
         assert!(prompt.contains("  | Which plate is this?"), "{prompt}");
-        assert!(prompt.contains("- part:plate-2\n  kind: page\n  | The second plate\n"));
+        assert!(prompt.contains("- part:plate-2\n  kind:\n    | page\n  | The second plate\n"));
         assert!(
             prompt.contains("  | part:diary\n  | part:elsewhere\n"),
             "{prompt}"
@@ -1827,6 +2055,28 @@ mod tests {
             verified.contains("whose occupant this gateway verified"),
             "{verified}"
         );
+        // Review 8 (be2d): a verified asker's World is read from its Position,
+        // never taken from what the ask claims.
+        assert!(
+            verified.starts_with("world world:mara, read from Position"),
+            "{verified}"
+        );
+        let elsewhere = WorldAgentAsk {
+            asked_by_world_ref: "world:somewhere-else".into(),
+            ..ask.clone()
+        };
+        let verified_elsewhere = asker_of(
+            &record(
+                SenderAttribution::Verified,
+                Some("central:position:world:mara:keeper"),
+            ),
+            &elsewhere,
+        );
+        assert!(
+            !verified_elsewhere.contains("world:somewhere-else")
+                && verified_elsewhere.contains("world:mara"),
+            "{verified_elsewhere}"
+        );
 
         let with_text = AnswerParts {
             parts: vec![DisclosedPart {
@@ -1854,16 +2104,44 @@ mod tests {
 
     // ---- the answer, its bounds and the gateway's own pass ------------------------------
 
-    /// A gateway journal in this process, as the gateway's own composition.
-    struct Journal(std::sync::Mutex<aikit_adapters::AgencyGateway>);
+    /// A gateway journal in this process, as the gateway's own composition,
+    /// on a logical clock: an ask is taken at the time it is sent, and what
+    /// follows at the latest such time.
+    struct Journal(
+        std::sync::Mutex<aikit_adapters::AgencyGateway>,
+        std::sync::Arc<std::sync::atomic::AtomicU64>,
+    );
 
     impl Journal {
         fn new() -> Self {
-            Self(std::sync::Mutex::new(aikit_adapters::AgencyGateway::new(
-                ResourceRef::parse("agency-gateway/test").unwrap(),
-            )))
+            let now = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+            let clock = std::sync::Arc::clone(&now);
+            Self(
+                std::sync::Mutex::new(
+                    aikit_adapters::AgencyGateway::new(
+                        ResourceRef::parse("agency-gateway/test").unwrap(),
+                    )
+                    .with_clock(move || clock.load(std::sync::atomic::Ordering::SeqCst)),
+                ),
+                now,
+            )
+        }
+        fn at(&self, now: u64) {
+            self.1.store(now, std::sync::atomic::Ordering::SeqCst);
         }
         fn ask(&self, reference: &str, to: &str, from: Option<&str>, sent_at: u64) -> String {
+            self.ask_taken_at(reference, to, from, sent_at, sent_at)
+        }
+        /// An ask its sender stamped `sent_at`, taken here at `taken_at`.
+        fn ask_taken_at(
+            &self,
+            reference: &str,
+            to: &str,
+            from: Option<&str>,
+            sent_at: u64,
+            taken_at: u64,
+        ) -> String {
+            self.at(taken_at);
             let body = ask_body("project:O-I", json!([]))
                 .replace("ask:mara-1", &format!("ask:{reference}"))
                 .replace(
@@ -1887,6 +2165,36 @@ mod tests {
                 body,
                 handling: CommuniqueHandling::default(),
                 sent_at_unix_ms: sent_at,
+                state: CommuniqueState::Pending,
+                state_basis: "test".into(),
+                reply_to: None,
+                forward_to_workcell_ref: None,
+                routing: None,
+            };
+            self.call(GatewayCommand::SendCommunique {
+                draft: Box::new(draft),
+            })
+            .unwrap();
+            format!("aikit:communique:{reference}")
+        }
+        /// An ask from a Position whose occupant was verified.
+        fn ask_verified(&self, reference: &str, to: &str, from: &str) -> String {
+            self.at(10);
+            let body = ask_body("project:O-I", json!([]))
+                .replace("ask:mara-1", &format!("ask:{reference}"));
+            let draft = CommuniqueDraft {
+                communique_ref: format!("aikit:communique:{reference}"),
+                from_position_ref: Some(from.into()),
+                from_generation_ref: Some("gen-asker".into()),
+                attribution: SenderAttribution::Verified,
+                attribution_basis: "the occupancy fixture verified it".into(),
+                to_position_ref: to.into(),
+                to_workcell_ref: None,
+                to_instance: None,
+                instance_hold: None,
+                body,
+                handling: CommuniqueHandling::default(),
+                sent_at_unix_ms: 10,
                 state: CommuniqueState::Pending,
                 state_basis: "test".into(),
                 reply_to: None,
@@ -1923,8 +2231,18 @@ mod tests {
         }
     }
 
-    /// Who occupies which Position, as a Workcell's Actuation reads it.
-    struct Occupancy(Vec<(&'static str, &'static str)>);
+    /// Who occupies which Position, as a Workcell's Actuation reads it, and
+    /// how many occupancy reads it was asked.
+    struct Occupancy(
+        Vec<(&'static str, &'static str)>,
+        std::sync::atomic::AtomicUsize,
+    );
+
+    impl Occupancy {
+        fn new(occupied: Vec<(&'static str, &'static str)>) -> Self {
+            Self(occupied, std::sync::atomic::AtomicUsize::new(0))
+        }
+    }
 
     impl ContactOwners for Occupancy {
         fn position_list(
@@ -1940,12 +2258,14 @@ mod tests {
         }
         fn position_read(
             &self,
-            _: &str,
+            position: &str,
         ) -> std::result::Result<
             crate::gateway_owners::PositionLookup,
             crate::gateway_owners::OwnerUnavailable,
         > {
-            Err(none())
+            Ok(crate::gateway_owners::PositionLookup::Found(
+                json!({"ref": position}),
+            ))
         }
         fn world_here(
             &self,
@@ -1962,6 +2282,7 @@ mod tests {
             &self,
             position: &str,
         ) -> std::result::Result<Value, crate::gateway_owners::OwnerUnavailable> {
+            self.1.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             Ok(match self.0.iter().find(|(at, _)| *at == position) {
                 Some((_, generation)) => {
                     json!({"state": "occupied", "current": {"generation_ref": generation}})
@@ -2007,7 +2328,7 @@ mod tests {
 
     const VACANT: &str = "central:position:project:O-I:vacant";
     const ELSEWHERE: &str = "central:position:project:O-I:keeper";
-    const DAY_MS: u64 = ASK_EXPIRES_AFTER_MS;
+    const DAY_MS: u64 = aikit_adapters::ASK_EXPIRES_AFTER_MS;
 
     fn verified(position: &str) -> SenderResolution {
         SenderResolution {
@@ -2041,7 +2362,7 @@ mod tests {
         );
         let stale = journal.ask("stale", VACANT, None, 13);
         let fresh = journal.ask("fresh", VACANT, None, 13 + DAY_MS);
-        let owners = Occupancy(vec![(ASKED, "gen-scribe"), (ELSEWHERE, "gen-keeper")]);
+        let owners = Occupancy::new(vec![(ASKED, "gen-scribe"), (ELSEWHERE, "gen-keeper")]);
         let spawned = std::cell::RefCell::new(Vec::new());
         let spawn = |reference: &str, position: &str, generation: &str| {
             spawned.borrow_mut().push((
@@ -2101,7 +2422,7 @@ mod tests {
         let home = AikitHome::at(dir.path());
         let journal = Journal::new();
         journal.elect();
-        let owners = Occupancy(vec![(ASKED, "gen-scribe")]);
+        let owners = Occupancy::new(vec![(ASKED, "gen-scribe")]);
         let cwd = dir.path();
         let said = |_: &AnswerHarness, _: String, _: &str| Ok(ANSWERED.to_owned());
 
@@ -2274,12 +2595,400 @@ mod tests {
         }
         let error = elect("acp", &["agent"], None, Some(ASKED)).unwrap_err();
         assert_eq!(error.code(), "gateway.world_agent_not_the_person");
+
+        // Review 6 (be2d): no ACP or Prime harness is elected until one of
+        // that protocol is shown to report its tools; only pi is.
+        for (protocol, which) in [("acp", "ACP"), ("prime-rpc", "Prime")] {
+            let error = elect(protocol, &["agent"], None, None).unwrap_err();
+            assert_eq!(error.code(), "gateway.answer_harness_not_confined");
+            assert!(
+                error.to_string().contains(&format!(
+                    "This harness cannot yet be held to no tools: no {which} agent here reports its tools."
+                )),
+                "{error}"
+            );
+            // One elected before this rule is not prompted either.
+            let stored = AnswerHarness {
+                schema: ANSWER_HARNESS_SCHEMA.into(),
+                protocol: protocol.into(),
+                argv: vec!["agent".into()],
+                credential_env: None,
+            };
+            let why =
+                take_answer_turn(&home, &stored, "aikit:communique:x", "p".into()).unwrap_err();
+            assert!(why.contains(&format!("no {which} agent")), "{why}");
+        }
+        // Review 5 (be2d): pi's own grammar; a confining flag read as another
+        // flag's value is refused in words.
+        let error = elect(
+            "pi-rpc",
+            &[
+                "pi",
+                "--mode",
+                "rpc",
+                "--system-prompt",
+                "--no-tools",
+                "-ne",
+                "-ns",
+                "--no-mcp",
+                "-nc",
+            ],
+            None,
+            None,
+        )
+        .unwrap_err();
+        assert_eq!(error.code(), "gateway.answer_harness_not_confined");
+        assert!(
+            error
+                .to_string()
+                .contains("pi reads --no-tools as the value of --system-prompt"),
+            "{error}"
+        );
+        // Only the variable pi names for the provider the argv selects.
+        let anthropic: Vec<&str> = confined
+            .iter()
+            .copied()
+            .chain(["--provider", "anthropic"])
+            .collect();
+        let openai: Vec<&str> = confined
+            .iter()
+            .copied()
+            .chain(["--provider", "openai"])
+            .collect();
+        for (argv, credential, why) in [
+            (
+                &anthropic,
+                "GITHUB_TOKEN",
+                "--provider anthropic reads ANTHROPIC_OAUTH_TOKEN or ANTHROPIC_API_KEY",
+            ),
+            (&anthropic, "AWS_SECRET_ACCESS_KEY", "--provider anthropic"),
+            (
+                &openai,
+                "ANTHROPIC_API_KEY",
+                "--provider openai reads OPENAI_API_KEY",
+            ),
+            (
+                &confined.to_vec(),
+                "ANTHROPIC_API_KEY",
+                "this argv selects none (--provider)",
+            ),
+        ] {
+            let error = elect("pi-rpc", argv, Some(credential), None).unwrap_err();
+            assert_eq!(
+                error.code(),
+                "gateway.answer_harness_invalid",
+                "{credential}"
+            );
+            assert!(error.to_string().contains(why), "{credential}: {error}");
+        }
         assert!(
             answer_harness(&journal).unwrap().is_none(),
             "nothing refused was elected"
         );
-        elect("pi-rpc", &confined, Some("ANTHROPIC_API_KEY"), None).unwrap();
+        elect("pi-rpc", &anthropic, Some("ANTHROPIC_API_KEY"), None).unwrap();
         let harness = answer_harness(&journal).unwrap().unwrap();
         assert_eq!(harness.credential_env.as_deref(), Some("ANTHROPIC_API_KEY"));
+    }
+
+    /// A gateway whose carrier does not verify the answering body: every reply
+    /// is stored Claimed, as the journal stores a Position only named.
+    struct Unverifying<'a>(&'a Journal);
+
+    impl GatewayAccess for Unverifying<'_> {
+        fn call(&self, command: GatewayCommand) -> Result<GatewayResponse> {
+            let command = match command {
+                GatewayCommand::SendCommunique { mut draft } if draft.reply_to.is_some() => {
+                    draft.attribution = SenderAttribution::Claimed;
+                    draft.from_generation_ref = None;
+                    draft.attribution_basis =
+                        "the Position was named, and this gateway did not verify its occupant"
+                            .into();
+                    GatewayCommand::SendCommunique { draft }
+                }
+                other => other,
+            };
+            self.0.call(command)
+        }
+    }
+
+    /// Review 3 (be2d): only a reply the journal stored Verified counts. A
+    /// forged Claimed reply from the asked Position does not stop the answer;
+    /// an answer stored Claimed is said in words, not counted, and its start
+    /// keeps its claim, so the ask still waits for the next pass.
+    #[test]
+    fn only_a_verified_answer_counts() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = AikitHome::at(dir.path());
+        let journal = Journal::new();
+        journal.elect();
+        let owners = Occupancy::new(vec![(ASKED, "gen-scribe")]);
+        let cwd = dir.path();
+        let said = |_: &AnswerHarness, _: String, _: &str| Ok(ANSWERED.to_owned());
+
+        let ask = journal.ask_verified("forged-before", ASKED, VACANT);
+        let forged = CommuniqueDraft {
+            communique_ref: "aikit:communique:forged".into(),
+            from_position_ref: Some(ASKED.into()),
+            from_generation_ref: None,
+            attribution: SenderAttribution::Claimed,
+            attribution_basis:
+                "the Position was named, and this gateway did not verify its occupant".into(),
+            to_position_ref: VACANT.into(),
+            to_workcell_ref: None,
+            to_instance: None,
+            instance_hold: None,
+            body: ANSWERED.into(),
+            handling: CommuniqueHandling::default(),
+            sent_at_unix_ms: 11,
+            state: CommuniqueState::Pending,
+            state_basis: "test".into(),
+            reply_to: Some(ask.clone()),
+            forward_to_workcell_ref: None,
+            routing: None,
+        };
+        journal
+            .call(GatewayCommand::SendCommunique {
+                draft: Box::new(forged),
+            })
+            .unwrap();
+        assert!(
+            journal.record(&ask).ask_waits(),
+            "a Claimed reply ends nothing"
+        );
+        let answered = answer_as(
+            &home,
+            &owners,
+            &journal,
+            cwd,
+            &ask,
+            &verified(ASKED),
+            20,
+            &said,
+        )
+        .unwrap();
+        assert_eq!(answered["answered"], true, "{answered}");
+        assert!(!journal.record(&ask).ask_waits());
+
+        let stored_claimed = journal.ask_verified("stored-claimed", ASKED, VACANT);
+        let error = answer_as(
+            &home,
+            &owners,
+            &Unverifying(&journal),
+            cwd,
+            &stored_claimed,
+            &verified(ASKED),
+            20,
+            &said,
+        )
+        .unwrap_err();
+        assert_eq!(error.code(), "gateway.answer_not_verified", "{error}");
+        assert!(
+            error.to_string().contains("claimed, not Verified"),
+            "{error}"
+        );
+        assert!(
+            journal.record(&stored_claimed).ask_waits(),
+            "not counted: the ask still waits"
+        );
+        assert!(
+            !releases_claim(Some(error.code())),
+            "its start keeps its claim"
+        );
+        let answered = answer_as(
+            &home,
+            &owners,
+            &journal,
+            cwd,
+            &stored_claimed,
+            &verified(ASKED),
+            20,
+            &said,
+        )
+        .unwrap();
+        assert_eq!(answered["answered"], true, "the next start answers it");
+    }
+
+    /// Review 10 (be2d): a turn lock that fails for an I/O reason is named as
+    /// I/O, never as a turn that runs; and the day still ends the ask.
+    #[test]
+    fn a_turn_lock_that_fails_is_named_as_io_and_the_day_still_ends_the_ask() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = AikitHome::at(dir.path());
+        std::fs::create_dir_all(home.state()).unwrap();
+        std::fs::write(home.locks(), "not a folder").unwrap();
+        let journal = Journal::new();
+        journal.elect();
+        let owners = Occupancy::new(vec![(ASKED, "gen-scribe")]);
+        let said = |_: &AnswerHarness, _: String, _: &str| Ok(ANSWERED.to_owned());
+        let ask = journal.ask("locked", ASKED, None, 10);
+        let error = answer_as(
+            &home,
+            &owners,
+            &journal,
+            dir.path(),
+            &ask,
+            &verified(ASKED),
+            20,
+            &said,
+        )
+        .unwrap_err();
+        assert_eq!(error.code(), "gateway.answer_turn_lock_failed", "{error}");
+        assert!(
+            error
+                .to_string()
+                .contains("an I/O error and not another turn"),
+            "{error}"
+        );
+
+        let spawn = |_: &str, _: &str, _: &str| Ok(());
+        let pass = answer_pass(&home, &owners, &journal, 20, &spawn);
+        assert_eq!(pass["started"], json!([]), "{pass}");
+        assert_eq!(pass["waiting"], json!([ask.clone()]), "{pass}");
+        assert!(
+            pass["errors"][0]["error"]
+                .as_str()
+                .unwrap()
+                .contains("an I/O error"),
+            "{pass}"
+        );
+        let pass = answer_pass(&home, &owners, &journal, 10 + DAY_MS, &spawn);
+        assert_eq!(pass["closed"], json!([ask.clone()]), "{pass}");
+        let record = journal.record(&ask);
+        assert!(!record.ask_waits());
+        assert!(
+            record
+                .transitions
+                .last()
+                .unwrap()
+                .basis
+                .contains("could not be taken"),
+            "{:?}",
+            record.transitions
+        );
+    }
+
+    /// Review 10 (be2d): a credential variable that is set but not valid
+    /// Unicode is named so, not as unset.
+    #[test]
+    fn a_credential_that_is_not_unicode_is_named_so() {
+        use std::os::unix::ffi::OsStrExt;
+        let dir = tempfile::tempdir().unwrap();
+        let home = AikitHome::at(dir.path());
+        // A variable no other test reads, for a provider pi names it for.
+        let variable = "XIAOMI_TOKEN_PLAN_SGP_API_KEY";
+        std::env::set_var(variable, std::ffi::OsStr::from_bytes(b"\xff\xfe"));
+        let harness = AnswerHarness {
+            schema: ANSWER_HARNESS_SCHEMA.into(),
+            protocol: "pi-rpc".into(),
+            argv: [
+                "pi",
+                "--mode",
+                "rpc",
+                "--provider",
+                "xiaomi-token-plan-sgp",
+                "-nt",
+                "-ne",
+                "-ns",
+                "--no-mcp",
+                "-nc",
+            ]
+            .map(String::from)
+            .to_vec(),
+            credential_env: Some(variable.into()),
+        };
+        let why = take_answer_turn(&home, &harness, "aikit:communique:u", "p".into()).unwrap_err();
+        std::env::remove_var(variable);
+        assert!(why.contains("not as valid Unicode"), "{why}");
+        assert!(!why.contains("is not set"), "{why}");
+        assert!(
+            !world_agent_dir(&home).join("turns").exists(),
+            "nothing was made for a turn that never started"
+        );
+    }
+
+    /// Review 11 and 12 (be2d): a pass reads each Position's occupancy once,
+    /// however many asks wait there, and removes the turn folders and claims
+    /// of asks no longer waiting, keeping those of asks that wait.
+    #[test]
+    fn a_pass_reads_each_occupancy_once_and_leaves_nothing_of_an_ended_ask() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = AikitHome::at(dir.path());
+        let journal = Journal::new();
+        let owners = Occupancy::new(vec![(ASKED, "gen-scribe")]);
+        let waiting: Vec<String> = (0..3)
+            .map(|i| journal.ask(&format!("w{i}"), ASKED, None, 10 + i))
+            .collect();
+        let ended = journal.ask("ended", VACANT, None, 10);
+        close_ask(&journal, &journal.record(&ended), "declined: test", 15).unwrap();
+        for reference in waiting
+            .iter()
+            .chain([&ended, &"aikit:communique:gone".to_owned()])
+        {
+            assert!(claim(&home, reference));
+            std::fs::create_dir_all(
+                world_agent_dir(&home)
+                    .join("turns")
+                    .join(key_of(reference))
+                    .join("work"),
+            )
+            .unwrap();
+        }
+        let spawn = |_: &str, _: &str, _: &str| Ok(());
+        let pass = answer_pass(&home, &owners, &journal, 20, &spawn);
+        assert_eq!(
+            owners.1.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "one occupancy read for {ASKED}: {pass}"
+        );
+        assert_eq!(pass["removed_leftovers"], 4, "{pass}");
+        for reference in &waiting {
+            assert!(claim_path(&home, reference).exists(), "{reference}");
+            assert!(world_agent_dir(&home)
+                .join("turns")
+                .join(key_of(reference))
+                .exists());
+        }
+        for reference in [ended.as_str(), "aikit:communique:gone"] {
+            assert!(!claim_path(&home, reference).exists(), "{reference}");
+            assert!(!world_agent_dir(&home)
+                .join("turns")
+                .join(key_of(reference))
+                .exists());
+        }
+    }
+
+    /// Review 2 (be2d): a sender's stamp is never arithmetic. An ask stamped at
+    /// the end of time is taken, bounded and closed on this gateway's own
+    /// clock, and nothing under the journal's lock panics.
+    #[test]
+    fn an_ask_stamped_at_the_end_of_time_never_panics_the_journal() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = AikitHome::at(dir.path());
+        let journal = Journal::new();
+        let owners = Occupancy::new(vec![]);
+        // Stamped at the end of time and taken at 10: the stamp is never read.
+        let stamped = journal.ask_taken_at("stamped", VACANT, None, u64::MAX, 10);
+        // Taken at the end of this gateway's own clock: its day saturates.
+        let late = journal.ask_taken_at("late", VACANT, None, u64::MAX, u64::MAX - 1);
+        let spawn = |_: &str, _: &str, _: &str| Ok(());
+        let pass = answer_pass(&home, &owners, &journal, 20, &spawn);
+        assert_eq!(
+            pass["waiting"],
+            json!([stamped.clone(), late.clone()]),
+            "{pass}"
+        );
+        let pass = answer_pass(&home, &owners, &journal, 10 + DAY_MS, &spawn);
+        assert_eq!(
+            pass["closed"],
+            json!([stamped.clone()]),
+            "a day after it was taken: {pass}"
+        );
+        assert_eq!(pass["waiting"], json!([late.clone()]), "{pass}");
+        assert!(!journal.0.is_poisoned());
+        assert_eq!(
+            journal.record(&stamped).sent_at_unix_ms,
+            u64::MAX,
+            "kept for display"
+        );
     }
 }

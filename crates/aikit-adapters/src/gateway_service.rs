@@ -576,10 +576,14 @@ pub trait GatewayOccupancyReader: Send + Sync + 'static {
     /// asked of the occupancy owner at that moment: the basis when it is, why
     /// not when it is not or could not be read. The journal attributes a
     /// sender verified only on this (DLW build ruling 2026-11-09).
+    /// `origin_gateway_ref` is the gateway a relayed record names as its
+    /// origin, the only other gateway whose Workcell may vouch for it (be2d);
+    /// `None` for a body that speaks here.
     fn verify(
         &self,
         _position_ref: &str,
         _generation_ref: &str,
+        _origin_gateway_ref: Option<&str>,
     ) -> std::result::Result<String, String> {
         Err("this gateway's occupancy owner verifies no occupant".into())
     }
@@ -612,32 +616,43 @@ fn connection_of(
     occupancy: Option<&dyn GatewayOccupancyReader>,
 ) -> GatewayConnection {
     let plain = |raw: &str| raw.len() <= 512 && !raw.chars().any(char::is_control);
-    let pair = match command {
+    let (pair, origin) = match command {
         // The Position a draft speaks from, with the generation the body
         // itself presents: a generation named only in the draft proves nothing.
-        GatewayCommand::SendCommunique { draft } => draft
-            .from_position_ref
-            .clone()
-            .or_else(|| presented.position_ref.clone())
-            .zip(presented.generation_ref.clone()),
-        GatewayCommand::CloseAsk { .. } => presented
-            .position_ref
-            .clone()
-            .zip(presented.generation_ref.clone()),
+        GatewayCommand::SendCommunique { draft } => (
+            draft
+                .from_position_ref
+                .clone()
+                .or_else(|| presented.position_ref.clone())
+                .zip(presented.generation_ref.clone()),
+            None,
+        ),
+        GatewayCommand::CloseAsk { .. } => (
+            presented
+                .position_ref
+                .clone()
+                .zip(presented.generation_ref.clone()),
+            None,
+        ),
         GatewayCommand::IngestCommunique { communique, .. }
             if communique.attribution == SenderAttribution::Verified =>
         {
-            communique
-                .from_position_ref
-                .clone()
-                .zip(communique.from_generation_ref.clone())
+            (
+                communique
+                    .from_position_ref
+                    .clone()
+                    .zip(communique.from_generation_ref.clone()),
+                Some(communique.origin_gateway_ref.as_str()),
+            )
         }
-        _ => None,
+        _ => (None, None),
     };
     let verified = pair
         .filter(|(position, generation)| plain(position) && plain(generation))
         .and_then(|(position_ref, generation_ref)| {
-            let basis = occupancy?.verify(&position_ref, &generation_ref).ok()?;
+            let basis = occupancy?
+                .verify(&position_ref, &generation_ref, origin)
+                .ok()?;
             Some(VerifiedOccupant {
                 position_ref,
                 generation_ref,
@@ -2600,7 +2615,12 @@ mod tests {
         fn read(&self, _: &str, _: Option<&str>) -> GatewayOccupancyReading {
             unimplemented!("only verify is asked here")
         }
-        fn verify(&self, position: &str, generation: &str) -> std::result::Result<String, String> {
+        fn verify(
+            &self,
+            position: &str,
+            generation: &str,
+            _: Option<&str>,
+        ) -> std::result::Result<String, String> {
             if (position, generation) == (self.0, self.1) {
                 Ok(format!(
                     "{generation} is the current occupant of {position}"
@@ -2683,6 +2703,12 @@ mod tests {
                 "{reference}"
             );
             assert_ne!(record.attribution_basis, "I say so");
+            // Review 13 (be2d): a generation this gateway did not verify is
+            // no part of a Claimed record.
+            assert_eq!(
+                record.from_generation_ref, None,
+                "a Claimed draft keeps no generation ({reference})"
+            );
         }
         let answer = over_carrier(
             &gateway,
@@ -2712,13 +2738,15 @@ mod tests {
         assert_eq!(stored("relayed").attribution, SenderAttribution::Claimed);
     }
 
-    /// Review 5: recording what a World's agent answers by is the person's
-    /// own act, taken only from the person's own connection: the owner's
-    /// carrier, presenting no Position and no generation. A Position body
-    /// that unsets OI_POSITION_REF still presents its generation, and is
-    /// refused; so is any peer.
+    /// Review 5 (be2d): recording what a World's agent answers by is the
+    /// person's own act, taken only from a connection on the owner's carrier
+    /// that presents no Position or occupant generation. An honest body is
+    /// refused: one that unsets OI_POSITION_REF still presents its
+    /// generation. So is any peer. Each refusal names its own cause. A
+    /// connection presenting nothing is taken (the same-user boundary,
+    /// pinned in `tests/gateway_contact.rs`).
     #[test]
-    fn the_persons_record_is_taken_only_from_the_persons_own_connection() {
+    fn the_persons_record_is_taken_only_from_a_connection_presenting_no_position_or_generation() {
         use crate::gateway_posture::CarrierScope;
         let gateway = Arc::new(Mutex::new(gateway()));
         let record = serde_json::json!({"type": "set-world-agent-record", "key": "answer-harness",
@@ -2742,6 +2770,14 @@ mod tests {
                 answer["error"]["code"], "agency_gateway.not_the_person",
                 "{what}"
             );
+            let why = answer["error"]["message"].as_str().unwrap_or_default();
+            let cause = match what {
+                "a peer" => "it came over a peer's carrier".to_owned(),
+                "env -u OI_POSITION_REF" => "presents occupant generation gen-scribe".to_owned(),
+                _ => format!("presents Position {ASKED} and occupant generation gen-scribe"),
+            };
+            assert!(why.contains(&cause), "{what}: {answer}");
+            assert!(!why.contains("authenticat"), "{what}: {answer}");
         }
         let read = serde_json::json!({"type": "read-world-agent-record", "key": "answer-harness"});
         let answer = over_carrier(&gateway, read.clone(), Value::Null, CarrierScope::Owner);

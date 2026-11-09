@@ -738,55 +738,358 @@ pub enum ConversationHarnessProtocol {
 
 /// The pi flags that launch it with nothing to call: no tools (built-in or
 /// extension), no extensions, no skills, no MCP and no context files.
-const PI_CONFINING_FLAGS: [(&str, Option<&str>); 5] = [
-    ("--no-tools", Some("-nt")),
-    ("--no-extensions", Some("-ne")),
-    ("--no-skills", Some("-ns")),
-    ("--no-mcp", None),
-    ("--no-context-files", Some("-nc")),
+const PI_CONFINING_FLAGS: [&str; 5] = [
+    "--no-tools",
+    "--no-extensions",
+    "--no-skills",
+    "--no-mcp",
+    "--no-context-files",
 ];
 /// The pi flags that would give a confined launch something to call again.
-const PI_WIDENING_FLAGS: [&str; 7] = [
-    "--tools",
-    "-t",
-    "--extension",
-    "-e",
-    "--skill",
-    "--no-builtin-tools",
-    "-nbt",
+const PI_WIDENING_FLAGS: [&str; 4] = ["--tools", "--extension", "--skill", "--no-builtin-tools"];
+
+/// pi's flags as its own parser reads them (pi-coding-agent 1.5.0,
+/// `dist/cli/args.js` `parseArgs`): each spelling, the long name it means,
+/// and how it takes the argument after it.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PiTakes {
+    /// A flag with no value.
+    Nothing,
+    /// The next argument, whatever it is, when there is one.
+    Next,
+    /// The next argument unless it is absent or starts with `-` (pi reports
+    /// an error then, and takes nothing).
+    NextUnlessFlag,
+    /// `--print`: the next argument as a message, unless it starts with `@`,
+    /// or with `-` but not `---`.
+    PrintMessage,
+    /// `--list-models`: the next argument unless it starts with `-` or `@`.
+    PatternUnlessFlag,
+    /// `--tui-mode`: the next argument unless it is absent or starts with `-`.
+    TuiMode,
+}
+
+const PI_FLAGS: &[(&str, &str, PiTakes)] = &[
+    ("--help", "--help", PiTakes::Nothing),
+    ("-h", "--help", PiTakes::Nothing),
+    ("--version", "--version", PiTakes::Nothing),
+    ("-v", "--version", PiTakes::Nothing),
+    ("--mode", "--mode", PiTakes::NextUnlessFlag),
+    ("--continue", "--continue", PiTakes::Nothing),
+    ("-c", "--continue", PiTakes::Nothing),
+    ("--resume", "--resume", PiTakes::Nothing),
+    ("-r", "--resume", PiTakes::Nothing),
+    ("--provider", "--provider", PiTakes::Next),
+    ("--model", "--model", PiTakes::Next),
+    ("--api-key", "--api-key", PiTakes::Next),
+    ("--system-prompt", "--system-prompt", PiTakes::Next),
+    (
+        "--append-system-prompt",
+        "--append-system-prompt",
+        PiTakes::Next,
+    ),
+    ("--name", "--name", PiTakes::Next),
+    ("-n", "--name", PiTakes::Next),
+    ("--no-session", "--no-session", PiTakes::Nothing),
+    ("--session", "--session", PiTakes::Next),
+    ("--session-id", "--session-id", PiTakes::Next),
+    ("--fork", "--fork", PiTakes::Next),
+    ("--session-dir", "--session-dir", PiTakes::Next),
+    ("--models", "--models", PiTakes::Next),
+    ("--no-tools", "--no-tools", PiTakes::Nothing),
+    ("-nt", "--no-tools", PiTakes::Nothing),
+    ("--no-builtin-tools", "--no-builtin-tools", PiTakes::Nothing),
+    ("-nbt", "--no-builtin-tools", PiTakes::Nothing),
+    ("--tools", "--tools", PiTakes::Next),
+    ("-t", "--tools", PiTakes::Next),
+    ("--exclude-tools", "--exclude-tools", PiTakes::Next),
+    ("-xt", "--exclude-tools", PiTakes::Next),
+    ("--thinking", "--thinking", PiTakes::Next),
+    ("--print", "--print", PiTakes::PrintMessage),
+    ("-p", "--print", PiTakes::PrintMessage),
+    ("--export", "--export", PiTakes::Next),
+    ("--extension", "--extension", PiTakes::Next),
+    ("-e", "--extension", PiTakes::Next),
+    ("--no-extensions", "--no-extensions", PiTakes::Nothing),
+    ("-ne", "--no-extensions", PiTakes::Nothing),
+    ("--no-mcp", "--no-mcp", PiTakes::Nothing),
+    ("--skill", "--skill", PiTakes::Next),
+    ("--prompt-template", "--prompt-template", PiTakes::Next),
+    ("--theme", "--theme", PiTakes::Next),
+    ("--use-theme", "--use-theme", PiTakes::NextUnlessFlag),
+    ("--no-skills", "--no-skills", PiTakes::Nothing),
+    ("-ns", "--no-skills", PiTakes::Nothing),
+    (
+        "--no-prompt-templates",
+        "--no-prompt-templates",
+        PiTakes::Nothing,
+    ),
+    ("-np", "--no-prompt-templates", PiTakes::Nothing),
+    ("--no-themes", "--no-themes", PiTakes::Nothing),
+    ("--no-context-files", "--no-context-files", PiTakes::Nothing),
+    ("-nc", "--no-context-files", PiTakes::Nothing),
+    ("--list-models", "--list-models", PiTakes::PatternUnlessFlag),
+    ("--tui-mode", "--tui-mode", PiTakes::TuiMode),
+    ("--verbose", "--verbose", PiTakes::Nothing),
+    ("--approve", "--approve", PiTakes::Nothing),
+    ("-a", "--approve", PiTakes::Nothing),
+    ("--no-approve", "--no-approve", PiTakes::Nothing),
+    ("-na", "--no-approve", PiTakes::Nothing),
+    ("--offline", "--offline", PiTakes::Nothing),
 ];
+
+/// What pi reads from the arguments after its program, read by its own
+/// grammar: the flags it takes as flags, each value a flag took and which
+/// flag took it, the files it attaches, the messages it is given, and what
+/// it reports as an error.
+#[derive(Debug, Default)]
+struct PiReading<'a> {
+    flags: Vec<&'static str>,
+    values: Vec<(&'a str, &'a str)>,
+    files: Vec<&'a str>,
+    messages: Vec<&'a str>,
+    errors: Vec<String>,
+}
+
+impl<'a> PiReading<'a> {
+    fn read(args: &'a [String]) -> Self {
+        let mut reading = Self::default();
+        let mut index = 0;
+        while index < args.len() {
+            let arg = args[index].as_str();
+            let next = args.get(index + 1).map(String::as_str);
+            index += 1;
+            if arg == "--" {
+                for rest in &args[index..] {
+                    match rest.strip_prefix('@') {
+                        Some(file) => reading.files.push(file),
+                        None => reading.messages.push(rest),
+                    }
+                }
+                break;
+            }
+            if let Some((_, long, takes)) = PI_FLAGS.iter().find(|(spelling, _, takes)| {
+                *spelling == arg && (*takes != PiTakes::Next || next.is_some())
+            }) {
+                let flag_like = |value: &str| value.starts_with('-');
+                let took = match (takes, next) {
+                    (PiTakes::Nothing, _) => None,
+                    (PiTakes::Next, Some(value)) => Some(value),
+                    (PiTakes::NextUnlessFlag | PiTakes::TuiMode, Some(value))
+                        if !flag_like(value) =>
+                    {
+                        Some(value)
+                    }
+                    (PiTakes::NextUnlessFlag | PiTakes::TuiMode, _) => {
+                        reading.errors.push(format!("{long} requires a value"));
+                        None
+                    }
+                    (PiTakes::PrintMessage, Some(value))
+                        if !value.starts_with('@')
+                            && (!flag_like(value) || value.starts_with("---")) =>
+                    {
+                        reading.messages.push(value);
+                        index += 1;
+                        reading.flags.push(*long);
+                        continue;
+                    }
+                    (PiTakes::PatternUnlessFlag, Some(value))
+                        if !flag_like(value) && !value.starts_with('@') =>
+                    {
+                        Some(value)
+                    }
+                    _ => None,
+                };
+                if let Some(value) = took {
+                    index += 1;
+                    reading.values.push((*long, value));
+                    if *long == "--mode" && !["text", "json", "rpc"].contains(&value) {
+                        reading
+                            .errors
+                            .push(format!("--mode {value} is not text, json or rpc"));
+                    }
+                } else {
+                    reading.flags.push(*long);
+                }
+                continue;
+            }
+            if let Some(file) = arg.strip_prefix('@') {
+                reading.files.push(file);
+            } else if let Some(name) = arg.strip_prefix("--") {
+                // An unknown long flag: `--x=y`, or `--x` taking the next
+                // argument unless that starts with `-` or `@`.
+                if name.contains('=') {
+                    continue;
+                }
+                if let Some(value) = next.filter(|value| !value.starts_with(['-', '@'])) {
+                    index += 1;
+                    reading.values.push((arg, value));
+                }
+            } else if arg.starts_with('-') {
+                reading
+                    .errors
+                    .push(format!("{arg} is not an option pi knows"));
+            } else {
+                reading.messages.push(arg);
+            }
+        }
+        reading
+    }
+
+    fn has(&self, flag: &str) -> bool {
+        self.flags.contains(&flag) || self.values.iter().any(|(took, _)| *took == flag)
+    }
+
+    /// The last value `flag` took, as pi keeps it.
+    fn value(&self, flag: &str) -> Option<&'a str> {
+        self.values
+            .iter()
+            .rev()
+            .find(|(took, _)| *took == flag)
+            .map(|(_, value)| *value)
+    }
+}
+
+/// The provider a pi argv selects (`--provider`, its last value as pi
+/// keeps it), read by pi's own grammar from the arguments after its program.
+pub fn pi_selected_provider(argv: &[String]) -> Option<String> {
+    PiReading::read(argv.get(1..).unwrap_or_default())
+        .value("--provider")
+        .map(str::to_owned)
+}
+
+/// The variables pi reads a provider's key from (pi-ai 1.5.0,
+/// `dist/env-api-keys.js` `getApiKeyEnvVars`, less `ANTHROPIC_AUTH_TOKEN`,
+/// which pi never reads as a key). AIKit's own pi profile names none, since
+/// pi keeps its keys in its own store; an answer turn's empty HOME has no
+/// such store, so the person names the variable, and it must be one of these
+/// for the provider the argv selects.
+pub fn pi_provider_credential_variables(provider: &str) -> &'static [&'static str] {
+    match provider {
+        "github-copilot" => &["COPILOT_GITHUB_TOKEN"],
+        "anthropic" => &["ANTHROPIC_OAUTH_TOKEN", "ANTHROPIC_API_KEY"],
+        "ant-ling" => &["ANT_LING_API_KEY"],
+        "qwen-token-plan" | "qwen-token-plan-individual" => &["QWEN_TOKEN_PLAN_API_KEY"],
+        "qwen-token-plan-cn" => &["QWEN_TOKEN_PLAN_CN_API_KEY"],
+        "openai" => &["OPENAI_API_KEY"],
+        "azure" => &["AZURE_OPENAI_API_KEY"],
+        "nvidia" => &["NVIDIA_API_KEY"],
+        "deepseek" => &["DEEPSEEK_API_KEY"],
+        "google" => &["GEMINI_API_KEY"],
+        "google-vertex" => &["GOOGLE_CLOUD_API_KEY"],
+        "groq" => &["GROQ_API_KEY"],
+        "cerebras" => &["CEREBRAS_API_KEY"],
+        "xai" => &["XAI_API_KEY"],
+        "typesafe" => &["TYPESAFE_API_KEY"],
+        "radius" => &["RADIUS_API_KEY"],
+        "openrouter" => &["OPENROUTER_API_KEY"],
+        "vercel-ai-gateway" => &["AI_GATEWAY_API_KEY"],
+        "zai" => &["ZAI_API_KEY"],
+        "zai-coding-cn" => &["ZAI_CODING_CN_API_KEY"],
+        "mistral" => &["MISTRAL_API_KEY"],
+        "minimax" => &["MINIMAX_API_KEY"],
+        "minimax-cn" => &["MINIMAX_CN_API_KEY"],
+        "moonshotai" | "moonshotai-cn" => &["MOONSHOT_API_KEY"],
+        "huggingface" => &["HF_TOKEN"],
+        "fireworks" => &["FIREWORKS_API_KEY"],
+        "together" => &["TOGETHER_API_KEY"],
+        "baseten" => &["BASETEN_API_KEY"],
+        "opencode" | "opencode-go" => &["OPENCODE_API_KEY"],
+        "kimi-coding" => &["KIMI_API_KEY"],
+        "meta" => &["META_API_KEY"],
+        "cloudflare-workers-ai" | "cloudflare-ai-gateway" => &["CLOUDFLARE_API_KEY"],
+        "xiaomi" => &["XIAOMI_API_KEY"],
+        "xiaomi-token-plan-cn" => &["XIAOMI_TOKEN_PLAN_CN_API_KEY"],
+        "xiaomi-token-plan-ams" => &["XIAOMI_TOKEN_PLAN_AMS_API_KEY"],
+        "xiaomi-token-plan-sgp" => &["XIAOMI_TOKEN_PLAN_SGP_API_KEY"],
+        _ => &[],
+    }
+}
+
+/// Why a pi argv cannot be held to no tools, read by pi's own grammar (DLW
+/// build ruling 2026-11-09, be2d): its program is pi; pi reports no error in
+/// it; every confining flag is read as a flag, never as another flag's value;
+/// none that widens it again; no key on the argv; and no file or message
+/// before the prompt, which is a turn's only input.
+fn pi_confinement(argv: &[String]) -> std::result::Result<(), String> {
+    let Some(program) = argv.first() else {
+        return Err("the argv names no program".into());
+    };
+    if std::path::Path::new(program).file_name() != Some(std::ffi::OsStr::new("pi")) {
+        return Err(format!(
+            "the program is {program}, and only pi itself (a program named pi) is held to no tools by its flags"
+        ));
+    }
+    let reading = PiReading::read(&argv[1..]);
+    if !reading.errors.is_empty() {
+        return Err(format!(
+            "pi would refuse this argv: {}",
+            reading.errors.join("; ")
+        ));
+    }
+    for flag in PI_CONFINING_FLAGS {
+        if reading.flags.contains(&flag) {
+            continue;
+        }
+        let taken_by = reading.values.iter().find(|(_, value)| {
+            PI_FLAGS
+                .iter()
+                .any(|(spelling, long, _)| spelling == value && *long == flag)
+        });
+        return Err(match taken_by {
+            Some((by, value)) => format!(
+                "pi reads {value} as the value of {by}, not as {flag}, so this argv lacks {flag}"
+            ),
+            None => format!(
+                "pi is held to no tools only by its own launch flags, and this argv lacks {}",
+                PI_CONFINING_FLAGS
+                    .iter()
+                    .filter(|flag| !reading.flags.contains(flag))
+                    .copied()
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+        });
+    }
+    if let Some(flag) = PI_WIDENING_FLAGS.iter().find(|flag| reading.has(flag)) {
+        return Err(format!(
+            "this pi argv names {flag}, which gives the turn something to call"
+        ));
+    }
+    if reading.has("--api-key") {
+        return Err(
+            "this pi argv carries a key (--api-key); name the provider's variable with --credential-env instead"
+                .into(),
+        );
+    }
+    if let Some(file) = reading.files.first() {
+        return Err(format!(
+            "pi would attach the file {file} before the prompt, which is an answer turn's only input"
+        ));
+    }
+    if let Some(message) = reading.messages.first() {
+        return Err(format!(
+            "pi would take {message} as a message before the prompt, which is an answer turn's only input"
+        ));
+    }
+    Ok(())
+}
 
 impl ConversationHarnessProtocol {
     /// How AIKit holds this protocol's harness to no tools before any prompt
     /// (DLW build ruling 2026-11-09), or why it cannot for this argv:
     ///
-    /// - pi, by its own launch flags: every confining flag present, none that
-    ///   widens it again;
-    /// - ACP, by the session it opens reporting an empty tool list;
+    /// - pi, by its own launch flags, read by pi's own grammar
+    ///   ([`pi_confinement`]);
+    /// - ACP, by the session it opens reporting an empty tool list: the
+    ///   agent's own declaration;
     /// - Prime RPC, by the session it attaches to reporting an empty tool
     ///   registry.
     pub fn confines(self, argv: &[String]) -> std::result::Result<&'static str, String> {
         match self {
-            Self::PiRpc => {
-                let has = |flag: &str| argv.iter().any(|arg| arg == flag);
-                let missing: Vec<&str> = PI_CONFINING_FLAGS
-                    .iter()
-                    .filter(|(long, short)| !has(long) && short.is_none_or(|short| !has(short)))
-                    .map(|(long, _)| *long)
-                    .collect();
-                if !missing.is_empty() {
-                    return Err(format!(
-                        "pi is held to no tools only by its own launch flags, and this argv lacks {}",
-                        missing.join(", ")
-                    ));
-                }
-                if let Some(flag) = PI_WIDENING_FLAGS.iter().find(|flag| has(flag)) {
-                    return Err(format!(
-                        "this pi argv names {flag}, which gives the turn something to call"
-                    ));
-                }
-                Ok("pi launched with its tools, extensions, skills, MCP and context files disabled")
-            }
+            Self::PiRpc => pi_confinement(argv).map(|()| {
+                "pi launched with its tools, extensions, skills, MCP and context files disabled"
+            }),
             Self::Acp => Ok("an ACP agent whose session reports an empty tool list when it opens"),
             Self::PrimeRpc => {
                 Ok("a Prime session that reports an empty tool registry when it is attached")
@@ -3544,4 +3847,216 @@ fn unexpected_answer(response: &GatewayResponse) -> AikitError {
                 .unwrap_or_else(|| "an unknown response".into())
         ),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::agent_connection::AgentConnectionAdapter;
+
+    fn argv(args: &[&str]) -> Vec<String> {
+        args.iter().map(|arg| arg.to_string()).collect()
+    }
+
+    const CONFINED: [&str; 8] = [
+        "pi",
+        "--mode",
+        "rpc",
+        "--no-tools",
+        "--no-extensions",
+        "--no-skills",
+        "--no-mcp",
+        "--no-context-files",
+    ];
+
+    /// be2d (review 5): pi is held to no tools only by flags pi's own parser
+    /// reads as flags. A confining flag read as another flag's value, a flag
+    /// pi would refuse, a key, a file or a message before the prompt, or a
+    /// program that is not pi, are each refused in words.
+    #[test]
+    fn pi_is_held_to_no_tools_only_by_flags_its_own_grammar_reads() {
+        let pi = |args: &[&str]| ConversationHarnessProtocol::PiRpc.confines(&argv(args));
+        assert!(pi(&CONFINED).is_ok());
+        assert!(pi(&["/opt/bin/pi", "-nt", "-ne", "-ns", "--no-mcp", "-nc"]).is_ok());
+        for (args, why) in [
+            (
+                vec![
+                    "pi",
+                    "--system-prompt",
+                    "--no-tools",
+                    "-ne",
+                    "-ns",
+                    "--no-mcp",
+                    "-nc",
+                ],
+                "pi reads --no-tools as the value of --system-prompt",
+            ),
+            (
+                vec!["pi", "--name", "-nt", "-ne", "-ns", "--no-mcp", "-nc"],
+                "pi reads -nt as the value of --name",
+            ),
+            (
+                vec![
+                    "pi",
+                    "--tools",
+                    "--no-tools",
+                    "-ne",
+                    "-ns",
+                    "--no-mcp",
+                    "-nc",
+                ],
+                "the value of --tools",
+            ),
+            (
+                vec!["pi", "-nt", "-ne", "-ns", "--no-mcp", "-nc", "-x"],
+                "-x is not an option pi knows",
+            ),
+            (
+                vec!["pi", "-nt", "-ne", "-ns", "--no-mcp", "-nc", "--mode", "-p"],
+                "--mode requires a value",
+            ),
+            (
+                vec!["pi", "-nt", "-ne", "-ns", "--no-mcp", "-nc", "-e", "x.ts"],
+                "names --extension",
+            ),
+            (
+                vec!["pi", "-nt", "-ne", "-ns", "--no-mcp", "-nc", "-nbt"],
+                "names --no-builtin-tools",
+            ),
+            (
+                vec![
+                    "pi",
+                    "-nt",
+                    "-ne",
+                    "-ns",
+                    "--no-mcp",
+                    "-nc",
+                    "--api-key",
+                    "k",
+                ],
+                "carries a key",
+            ),
+            (
+                vec!["pi", "-nt", "-ne", "-ns", "--no-mcp", "-nc", "@/etc/hosts"],
+                "attach the file /etc/hosts",
+            ),
+            (
+                vec![
+                    "pi",
+                    "-nt",
+                    "-ne",
+                    "-ns",
+                    "--no-mcp",
+                    "-nc",
+                    "--",
+                    "--no-tools",
+                ],
+                "take --no-tools as a message",
+            ),
+            (
+                vec![
+                    "pi",
+                    "-nt",
+                    "-ne",
+                    "-ns",
+                    "--no-mcp",
+                    "-nc",
+                    "read /etc/hosts",
+                ],
+                "as a message",
+            ),
+            (
+                vec!["pi", "-nt", "-ne", "-ns", "--no-mcp", "-nc", "-p", "hello"],
+                "as a message",
+            ),
+            (
+                vec!["python3", "-nt", "-ne", "-ns", "--no-mcp", "-nc"],
+                "only pi itself",
+            ),
+        ] {
+            let error = pi(&args).expect_err(&format!("{args:?}"));
+            assert!(error.contains(why), "{args:?}: {error}");
+        }
+        // `--` ends pi's options: a confining flag after it is a message.
+        let error = pi(&["pi", "--", "-nt", "-ne", "-ns", "--no-mcp", "-nc"]).unwrap_err();
+        assert!(error.contains("lacks --no-tools"), "{error}");
+    }
+
+    /// be2d (review 5): the provider an argv selects is read as pi keeps it,
+    /// and only pi's own variable for it is that provider's credential.
+    #[test]
+    fn a_pi_argv_selects_its_provider_and_pi_names_its_credential() {
+        let mut args = argv(&CONFINED);
+        assert_eq!(pi_selected_provider(&args), None);
+        args.extend(argv(&["--provider", "openai", "--provider", "anthropic"]));
+        assert_eq!(pi_selected_provider(&args).as_deref(), Some("anthropic"));
+        assert_eq!(
+            pi_selected_provider(&argv(&["pi", "--system-prompt", "--provider", "x"])),
+            None,
+            "a value, not the flag"
+        );
+        assert_eq!(
+            pi_provider_credential_variables("anthropic"),
+            ["ANTHROPIC_OAUTH_TOKEN", "ANTHROPIC_API_KEY"]
+        );
+        assert_eq!(pi_provider_credential_variables("zai"), ["ZAI_API_KEY"]);
+        assert!(pi_provider_credential_variables("nobody").is_empty());
+    }
+
+    /// Review gap (be2d): the guard ends a tool-less turn on exactly what each
+    /// adapter makes of a tool at work: pi's and Prime's tool results, and
+    /// Prime's child run, as well as a tool call.
+    #[test]
+    fn the_guard_reads_each_adapters_own_tool_signals() {
+        let connection = ResourceRef::parse("connection/test/guard").unwrap();
+        let mut pi = crate::pi_rpc_connection::PiRpcConnectionAdapter::new(
+            connection.clone(),
+            "/work".into(),
+            vec![],
+        );
+        let mut prime = crate::prime_rpc_connection::PrimeRpcConnectionAdapter::new(
+            connection,
+            "/work".into(),
+            vec![],
+        );
+        let kinds = |signals: Vec<crate::agent_connection::ConnectionSignal>| {
+            signals
+                .into_iter()
+                .map(|signal| signal.kind)
+                .collect::<Vec<_>>()
+        };
+        for (adapter, wire) in [
+            (
+                "pi",
+                json!({"type": "tool_execution_end", "toolCallId": "t1"}),
+            ),
+            (
+                "pi",
+                json!({"type": "tool_execution_start", "toolCallId": "t1"}),
+            ),
+            (
+                "prime",
+                json!({"type": "tool_execution_end", "toolCallId": "t1"}),
+            ),
+            ("prime", json!({"type": "rlm_child_update", "child": "c1"})),
+        ] {
+            let signals = if adapter == "pi" {
+                kinds(pi.ingest(wire.clone()).unwrap())
+            } else {
+                kinds(prime.ingest(wire.clone()).unwrap())
+            };
+            assert_eq!(signals.len(), 1, "{adapter} {wire}");
+            assert!(
+                is_tool_event(&signals[0]),
+                "{adapter} {wire}: {:?}",
+                signals[0]
+            );
+        }
+        let said = kinds(
+            pi.ingest(json!({"type": "message_update",
+                "assistantMessageEvent": {"type": "text_delta", "delta": "hello"}}))
+                .unwrap(),
+        );
+        assert!(!is_tool_event(&said[0]), "words are no tool");
+    }
 }

@@ -61,6 +61,10 @@ pub const MAX_COMMUNIQUE_REF_BYTES: usize = 512;
 /// 2026-11-09).
 pub const MAX_ASKS_WAITING_PER_POSITION: usize = 16;
 pub const MAX_ASKS_WAITING_PER_ASKER: usize = 4;
+/// Of a Position's [`MAX_ASKS_WAITING_PER_POSITION`], how many asks from
+/// askers this gateway did not verify may hold at once (DLW build ruling
+/// 2026-11-09, be2d): a verified asker always finds room.
+pub const MAX_UNVERIFIED_ASKS_WAITING_PER_POSITION: usize = 8;
 /// What an ask past those bounds is told at once.
 pub const ASKS_WAITING_FULL_WORDS: &str =
     "This world's agent has too many questions waiting; ask again later.";
@@ -325,7 +329,14 @@ pub struct Communique {
     /// Where it lands while the recipient works; absent is `queue`.
     #[serde(default, skip_serializing_if = "CommuniqueHandling::is_queue")]
     pub handling: CommuniqueHandling,
+    /// When its sender says it was sent: shown, never counted on.
     pub sent_at_unix_ms: u64,
+    /// When this gateway's journal took it, on this gateway's own clock (DLW
+    /// build ruling 2026-11-09, be2d): the bounds on asks waiting and their
+    /// expiry read this, never the sender's word. A record kept before the
+    /// journal stamped it reads as received when it was sent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub received_at_unix_ms: Option<u64>,
     pub state: CommuniqueState,
     #[serde(default)]
     pub delivered_to_generation_ref: Option<String>,
@@ -366,6 +377,16 @@ impl Communique {
     /// bounded turn.
     pub fn is_ask(&self) -> bool {
         is_ask_body(&self.body)
+    }
+
+    /// When this gateway took it, on its own clock.
+    pub fn received_at(&self) -> u64 {
+        self.received_at_unix_ms.unwrap_or(self.sent_at_unix_ms)
+    }
+
+    /// Whether an ask has waited its day, on this gateway's clock.
+    pub fn ask_expired(&self, now_unix_ms: u64) -> bool {
+        now_unix_ms >= self.received_at().saturating_add(ASK_EXPIRES_AFTER_MS)
     }
 
     /// An ask still waiting here for its one answer.
@@ -513,17 +534,25 @@ fn non_empty(label: &str, value: &str) -> Result<()> {
     Ok(())
 }
 
+/// The characters a ref is made of (DLW build ruling 2026-11-09, be2d):
+/// letters, digits and `._:/@+-`. A turn renders refs on command lines its
+/// occupant may paste into a shell, so none holds a quote, a `$`, a backtick,
+/// a space or a line break.
+pub fn is_safe_ref_char(c: char) -> bool {
+    c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | ':' | '/' | '@' | '+' | '-')
+}
+
 /// A ref a turn renders on a line of its own (DLW build ruling 2026-11-09): at
-/// most [`MAX_COMMUNIQUE_REF_BYTES`] (a line back: the ref it names), with no
-/// control character, so no line break: nothing in it can start a line, and
-/// no record is too large to be carried as its ref.
+/// most [`MAX_COMMUNIQUE_REF_BYTES`] (a line back: the ref it names), made only
+/// of [`is_safe_ref_char`]s: nothing in it can start a line or run in a shell,
+/// and no record is too large to be carried as its ref.
 fn plain_header(label: &str, value: &str) -> Result<()> {
     let named = value.strip_prefix(SENDER_OF_PREFIX).unwrap_or(value);
-    if named.len() > MAX_COMMUNIQUE_REF_BYTES || value.chars().any(char::is_control) {
+    if named.len() > MAX_COMMUNIQUE_REF_BYTES || !value.chars().all(is_safe_ref_char) {
         return Err(invalid(
             "agency_gateway.communique_header_invalid",
             format!(
-                "Communique {label} is a ref of at most {MAX_COMMUNIQUE_REF_BYTES} bytes with no control character or line break ({} bytes given)",
+                "Communique {label} is a ref of at most {MAX_COMMUNIQUE_REF_BYTES} bytes, made only of letters, digits and ._:/@+- ({} bytes given)",
                 value.len()
             ),
         ));
@@ -715,10 +744,27 @@ impl CommuniqueJournal {
     /// Accept a sender's draft. Replaying the identical draft answers the
     /// existing record (`replayed == true`); a different draft under the same
     /// ref is an identity rewrite and refused.
+    /// Accept a draft as [`Self::send_at`] does, taken when its sender says it
+    /// was sent: for tests that keep one clock.
+    #[cfg(test)]
     pub fn send(
         &mut self,
         gateway_ref: &str,
         draft: CommuniqueDraft,
+    ) -> Result<(Communique, bool)> {
+        let at = draft.sent_at_unix_ms;
+        self.send_at(gateway_ref, draft, at)
+    }
+
+    /// Accept a sender's draft, taken at `received_at_unix_ms` on this
+    /// gateway's own clock. Replaying the identical draft answers the existing
+    /// record (`replayed == true`); a different draft under the same ref is an
+    /// identity rewrite and refused.
+    pub fn send_at(
+        &mut self,
+        gateway_ref: &str,
+        draft: CommuniqueDraft,
+        received_at_unix_ms: u64,
     ) -> Result<(Communique, bool)> {
         non_empty("communique_ref", &draft.communique_ref)?;
         if !draft.communique_ref.starts_with(COMMUNIQUE_REF_PREFIX) {
@@ -821,6 +867,7 @@ impl CommuniqueJournal {
             body: draft.body,
             handling: draft.handling,
             sent_at_unix_ms: draft.sent_at_unix_ms,
+            received_at_unix_ms: Some(received_at_unix_ms),
             state: draft.state,
             delivered_to_generation_ref: None,
             delivered_at_unix_ms: None,
@@ -831,7 +878,7 @@ impl CommuniqueJournal {
             forward,
             routing: draft.routing,
             transitions: vec![CommuniqueTransition {
-                at_unix_ms: draft.sent_at_unix_ms,
+                at_unix_ms: received_at_unix_ms,
                 state: draft.state,
                 basis: draft.state_basis,
                 generation_ref: None,
@@ -887,7 +934,7 @@ impl CommuniqueJournal {
             let _ = self.close_ask(
                 &ask_ref,
                 &basis,
-                record.sent_at_unix_ms,
+                record.received_at(),
                 record.from_generation_ref.as_deref(),
             );
         }
@@ -903,21 +950,31 @@ impl CommuniqueJournal {
             return Ok(None);
         }
         let identity = record.ask_identity();
+        let unverified = record.attribution != SenderAttribution::Verified;
         let mut at_position = 0;
+        let mut unverified_at_position = 0;
         let mut from_asker = 0;
-        let waiting = self.records.iter().filter(|waiting| {
-            waiting.ask_waits()
-                && waiting.sent_at_unix_ms + ASK_EXPIRES_AFTER_MS > record.sent_at_unix_ms
-        });
+        // Both clocks are this gateway's own: what the sender stamped is
+        // never counted on (DLW build ruling 2026-11-09, be2d).
+        let now = record.received_at();
+        let waiting = self
+            .records
+            .iter()
+            .filter(|waiting| waiting.ask_waits() && !waiting.ask_expired(now));
         for waiting in waiting {
             let other = waiting.ask_identity();
             if other == identity {
                 return Ok(Some(waiting.clone()));
             }
-            at_position += usize::from(other.1 == identity.1);
+            let here = other.1 == identity.1;
+            at_position += usize::from(here);
+            unverified_at_position +=
+                usize::from(here && waiting.attribution != SenderAttribution::Verified);
             from_asker += usize::from(other.0 == identity.0);
         }
-        if at_position >= MAX_ASKS_WAITING_PER_POSITION || from_asker >= MAX_ASKS_WAITING_PER_ASKER
+        if at_position >= MAX_ASKS_WAITING_PER_POSITION
+            || from_asker >= MAX_ASKS_WAITING_PER_ASKER
+            || (unverified && unverified_at_position >= MAX_UNVERIFIED_ASKS_WAITING_PER_POSITION)
         {
             return Err(invalid(
                 "agency_gateway.asks_waiting_full",
@@ -1127,6 +1184,9 @@ impl CommuniqueJournal {
             ));
         }
         communique.sequence = self.next_sequence();
+        // Taken on this gateway's own clock, whatever the record says of the
+        // relaying journal's (DLW build ruling 2026-11-09, be2d).
+        communique.received_at_unix_ms = Some(at_unix_ms);
         communique.received_from_gateway_ref = Some(relayed_by.into());
         communique.forward = None;
         communique.transitions.push(CommuniqueTransition {
@@ -2324,6 +2384,17 @@ mod tests {
         }
     }
 
+    /// An ask from a Position whose occupant was verified: its asker is that
+    /// Position.
+    fn verified_ask(reference: &str, position: &str, at: u64) -> CommuniqueDraft {
+        CommuniqueDraft {
+            from_position_ref: Some(position.into()),
+            from_generation_ref: Some("actuation:generation:g1".into()),
+            attribution: SenderAttribution::Verified,
+            ..ask(reference, "world:claimed", &format!("q {reference}"), at)
+        }
+    }
+
     /// Review 7 (DLW build ruling 2026-11-09): an ask or answer is known by
     /// its parsed schema. An escaped `\/` is the same schema; words that only
     /// mention one, or a schema nested elsewhere, are none.
@@ -2374,9 +2445,18 @@ mod tests {
             .unwrap();
         assert!(replayed, "an identical waiting ask is that ask");
         assert_eq!(same.communique_ref, format!("{COMMUNIQUE_REF_PREFIX}m0"));
+        // Unverified asks share at most half the slots (be2d): the rest are
+        // verified askers', each its own Position.
         for i in MAX_ASKS_WAITING_PER_ASKER..MAX_ASKS_WAITING_PER_POSITION {
             journal
-                .send("g", ask(&format!("o{i}"), &format!("world:o{i}"), "q", 10))
+                .send(
+                    "g",
+                    verified_ask(
+                        &format!("o{i}"),
+                        &format!("central:position:world:o{i}:asker"),
+                        10,
+                    ),
+                )
                 .unwrap();
         }
         let error = journal
@@ -2443,6 +2523,192 @@ mod tests {
             .close_ask(&format!("{COMMUNIQUE_REF_PREFIX}nope"), "x", 30, None)
             .unwrap_err();
         assert_eq!(error.code(), "agency_gateway.unknown_communique");
+    }
+
+    /// Review 12 (be2d): unverified asks share at most 8 of a Position's 16
+    /// slots, so a verified asker always has room.
+    #[test]
+    fn unverified_asks_share_at_most_eight_of_a_positions_sixteen_slots() {
+        let mut journal = CommuniqueJournal::default();
+        for i in 0..MAX_UNVERIFIED_ASKS_WAITING_PER_POSITION {
+            journal
+                .send("g", ask(&format!("u{i}"), &format!("world:u{i}"), "q", 10))
+                .unwrap();
+        }
+        let error = journal
+            .send("g", ask("u-past", "world:new", "q", 10))
+            .unwrap_err();
+        assert_eq!(error.code(), "agency_gateway.asks_waiting_full");
+        for i in MAX_UNVERIFIED_ASKS_WAITING_PER_POSITION..MAX_ASKS_WAITING_PER_POSITION {
+            journal
+                .send(
+                    "g",
+                    verified_ask(
+                        &format!("v{i}"),
+                        &format!("central:position:world:v{i}:asker"),
+                        10,
+                    ),
+                )
+                .unwrap();
+        }
+        let error = journal
+            .send(
+                "g",
+                verified_ask("v-past", "central:position:world:new:asker", 10),
+            )
+            .unwrap_err();
+        assert_eq!(
+            error.code(),
+            "agency_gateway.asks_waiting_full",
+            "sixteen in all"
+        );
+    }
+
+    /// Review 2 (be2d): the bounds and the expiry run on this gateway's own
+    /// clock. An ask its sender stamped a year ahead is still counted, so it
+    /// cannot make the others look expired, and it still expires a day after
+    /// this gateway took it; its stamp is kept for display only.
+    #[test]
+    fn a_future_stamped_ask_is_still_bounded_and_still_expires() {
+        let mut journal = CommuniqueJournal::default();
+        let year = 365 * ASK_EXPIRES_AFTER_MS;
+        for i in 0..MAX_ASKS_WAITING_PER_ASKER {
+            journal
+                .send_at(
+                    "g",
+                    ask(&format!("f{i}"), "world:mara", &format!("q{i}"), 10),
+                    10,
+                )
+                .unwrap();
+        }
+        let error = journal
+            .send_at("g", ask("f-ahead", "world:mara", "one more", 10 + year), 20)
+            .unwrap_err();
+        assert_eq!(
+            error.code(),
+            "agency_gateway.asks_waiting_full",
+            "a stamp a year ahead is still the fifth"
+        );
+        let (stamped, _) = journal
+            .send_at("g", ask("g0", "world:other", "q", 10 + year), 20)
+            .unwrap();
+        assert_eq!(stamped.sent_at_unix_ms, 10 + year, "kept for display");
+        assert_eq!(stamped.received_at_unix_ms, Some(20));
+        assert!(!stamped.ask_expired(19 + ASK_EXPIRES_AFTER_MS));
+        assert!(
+            stamped.ask_expired(20 + ASK_EXPIRES_AFTER_MS),
+            "a day after this gateway took it"
+        );
+        // A day on, on this gateway's clock, the asker may ask again.
+        journal
+            .send_at(
+                "g",
+                ask("f-later", "world:mara", "one more", 10),
+                10 + ASK_EXPIRES_AFTER_MS,
+            )
+            .unwrap();
+    }
+
+    /// Review 7 and the review's gap (be2d): every header the journal keeps
+    /// is a ref safe on a command line (letters, digits and `._:/@+-`, at
+    /// most 512 bytes), at send under each of its eight labels and at ingest
+    /// under each of its nine. `x$(cmd)`, a backtick and an oversize ref are
+    /// each refused under every one, and nothing refused is kept.
+    #[test]
+    fn every_header_is_a_shell_safe_ref_at_send_and_at_ingest() {
+        let oversize = format!("x{}", "y".repeat(MAX_COMMUNIQUE_REF_BYTES));
+        let bad = ["x$(cmd)".to_owned(), "x`id`".to_owned(), oversize];
+        let instance = |generation: &str| {
+            Some(CommuniqueInstance {
+                generation_ref: generation.into(),
+                required_workcell_ref: None,
+                agent_session_ref: None,
+                agency_ref: None,
+            })
+        };
+        type SetDraft = fn(&mut CommuniqueDraft, String);
+        let send_labels: [(&str, SetDraft); 8] = [
+            ("communique_ref", |d, v| {
+                d.communique_ref = format!("{COMMUNIQUE_REF_PREFIX}{v}")
+            }),
+            ("from_position_ref", |d, v| d.from_position_ref = Some(v)),
+            ("from_generation_ref", |d, v| {
+                d.from_generation_ref = Some(v)
+            }),
+            ("to_position_ref", |d, v| d.to_position_ref = v),
+            ("to_workcell_ref", |d, v| d.to_workcell_ref = Some(v)),
+            ("reply_to", |d, v| d.reply_to = Some(v)),
+            ("forward_to_workcell_ref", |d, v| {
+                d.forward_to_workcell_ref = Some(v)
+            }),
+            ("to_instance generation_ref", |d, v| {
+                d.to_instance = Some(CommuniqueInstance {
+                    generation_ref: v,
+                    required_workcell_ref: None,
+                    agent_session_ref: None,
+                    agency_ref: None,
+                })
+            }),
+        ];
+        let mut journal = CommuniqueJournal::default();
+        for (label, set) in send_labels {
+            for value in &bad {
+                let mut refused = draft("headers", Some(A), B, CommuniqueState::Pending);
+                set(&mut refused, value.clone());
+                let error = journal.send("g", refused).unwrap_err();
+                assert_eq!(
+                    error.code(),
+                    "agency_gateway.communique_header_invalid",
+                    "send {label}: {value}"
+                );
+                assert!(error.to_string().contains(label), "{label}: {error}");
+            }
+        }
+        assert!(journal.records().is_empty(), "nothing refused is kept");
+
+        let mut sent = CommuniqueJournal::default();
+        let (record, _) = sent
+            .send(
+                "g",
+                CommuniqueDraft {
+                    to_instance: instance("actuation:generation:g2"),
+                    ..draft("relayed", Some(A), B, CommuniqueState::Pending)
+                },
+            )
+            .unwrap();
+        type SetRecord = fn(&mut Communique, &mut String, String);
+        let ingest_labels: [(&str, SetRecord); 9] = [
+            ("communique_ref", |c, _, v| c.communique_ref = v),
+            ("from_position_ref", |c, _, v| c.from_position_ref = Some(v)),
+            ("from_generation_ref", |c, _, v| {
+                c.from_generation_ref = Some(v)
+            }),
+            ("to_position_ref", |c, _, v| c.to_position_ref = v),
+            ("to_workcell_ref", |c, _, v| c.to_workcell_ref = Some(v)),
+            ("reply_to", |c, _, v| c.reply_to = Some(v)),
+            ("origin_gateway_ref", |c, _, v| c.origin_gateway_ref = v),
+            ("relayed_by", |_, by, v| *by = v),
+            ("to_instance generation_ref", |c, _, v| {
+                if let Some(instance) = c.to_instance.as_mut() {
+                    instance.generation_ref = v;
+                }
+            }),
+        ];
+        for (label, set) in ingest_labels {
+            for value in &bad {
+                let mut forged = record.clone();
+                let mut relayed_by = "agency-gateway/peer".to_owned();
+                set(&mut forged, &mut relayed_by, value.clone());
+                let error = journal.ingest(forged, &relayed_by, 20).unwrap_err();
+                assert_eq!(
+                    error.code(),
+                    "agency_gateway.communique_header_invalid",
+                    "ingest {label}: {value}"
+                );
+                assert!(error.to_string().contains(label), "{label}: {error}");
+            }
+        }
+        assert!(journal.records().is_empty(), "nothing refused is kept");
     }
 
     /// Review 3: every ref is a plain ref at ingest and at send, at most 512
