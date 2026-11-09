@@ -22,6 +22,7 @@
 //! materialise this long-running runtime body without changing any gateway refs.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
 
 use aikit_adapters::{
     ConnectorDescriptor, ConnectorHealth, ConnectorOperation, ConversationAddress, DeliveryReceipt,
@@ -528,6 +529,20 @@ pub struct GatewayStatus {
     /// Empty where no service answered (an offline read of the state file).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub carriers: Vec<crate::gateway_posture::GatewayListenerReading>,
+    /// What the answering service's last periodic tick met (DLW build ruling
+    /// 2026-11-09, be2f). Absent where no service answered or no tick ran.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_tick: Option<GatewayTickReading>,
+}
+
+/// One periodic tick of a running service, as the service read it (DLW
+/// build ruling 2026-11-09, be2f): when it ended, and every error it met,
+/// each named by where in the tick it arose. No errors means a clean tick.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GatewayTickReading {
+    pub at_unix_ms: u64,
+    #[serde(default)]
+    pub errors: Vec<String>,
 }
 
 /// Qualitatively distinct co-internal relations the gateway ecology can name.
@@ -675,8 +690,12 @@ pub struct AgencyGateway {
     world_agent: BTreeMap<String, Value>,
     /// The clock this gateway stamps every Communique it takes by (DLW build
     /// ruling 2026-11-09, be2d): the system's, unless a composition keeps a
-    /// logical one of its own.
-    clock: Box<dyn Fn() -> u64 + Send + Sync>,
+    /// logical one of its own. A restore keeps it (be2f).
+    clock: Arc<dyn Fn() -> u64 + Send + Sync>,
+    /// How many kept records the last load stamped as taken then (be2f): a
+    /// caller holding the state lock persists them at once, so the stamp is
+    /// made once.
+    stamped_on_load: usize,
 }
 
 impl AgencyGateway {
@@ -693,15 +712,24 @@ impl AgencyGateway {
             next_operation_sequence: 1,
             communiques: CommuniqueJournal::default(),
             world_agent: BTreeMap::new(),
-            clock: Box::new(communique_now_unix_ms),
+            clock: Arc::new(communique_now_unix_ms),
+            stamped_on_load: 0,
         }
     }
 
     /// Stamp what this gateway takes by `clock` instead of the system's
     /// clock: a composition that keeps one logical clock, as tests do.
     pub fn with_clock(mut self, clock: impl Fn() -> u64 + Send + Sync + 'static) -> Self {
-        self.clock = Box::new(clock);
+        self.clock = Arc::new(clock);
         self
+    }
+
+    /// How many kept records this gateway's load stamped as taken at that
+    /// moment (DLW build ruling 2026-11-09, be2f): records kept before the
+    /// journal stamped what it took. Nonzero means the state should be
+    /// persisted now, so the stamp is made once.
+    pub fn stamped_on_load(&self) -> usize {
+        self.stamped_on_load
     }
 
     /// The Communique journal this gateway keeps.
@@ -1309,6 +1337,7 @@ impl AgencyGateway {
             delivery_receipt_count: self.delivery_receipts.len(),
             connector_health: self.connector_health.values().cloned().collect(),
             carriers: Vec::new(),
+            last_tick: None,
         }
     }
 
@@ -1453,6 +1482,19 @@ impl AgencyGateway {
     }
 
     pub fn from_snapshot(snapshot: GatewaySnapshot) -> Result<Self> {
+        Self::restored(snapshot, Arc::new(communique_now_unix_ms))
+    }
+
+    /// [`Self::from_snapshot`] on `fresh`'s clock: the composition's clock
+    /// survives the load, and stamps what the load finds unstamped (be2f).
+    pub fn from_snapshot_on_clock_of(snapshot: GatewaySnapshot, fresh: &Self) -> Result<Self> {
+        Self::restored(snapshot, Arc::clone(&fresh.clock))
+    }
+
+    fn restored(
+        snapshot: GatewaySnapshot,
+        clock: Arc<dyn Fn() -> u64 + Send + Sync>,
+    ) -> Result<Self> {
         if snapshot.version != AGENCY_GATEWAY_VERSION {
             return Err(AikitError::new(
                 "agency_gateway.unsupported_snapshot",
@@ -1466,6 +1508,7 @@ impl AgencyGateway {
             ));
         }
         let mut gateway = Self::new(snapshot.gateway_ref);
+        gateway.clock = clock;
         for descriptor in snapshot.connectors {
             gateway.register_connector(descriptor)?;
         }
@@ -1502,6 +1545,10 @@ impl AgencyGateway {
         gateway.delivery_receipts = snapshot.delivery_receipts;
         gateway.next_operation_sequence = snapshot.next_operation_sequence;
         gateway.communiques = CommuniqueJournal::restore(snapshot.communiques)?;
+        // A record kept before the journal stamped what it took reads as
+        // taken now, when this gateway first loads it, never at its sender's
+        // word (DLW build ruling 2026-11-09, be2f).
+        gateway.stamped_on_load = gateway.communiques.stamp_unreceived((gateway.clock)());
         gateway.world_agent = snapshot.world_agent;
         Ok(gateway)
     }
@@ -2344,7 +2391,7 @@ fn execute_admitted(
             snapshot: gateway.snapshot(),
         }),
         GatewayCommand::Restore { snapshot } => {
-            *gateway = AgencyGateway::from_snapshot(snapshot)?;
+            *gateway = AgencyGateway::from_snapshot_on_clock_of(snapshot, gateway)?;
             Ok(GatewayResponse::Restored {
                 status: gateway.status(),
             })
@@ -2486,7 +2533,7 @@ fn execute_admitted(
 
 /// The relaying gateway stamps receipt time itself: a relayed record's own
 /// timestamps are the sender's, never the receiver's clock.
-fn communique_now_unix_ms() -> u64 {
+pub(crate) fn communique_now_unix_ms() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|since| since.as_millis() as u64)

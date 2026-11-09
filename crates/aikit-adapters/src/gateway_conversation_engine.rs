@@ -769,6 +769,59 @@ enum PiTakes {
     TuiMode,
 }
 
+/// The pi release whose argv grammar [`PI_FLAGS`] and whose provider table
+/// ([`pi_provider_credential_variables`]) AIKit copies: pi-coding-agent and
+/// pi-ai 1.5.0. A pi of another major or minor version may read its argv
+/// otherwise, so it is not held to no tools by this reading (DLW build
+/// ruling 2026-11-09, be2f).
+pub const PI_GRAMMAR_VERSION: &str = "1.5.0";
+
+/// One version exactly as `MAJOR.MINOR.PATCH` in decimal (DLW build ruling
+/// 2026-11-09, be2h): three parts, each digits only and with no leading zero
+/// but `0` itself; no leading `v`, no pre-release, no build.
+fn strict_version(version: &str) -> Option<(u64, u64, u64)> {
+    let mut parts = version.split('.');
+    let mut part = || -> Option<u64> {
+        let digits = parts.next()?;
+        let plain = !digits.is_empty()
+            && digits.bytes().all(|byte| byte.is_ascii_digit())
+            && (digits == "0" || !digits.starts_with('0'));
+        plain.then(|| digits.parse().ok()).flatten()
+    };
+    let version = (part()?, part()?, part()?);
+    parts.next().is_none().then_some(version)
+}
+
+/// At most 40 characters of what a pi printed, escaped as Rust escapes a
+/// string, so a refusal quotes it bounded and on one line.
+fn quoted_at_most_40(read: &str) -> String {
+    let mut kept: String = read.chars().take(40).collect();
+    if read.chars().count() > 40 {
+        kept.push('…');
+    }
+    format!("{kept:?}")
+}
+
+/// Whether the version a pi reports (its `--version` output) is one this
+/// reading of pi's argv was made for (DLW build ruling 2026-11-09, be2h):
+/// only the first line is read, trimmed, and it must be exactly
+/// `MAJOR.MINOR.PATCH`, of the major and minor of [`PI_GRAMMAR_VERSION`].
+/// Why not, in words that quote at most 40 characters of what was read.
+pub fn pi_version_fits(reported: &str) -> std::result::Result<(), String> {
+    let (major, minor, _) = strict_version(PI_GRAMMAR_VERSION).expect("AIKit's own pi version");
+    let first = reported.lines().next().unwrap_or_default().trim();
+    match strict_version(first) {
+        Some((read_major, read_minor, _)) if (read_major, read_minor) == (major, minor) => Ok(()),
+        Some(_) => Err(format!(
+            "pi {first} is not the {major}.{minor} line AIKit confines (AIKit reads pi's flags as pi {PI_GRAMMAR_VERSION} reads them)"
+        )),
+        None => Err(format!(
+            "this pi's --version reads {}, which is not one MAJOR.MINOR.PATCH version, so AIKit cannot say it is the {major}.{minor} line it confines",
+            quoted_at_most_40(first)
+        )),
+    }
+}
+
 const PI_FLAGS: &[(&str, &str, PiTakes)] = &[
     ("--help", "--help", PiTakes::Nothing),
     ("-h", "--help", PiTakes::Nothing),
@@ -1017,7 +1070,7 @@ fn pi_confinement(argv: &[String]) -> std::result::Result<(), String> {
     };
     if std::path::Path::new(program).file_name() != Some(std::ffi::OsStr::new("pi")) {
         return Err(format!(
-            "the program is {program}, and only pi itself (a program named pi) is held to no tools by its flags"
+            "the program is {program}, and only pi (a program named pi, its flags read as pi {PI_GRAMMAR_VERSION} reads them) is held to no tools by its flags"
         ));
     }
     let reading = PiReading::read(&argv[1..]);
@@ -3971,7 +4024,7 @@ mod tests {
             ),
             (
                 vec!["python3", "-nt", "-ne", "-ns", "--no-mcp", "-nc"],
-                "only pi itself",
+                "only pi (a program named pi",
             ),
         ] {
             let error = pi(&args).expect_err(&format!("{args:?}"));
@@ -3980,6 +4033,55 @@ mod tests {
         // `--` ends pi's options: a confining flag after it is a message.
         let error = pi(&["pi", "--", "-nt", "-ne", "-ns", "--no-mcp", "-nc"]).unwrap_err();
         assert!(error.contains("lacks --no-tools"), "{error}");
+    }
+
+    /// be2h (review 8): only the first line of what pi prints is read, and it
+    /// must be exactly `MAJOR.MINOR.PATCH` of the 1.5 line; anything else is
+    /// refused in words that quote at most 40 characters of it.
+    #[test]
+    fn pis_flags_are_read_only_for_the_pi_version_the_reading_was_made_for() {
+        for fits in ["1.5.0", "1.5.0\n1.6.0", "  1.5.12  \n", "1.5.0\r\n"] {
+            assert!(pi_version_fits(fits).is_ok(), "{fits:?}");
+        }
+        for refused in [
+            "1.5",
+            "v1.5",
+            "v1.5.0",
+            "01.05.0",
+            "1.05.0",
+            "1.5.x",
+            "1.5e3",
+            "1.5.0-beta.2",
+            "1.5.0+build",
+            "1.5.0.0",
+            "pi 1.5.0 node v22.1.0",
+            "node v22.1 pi 1.5.0",
+            "",
+            "\n1.5.0",
+        ] {
+            let why = pi_version_fits(refused).unwrap_err();
+            assert!(
+                why.contains("which is not one MAJOR.MINOR.PATCH version")
+                    && why.contains("the 1.5 line it confines"),
+                "{refused:?}: {why}"
+            );
+        }
+        for other in ["1.6.0", "1.4.9", "2.5.0", "0.84.4", "1.50.0"] {
+            let why = pi_version_fits(other).unwrap_err();
+            assert_eq!(
+                why,
+                format!("pi {other} is not the 1.5 line AIKit confines (AIKit reads pi's flags as pi 1.5.0 reads them)")
+            );
+        }
+        // Bounded: at most 40 characters of what was read, escaped.
+        let why = pi_version_fits(&"x".repeat(60)).unwrap_err();
+        assert!(why.contains(&format!("\"{}…\"", "x".repeat(40))), "{why}");
+        assert!(!why.contains("x".repeat(41).as_str()), "{why}");
+        let why = pi_version_fits("\u{1b}[2J1.5.0").unwrap_err();
+        assert!(
+            why.contains(r#""\u{1b}[2J1.5.0""#) && !why.contains('\u{1b}'),
+            "{why}"
+        );
     }
 
     /// be2d (review 5): the provider an argv selects is read as pi keeps it,

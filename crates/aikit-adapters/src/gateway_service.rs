@@ -39,7 +39,7 @@ use crate::gateway_runtime::{
     execute_gateway_command_from, AgencyGateway, GatewayCaller, GatewayCallerIdentity,
     GatewayCommand, GatewayConnection, GatewayIngressResult, GatewayOccupancyReading,
     GatewayRequestEnvelope, GatewayResponse, GatewayResponseEnvelope, GatewayStreamEvent,
-    VerifiedOccupant,
+    GatewayTickReading, VerifiedOccupant,
 };
 
 pub const GATEWAY_SERVICE_CARRIER_VERSION: &str = "aikit.gateway-service-carrier/v1";
@@ -136,7 +136,7 @@ pub fn restore_gateway_state(
             format!("decode gateway state {}: {error}", path.display()),
         )
     })?;
-    AgencyGateway::from_snapshot(snapshot)
+    AgencyGateway::from_snapshot_on_clock_of(snapshot, &fresh)
 }
 
 /// Where a stop's drain report is persisted beside the gateway's state:
@@ -377,10 +377,18 @@ pub fn execute_against_state_file_from(
 ) -> Result<GatewayResponse> {
     let _lock = acquire_gateway_state_lock(state_file, lock_timeout, "offline gateway command")?;
     let mut gateway = restore_gateway_state(fresh, Some(state_file))?;
+    // A record the load stamped is kept stamped, read-only or not (be2f).
     let read_only = command.is_read_only();
+    let persist = !read_only || gateway.stamped_on_load() > 0;
     let response = execute_gateway_command_from(&mut gateway, command, caller)?;
-    if !read_only {
-        persist_gateway_state(&gateway, Some(state_file))?;
+    if persist {
+        match persist_gateway_state(&gateway, Some(state_file)) {
+            // A read whose only write is its load's stamp carries on in
+            // memory when the state cannot be written (be2h): the read never
+            // fails for it, and the next load that can write stamps it.
+            Err(_) if read_only => {}
+            persisted => persisted?,
+        }
     }
     Ok(response)
 }
@@ -967,6 +975,76 @@ pub struct GatewayServiceRuntime {
     pub encounter: Option<Arc<dyn GatewayEncounterRelay>>,
     /// How each carrier is bound right now, read into every status answer.
     pub carriers: CarrierReadings,
+    /// What the last periodic tick met, read into every status answer
+    /// (be2f).
+    pub last_tick: LastTick,
+}
+
+/// The service's last periodic tick, as its tick loop read it (DLW build
+/// ruling 2026-11-09, be2f): `aikit gateway status` names its errors, so a
+/// pass that fails every tick is never silent.
+#[derive(Debug, Default)]
+pub struct LastTick(Mutex<Option<GatewayTickReading>>);
+
+impl LastTick {
+    pub fn set(&self, reading: GatewayTickReading) {
+        if let Ok(mut last) = self.0.lock() {
+            *last = Some(reading);
+        }
+    }
+
+    pub fn reading(&self) -> Option<GatewayTickReading> {
+        self.0.lock().ok().and_then(|last| last.clone())
+    }
+}
+
+/// How many of one tick's errors status names (DLW build ruling 2026-11-09,
+/// be2h); the rest are counted.
+const TICK_ERRORS_NAMED: usize = 20;
+
+/// Every error one tick met (be2f): the tick's own failure, or, in the
+/// report it returned, each string under an `error` key and each entry of an
+/// `errors` or `failures` list (be2h), named by where it stands in the
+/// report. At most [`TICK_ERRORS_NAMED`] are named, then "and N more".
+fn tick_errors(ticked: &Result<serde_json::Value>) -> Vec<String> {
+    let mut errors = Vec::new();
+    match ticked {
+        Err(error) => errors.push(error.to_string()),
+        Ok(report) => collect_tick_errors(report, "tick", &mut errors),
+    }
+    if errors.len() > TICK_ERRORS_NAMED {
+        let more = errors.len() - TICK_ERRORS_NAMED;
+        errors.truncate(TICK_ERRORS_NAMED);
+        errors.push(format!("and {more} more"));
+    }
+    errors
+}
+
+fn collect_tick_errors(value: &serde_json::Value, at: &str, errors: &mut Vec<String>) {
+    use serde_json::Value;
+    match value {
+        Value::Object(fields) => {
+            for (key, inner) in fields {
+                let here = format!("{at}.{key}");
+                match (key.as_str(), inner) {
+                    ("error", Value::String(error)) => errors.push(format!("{at}: {error}")),
+                    ("errors" | "failures", Value::Array(items)) => {
+                        errors.extend(items.iter().map(|item| match item {
+                            Value::String(error) => format!("{here}: {error}"),
+                            other => format!("{here}: {other}"),
+                        }))
+                    }
+                    _ => collect_tick_errors(inner, &here, errors),
+                }
+            }
+        }
+        Value::Array(items) => {
+            for (index, item) in items.iter().enumerate() {
+                collect_tick_errors(item, &format!("{at}[{index}]"), errors);
+            }
+        }
+        _ => {}
+    }
 }
 
 /// The service's own reading of its carriers, one per carrier kind. The
@@ -1222,6 +1300,10 @@ fn serve_gateway_service(
         None => None,
     };
     let gateway = restore_gateway_state(gateway, config.state_file.as_deref())?;
+    // What the load stamped is kept at once, so it is stamped once (be2f).
+    if gateway.stamped_on_load() > 0 {
+        persist_gateway_state(&gateway, config.state_file.as_deref())?;
+    }
     let gateway = Arc::new(Mutex::new(gateway));
     let shutdown = Arc::new(AtomicBool::new(false));
     let hub = Arc::new(SubscriptionHub::default());
@@ -1257,6 +1339,7 @@ fn serve_gateway_service(
         connections: ConnectionRegistry::default(),
         encounter: encounter_relay,
         carriers: CarrierReadings::default(),
+        last_tick: LastTick::default(),
     });
 
     // Coexistence gate at serve startup: with the exclusive policy and a
@@ -1318,9 +1401,10 @@ fn serve_gateway_service(
             let handle = {
                 let shutdown = Arc::clone(&shutdown);
                 let stop = stop.clone();
+                let runtime = Arc::clone(&runtime);
                 thread::spawn(move || {
                     let GatewayTickLoop { interval, hook } = loop_config;
-                    let mut last_error = None;
+                    let mut logged: Vec<String> = Vec::new();
                     // Sleep in small steps so a carrier shutdown stops the loop
                     // promptly instead of waiting out the whole interval.
                     let step = Duration::from_millis(100).min(interval);
@@ -1330,15 +1414,27 @@ fn serve_gateway_service(
                             // Every child a tick starts is the tick's.
                             let ticked = crate::runner::ChildOwner::Tick
                                 .scope(|| stop.scope(|| hook.tick()));
-                            if let Err(error) = ticked {
-                                last_error = Some(error);
+                            // Every error the tick met reaches status, and
+                            // the service log when it changes (be2f).
+                            let errors = tick_errors(&ticked);
+                            if errors != logged {
+                                if errors.is_empty() {
+                                    eprintln!("gateway tick: its errors have cleared");
+                                }
+                                for error in &errors {
+                                    eprintln!("gateway tick error: {error}");
+                                }
+                                logged.clone_from(&errors);
                             }
+                            runtime.last_tick.set(GatewayTickReading {
+                                at_unix_ms: crate::gateway_runtime::communique_now_unix_ms(),
+                                errors,
+                            });
                             until_next_tick = interval;
                         }
                         thread::sleep(step);
                         until_next_tick = until_next_tick.saturating_sub(step);
                     }
-                    let _ = last_error;
                 })
             };
             TickLoopHandle { handle, stop }
@@ -2110,6 +2206,7 @@ fn execute_serialized_request(
     // The kernel knows no carriers; the service answering knows its own.
     if let Ok(GatewayResponse::Status { status }) = &mut result {
         status.carriers = runtime.carriers.readings();
+        status.last_tick = runtime.last_tick.reading();
     }
     let mut subscribed = None;
     match &result {
@@ -2543,6 +2640,7 @@ mod tests {
             engine: None,
             connections: ConnectionRegistry::default(),
             carriers: CarrierReadings::default(),
+            last_tick: LastTick::default(),
         })
     }
 
@@ -2835,6 +2933,209 @@ mod tests {
         .unwrap();
         assert_eq!(fs::read(&state).unwrap(), before);
         assert_eq!(fs::metadata(&state).unwrap().modified().unwrap(), modified);
+    }
+
+    /// Review 7 (be2f): a record kept before the journal stamped what it took
+    /// reads as taken when this gateway first loads it, on the gateway's own
+    /// clock, never at its sender's `sent_at` (here a year ahead). The first
+    /// load that holds the state lock keeps the stamp, read-only or not, so
+    /// a later load does not move it.
+    #[test]
+    fn a_record_kept_before_the_stamp_is_taken_when_first_loaded_and_only_then() {
+        use crate::gateway_communique::ASK_EXPIRES_AFTER_MS;
+        let root = tempfile::tempdir().unwrap();
+        let state = root.path().join("gateway.json");
+        let mut kept = gateway();
+        execute_gateway_command(
+            &mut kept,
+            GatewayCommand::SendCommunique {
+                draft: Box::new(communique_draft("legacy")),
+            },
+        )
+        .unwrap();
+        let mut snapshot = kept.snapshot();
+        snapshot.communiques[0].received_at_unix_ms = None;
+        snapshot.communiques[0].sent_at_unix_ms = 365 * ASK_EXPIRES_AFTER_MS;
+        fs::write(&state, serde_json::to_vec(&snapshot).unwrap()).unwrap();
+        let on = |now: u64| gateway().with_clock(move || now);
+
+        let loaded = restore_gateway_state(on(50), Some(&state)).unwrap();
+        assert_eq!(loaded.stamped_on_load(), 1);
+        let record = &loaded.communiques().records()[0];
+        assert_eq!(record.received_at_unix_ms, Some(50), "first loaded at 50");
+        assert!(record.ask_expired(50 + ASK_EXPIRES_AFTER_MS));
+
+        // A read holding the state lock keeps what its load stamped.
+        execute_against_state_file(
+            on(60),
+            &state,
+            GatewayCommand::CommuniqueCounts,
+            Duration::from_secs(1),
+        )
+        .unwrap();
+        let later = restore_gateway_state(on(99), Some(&state)).unwrap();
+        assert_eq!(later.stamped_on_load(), 0, "stamped once");
+        assert_eq!(
+            later.communiques().records()[0].received_at_unix_ms,
+            Some(60)
+        );
+    }
+
+    /// Review 7 (be2f): a snapshot restored into a running gateway is stamped
+    /// on that gateway's clock, as a load is.
+    #[test]
+    fn a_restored_snapshot_is_stamped_on_the_restoring_gateways_clock() {
+        use crate::gateway_communique::ASK_EXPIRES_AFTER_MS;
+        let mut kept = gateway();
+        execute_gateway_command(
+            &mut kept,
+            GatewayCommand::SendCommunique {
+                draft: Box::new(communique_draft("legacy")),
+            },
+        )
+        .unwrap();
+        let mut snapshot = kept.snapshot();
+        snapshot.communiques[0].received_at_unix_ms = None;
+        snapshot.communiques[0].sent_at_unix_ms = 365 * ASK_EXPIRES_AFTER_MS;
+        let mut running = gateway().with_clock(|| 70);
+        execute_gateway_command(&mut running, GatewayCommand::Restore { snapshot }).unwrap();
+        assert_eq!(running.stamped_on_load(), 1);
+        assert_eq!(
+            running.communiques().records()[0].received_at_unix_ms,
+            Some(70)
+        );
+        assert!(running.communiques().records()[0].ask_expired(70 + ASK_EXPIRES_AFTER_MS));
+    }
+
+    /// A state file holding one record kept before the journal stamped what
+    /// it took (be2f's legacy record).
+    fn unstamped_state(state: &Path) {
+        let mut kept = gateway();
+        execute_gateway_command(
+            &mut kept,
+            GatewayCommand::SendCommunique {
+                draft: Box::new(communique_draft("legacy")),
+            },
+        )
+        .unwrap();
+        let mut snapshot = kept.snapshot();
+        snapshot.communiques[0].received_at_unix_ms = None;
+        fs::write(state, serde_json::to_vec(&snapshot).unwrap()).unwrap();
+    }
+
+    fn stamp_on_disk(state: &Path) -> serde_json::Value {
+        let kept: serde_json::Value = serde_json::from_slice(&fs::read(state).unwrap()).unwrap();
+        kept["communiques"][0]["received_at_unix_ms"].clone()
+    }
+
+    /// be2h (the review's table, start-time persist): a service started on a
+    /// state that holds an unstamped record stamps it and keeps the stamp at
+    /// once, before any request reaches it, so its day is counted from that
+    /// start and the record is stamped once.
+    #[cfg(unix)]
+    #[test]
+    fn a_service_started_on_an_unstamped_record_keeps_its_stamp_before_any_request() {
+        let root = tempfile::tempdir().unwrap();
+        let state = root.path().join("gateway.json");
+        let socket = root.path().join("gateway.sock");
+        unstamped_state(&state);
+        let stop = Arc::new(AtomicBool::new(false));
+        let config = GatewayServiceConfig {
+            websocket_bind: None,
+            websocket_bearer_token: None,
+            unix_socket: Some(socket.clone()),
+            state_file: Some(state.clone()),
+            max_frame_bytes: DEFAULT_GATEWAY_MAX_FRAME_BYTES,
+        };
+        let hooks = GatewayServiceHooks {
+            stop_signal: Some(Arc::clone(&stop)),
+            ..Default::default()
+        };
+        let (done_tx, done_rx) = mpsc::channel();
+        thread::spawn(move || {
+            let _ = done_tx.send(run_gateway_service_with_hooks(
+                gateway().with_clock(|| 40),
+                config,
+                hooks,
+            ));
+        });
+        wait_connectable(&socket);
+        // As it stands on disk while the service runs, no request answered.
+        let stamped = stamp_on_disk(&state);
+        stop.store(true, Ordering::SeqCst);
+        done_rx
+            .recv_timeout(Duration::from_secs(30))
+            .unwrap()
+            .unwrap();
+        assert_eq!(stamped, 40, "kept stamped at the service's start");
+    }
+
+    /// be2h (review nit): a read-only offline command on a state it cannot
+    /// write carries on in memory when its load stamped a record; the read
+    /// never fails for the stamp, and a command that writes still does.
+    #[cfg(unix)]
+    #[test]
+    fn an_offline_read_of_a_state_it_cannot_write_still_answers() {
+        use std::os::unix::fs::PermissionsExt;
+        if rustix::process::geteuid().is_root() {
+            return; // root writes a read-only folder anyway
+        }
+        let root = tempfile::tempdir().unwrap();
+        let folder = root.path().join("state");
+        fs::create_dir_all(&folder).unwrap();
+        let state = folder.join("gateway.json");
+        unstamped_state(&state);
+        drop(acquire_gateway_state_lock(&state, Duration::from_secs(1), "test").unwrap());
+        fs::set_permissions(&folder, fs::Permissions::from_mode(0o555)).unwrap();
+        let read = execute_against_state_file(
+            gateway().with_clock(|| 60),
+            &state,
+            GatewayCommand::CommuniqueCounts,
+            Duration::from_secs(1),
+        );
+        let write = execute_against_state_file(
+            gateway().with_clock(|| 60),
+            &state,
+            GatewayCommand::SendCommunique {
+                draft: Box::new(communique_draft("new")),
+            },
+            Duration::from_secs(1),
+        );
+        fs::set_permissions(&folder, fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(read.is_ok(), "{read:?}");
+        assert_eq!(
+            write.unwrap_err().code(),
+            "agency_gateway_service.state_write",
+            "a write still needs the state written"
+        );
+        assert_eq!(
+            stamp_on_disk(&state),
+            serde_json::Value::Null,
+            "the next load that can write stamps it"
+        );
+    }
+
+    /// be2h (review 6): a tick's errors reach status whole: the dispatcher's
+    /// `failures` with the passes' `error` and `errors`, at most 20 of them
+    /// named and the rest counted.
+    #[test]
+    fn a_ticks_errors_are_collected_whole_and_bounded() {
+        let report = serde_json::json!({
+            "dispatcher": {"failures": ["routine:a: no Central"]},
+            "relay": {"relay": {"error": "gateway-remotes.json is malformed"},
+                "world_agent": {"errors": (0..30).map(|i| format!("lock {i}")).collect::<Vec<_>>()}},
+        });
+        let errors = tick_errors(&Ok(report));
+        assert_eq!(errors.len(), TICK_ERRORS_NAMED + 1, "{errors:?}");
+        assert_eq!(errors[0], "tick.dispatcher.failures: routine:a: no Central");
+        assert_eq!(
+            errors[1],
+            "tick.relay.relay: gateway-remotes.json is malformed"
+        );
+        assert_eq!(errors[2], "tick.relay.world_agent.errors: lock 0");
+        assert_eq!(errors[TICK_ERRORS_NAMED], "and 12 more");
+        let few = tick_errors(&Ok(serde_json::json!({"relay": {"errors": ["one"]}})));
+        assert_eq!(few, ["tick.relay.errors: one"]);
     }
 
     #[cfg(unix)]
@@ -3652,6 +3953,78 @@ mod tests {
             });
             outcome.map(|_| serde_json::Value::Null)
         }
+    }
+
+    /// A tick whose passes report their errors in its report, as the relay
+    /// tick does: a remotes file it cannot read, and one ask's lock.
+    #[cfg(unix)]
+    struct ReportingTick;
+
+    #[cfg(unix)]
+    impl GatewayTick for ReportingTick {
+        fn tick(&self) -> Result<serde_json::Value> {
+            Ok(serde_json::json!({"relay": {
+                "relay": {"error": "gateway-remotes.json is malformed"},
+                "world_agent": {"started": [], "errors": [
+                    {"communique_ref": "aikit:communique:x", "error": "the lock failed"}]}}}))
+        }
+    }
+
+    /// Review 8 (be2f): a tick's errors are not dropped. `gateway status`
+    /// names the last tick's errors, each by where in the tick it arose.
+    #[cfg(unix)]
+    #[test]
+    fn gateway_status_names_the_last_ticks_errors() {
+        let root = tempfile::tempdir().unwrap();
+        let socket = root.path().join("gateway.sock");
+        let stop = Arc::new(AtomicBool::new(false));
+        let config = GatewayServiceConfig {
+            websocket_bind: None,
+            websocket_bearer_token: None,
+            unix_socket: Some(socket.clone()),
+            state_file: None,
+            max_frame_bytes: DEFAULT_GATEWAY_MAX_FRAME_BYTES,
+        };
+        let hooks = GatewayServiceHooks {
+            ticks: Some(GatewayTickLoop {
+                interval: Duration::from_millis(20),
+                hook: Box::new(ReportingTick),
+            }),
+            stop_signal: Some(Arc::clone(&stop)),
+            ..Default::default()
+        };
+        let (done_tx, done_rx) = mpsc::channel();
+        thread::spawn(move || {
+            let _ = done_tx.send(run_gateway_service_with_hooks(gateway(), config, hooks));
+        });
+        wait_connectable(&socket);
+        let target = crate::gateway_client::GatewayCarrierTarget::UnixSocket(socket.clone());
+        let deadline = Instant::now() + Duration::from_secs(30);
+        let last = loop {
+            let status =
+                crate::gateway_client::gateway_command(&target, GatewayCommand::Status, None)
+                    .unwrap();
+            let GatewayResponse::Status { status } = status else {
+                panic!("status answers its status: {status:?}");
+            };
+            if let Some(last) = status.last_tick {
+                break last;
+            }
+            assert!(Instant::now() < deadline, "no tick reached status");
+            thread::sleep(Duration::from_millis(20));
+        };
+        stop.store(true, Ordering::SeqCst);
+        done_rx
+            .recv_timeout(Duration::from_secs(30))
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            last.errors,
+            [
+                "tick.relay.relay: gateway-remotes.json is malformed",
+                r#"tick.relay.world_agent.errors: {"communique_ref":"aikit:communique:x","error":"the lock failed"}"#,
+            ]
+        );
     }
 
     /// Ends the tick's child if the test fails before the service does: only

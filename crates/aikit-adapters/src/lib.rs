@@ -197,8 +197,8 @@ pub use gateway_connector_specimen::{
 };
 pub use gateway_connector_wire::StdioWireConnector;
 pub use gateway_conversation_engine::{
-    parse_slash, pi_provider_credential_variables, pi_selected_provider, AgentHostTurnSource,
-    ConversationHarnessProtocol, ConversationTurn, ConversationTurnOutcome,
+    parse_slash, pi_provider_credential_variables, pi_selected_provider, pi_version_fits,
+    AgentHostTurnSource, ConversationHarnessProtocol, ConversationTurn, ConversationTurnOutcome,
     ConversationTurnRequest, ConversationTurnSource, DrainReport, DrainedTurn, EnginePolicy,
     FixtureScript, FixtureTurnSource, GatewayAskRequest, GatewayAskRoute, GatewayAskRouter,
     GatewayConversationEngine, GatewayTurnSourceResolver, SlashParse, StreamTiming, TurnProgress,
@@ -220,7 +220,7 @@ pub use gateway_runtime::{
     GatewayIngressDecision, GatewayIngressPolicy, GatewayIngressResult, GatewayInvocationMode,
     GatewayOccupancyReading, GatewayOwnerUnavailable, GatewayReplay, GatewayRequestEnvelope,
     GatewayResponse, GatewayResponseEnvelope, GatewaySnapshot, GatewayStatus, GatewayStreamEvent,
-    GatewayStreamJournal, VerifiedOccupant,
+    GatewayStreamJournal, GatewayTickReading, VerifiedOccupant,
     ACTUATION_STREAM_SCHEMA as GATEWAY_ACTUATION_STREAM_SCHEMA, AGENCY_GATEWAY_VERSION,
     GATEWAY_ECOLOGY_AUTHORITY_LAW, GATEWAY_FEATURE_COMMUNIQUE_EXACT_INSTANCE,
     GATEWAY_FEATURE_COMMUNIQUE_HANDLING, GATEWAY_INVOCATION_MODES,
