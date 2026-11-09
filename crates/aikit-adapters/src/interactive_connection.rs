@@ -603,6 +603,15 @@ impl AgentConnectionAdapter for AcpStableConnectionAdapter {
                 .is_some_and(|native| self.loading_native_sessions.contains(native));
         let mut signals = self.inner.ingest(message.clone())?;
         self.remember_open_model_options(&message, &mut signals)?;
+        // What the opened session reports it may call (DLW build ruling
+        // 2026-11-09): read from its own open answer, never assumed.
+        if let Some(result) = message.get("result") {
+            for signal in signals.iter_mut() {
+                if let ConnectionSignalKind::SessionOpened { binding } = &mut signal.kind {
+                    binding.declared_tools = crate::agent_connection::declared_tools_of(result);
+                }
+            }
+        }
         self.remember_open_modes(&signals);
         if !historic_load_replay {
             self.project_current_mode_update(&message, &mut signals);

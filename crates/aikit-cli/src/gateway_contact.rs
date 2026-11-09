@@ -169,11 +169,20 @@ impl GatewayAccess for LocalGateway {
                     return Err(error);
                 };
                 let gateway_ref = aikit_core::resource::ResourceRef::parse(&self.gateway_ref)?;
-                aikit_adapters::execute_against_state_file(
+                // No service answered, so this process is the gateway: it
+                // establishes who asks as a carrier would (DLW build ruling
+                // 2026-11-09), from its own environment, verified by this
+                // Workcell's Actuation; the draft's own attribution is never taken.
+                let occupancy = ServedOccupancy {
+                    cwd: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+                };
+                let caller = aikit_adapters::local_caller(&command, Some(&occupancy));
+                aikit_adapters::execute_against_state_file_from(
                     aikit_adapters::AgencyGateway::new(gateway_ref),
                     state_file,
                     command,
                     Duration::from_secs(2),
+                    &caller,
                 )
                 .map_err(|offline| {
                     if offline.code() == "agency_gateway_service.state_locked" {
@@ -199,6 +208,26 @@ impl GatewayAccess for LocalGateway {
             }
             Err(error) => Err(error),
         }
+    }
+}
+
+#[cfg(test)]
+impl LocalGateway {
+    /// A journal fixture: the command executed against the state file as the
+    /// gateway's own composition, so what it records is recorded as given.
+    pub(crate) fn call_as_runtime(&self, command: GatewayCommand) -> Result<GatewayResponse> {
+        let state_file = self
+            .state_file
+            .as_ref()
+            .expect("a fixture gateway has a state file");
+        aikit_adapters::execute_against_state_file(
+            aikit_adapters::AgencyGateway::new(aikit_core::resource::ResourceRef::parse(
+                &self.gateway_ref,
+            )?),
+            state_file,
+            command,
+            Duration::from_secs(2),
+        )
     }
 }
 
@@ -787,6 +816,57 @@ impl aikit_adapters::GatewayOccupancyReader for ServedOccupancy {
             read_at_unix_ms: now_unix_ms(),
         }
     }
+
+    /// Whether a generation is the Position's current occupant, asked now:
+    /// the journal attributes a sender verified only on this (DLW build ruling
+    /// 2026-11-09). This Workcell's Actuation is asked first. A Position that
+    /// stands on another Workcell is verified by that Workcell's own reading,
+    /// asked of the remote gateways this home declared (the reading this
+    /// gateway's routing already stands on), never by the record's claim nor
+    /// by whoever relayed it.
+    fn verify(
+        &self,
+        position_ref: &str,
+        generation_ref: &str,
+    ) -> std::result::Result<String, String> {
+        let owners = crate::gateway_owners::ProcessOwners::from_env();
+        let here = match owners.occupancy_verify(position_ref, generation_ref) {
+            Ok(OccupancyVerdict::Current(_)) => {
+                return Ok(format!(
+                    "actuation occupancy verify: {generation_ref} is the current occupant of {position_ref}"
+                ))
+            }
+            Ok(OccupancyVerdict::Refused(refusal)) => format!(
+                "Actuation refuses {generation_ref} for {position_ref} ({}): {}",
+                refusal.code, refusal.fact
+            ),
+            Err(unavailable) => format!("occupancy could not be verified: {unavailable}"),
+        };
+        let (local, _) = local_workcell(&owners, &self.cwd);
+        let elsewhere = AikitHome::discover()
+            .and_then(|home| remotes_elsewhere(&home, local.as_deref()))
+            .unwrap_or_default();
+        if elsewhere.is_empty() {
+            return Err(here);
+        }
+        let survey = RemoteSurvey::ask(
+            &elsewhere,
+            &GatewayCommand::OccupancyRead {
+                position_ref: position_ref.to_owned(),
+            },
+        );
+        survey
+            .claims(position_ref)
+            .into_iter()
+            .find(|claim| claim.generation_ref.as_deref() == Some(generation_ref))
+            .map(|claim| {
+                format!(
+                    "occupancy read of {}, the declared remote Workcell's gateway {}: {generation_ref} is the current occupant of {position_ref}",
+                    claim.remote.workcell_ref, claim.gateway_ref
+                )
+            })
+            .ok_or(here)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -901,6 +981,24 @@ pub fn resolve_sender(
     owners: &dyn ContactOwners,
     explicit_position: Option<&str>,
 ) -> Result<SenderResolution> {
+    // A named Position is a plain ref, as the journal bounds every ref (DLW
+    // build ruling 2026-11-09): whether it is then verified or only Claimed.
+    if let Some(named) = explicit_position.filter(|named| {
+        named.trim().is_empty()
+            || named.len() > aikit_adapters::MAX_COMMUNIQUE_REF_BYTES
+            || named.chars().any(|c| c.is_whitespace() || c.is_control())
+    }) {
+        return Err(three_part(
+            "gateway.sender_position_invalid",
+            format!(
+                "--from-position names a Position of {} bytes that is not a plain ref (at most {} bytes, with no space, control character or line break).",
+                named.len(),
+                aikit_adapters::MAX_COMMUNIQUE_REF_BYTES
+            ),
+            nothing_sent(),
+            "Name the Position by its ref: central:position:<world>:<role>.",
+        ));
+    }
     let position = explicit_position
         .map(str::to_owned)
         .or_else(|| env_value(POSITION_ENV));
@@ -2369,8 +2467,7 @@ fn forwarded_readback_via(
     if observed.communique_ref != communique.communique_ref
         || observed.from_position_ref != communique.from_position_ref
         || observed.from_generation_ref != communique.from_generation_ref
-        || observed.attribution != communique.attribution
-        || observed.attribution_basis != communique.attribution_basis
+        || !attribution_as_relayed(communique, &observed)
         || observed.to_position_ref != communique.to_position_ref
         || observed.to_instance != communique.to_instance
         || observed.body != communique.body
@@ -2385,8 +2482,28 @@ fn forwarded_readback_via(
     Ok(
         json!({"schema":"aikit.remote-communique-readback/v1","workcell_ref":remote.workcell_ref,"gateway_ref":expected_gateway,
         "communique_ref":observed.communique_ref,"state":observed.state,"delivered_to_generation_ref":observed.delivered_to_generation_ref,
-        "delivered_at_unix_ms":observed.delivered_at_unix_ms,"transitions":observed.transitions,"completed_work":false}),
+        "delivered_at_unix_ms":observed.delivered_at_unix_ms,"transitions":observed.transitions,
+        "attribution":observed.attribution,"attribution_basis":observed.attribution_basis,"completed_work":false}),
     )
+}
+
+/// Whether the remote holds the sent attribution, or the one its own journal
+/// set on ingest: a gateway that could not verify the relayed occupant keeps a
+/// verified record as Claimed and an owner's as Unknown, naming the relay in
+/// its basis. A readback never accepts a raise.
+fn attribution_as_relayed(sent: &Communique, observed: &Communique) -> bool {
+    if observed.attribution == sent.attribution {
+        return observed.attribution_basis == sent.attribution_basis;
+    }
+    let lowered = matches!(
+        (&sent.attribution, &observed.attribution),
+        (SenderAttribution::Verified, SenderAttribution::Claimed)
+            | (SenderAttribution::Owner, SenderAttribution::Unknown)
+    );
+    lowered
+        && observed
+            .attribution_basis
+            .starts_with("relayed by gateway ")
 }
 
 /// Whether a gateway keeps exact-instance bindings, from its `protocol`
@@ -3602,15 +3719,35 @@ pub fn replies(
     } else {
         (Value::Null, true)
     };
-    // An ask not yet answered waits for its World's agent, and says so.
-    let waiting = (found.is_empty() && world_agent::is_ask_body(&record.body))
-        .then_some(world_agent::WAITING_WORDS);
+    // An ask not yet answered waits for its World's agent, and says so; one
+    // that ended unanswered (its asker unverified, or a day waited) reads
+    // declined (DLW build ruling 2026-11-09).
+    let unanswered = found.is_empty() && world_agent::is_ask_body(&record.body);
+    let ended = unanswered
+        && ((!record.awaits_local_delivery() && !relayed)
+            || now_unix_ms()
+                >= record
+                    .sent_at_unix_ms
+                    .saturating_add(aikit_adapters::ASK_EXPIRES_AFTER_MS));
+    let waiting = (unanswered && !ended).then_some(world_agent::WAITING_WORDS);
+    let declined = ended.then(|| {
+        json!({
+            "words": world_agent::DECLINE_WORDS,
+            "basis": record
+                .transitions
+                .last()
+                .filter(|_| !record.awaits_local_delivery())
+                .map(|transition| transition.basis.clone())
+                .unwrap_or_else(|| "it waited 24 hours with no answer".into()),
+        })
+    });
     Ok(json!({
         "schema": COMMUNIQUE_REPLIES_SCHEMA,
         "communique_ref": record.communique_ref,
         "to_position_ref": record.to_position_ref,
         "reply_line": line,
         "waiting": waiting,
+        "declined": declined,
         "replies": found,
         "relayed": relayed,
         "complete": complete,
@@ -4328,6 +4465,17 @@ impl CommuniqueRelayTick {
                 Ok(replies) => replies["owner_replies"].clone(),
                 Err(error) => json!({ "error": error.to_string() }),
             };
+        // The asks of a World's agent are answered from this loop, not from
+        // any occupant's prompt (DLW build ruling 2026-11-09).
+        report["world_agent"] = world_agent::answer_pass(
+            &self.home,
+            &owners,
+            &gateway,
+            now_unix_ms(),
+            &|reference, position, generation| {
+                world_agent::spawn_answer(&self.target, reference, position, generation)
+            },
+        );
         Ok(report)
     }
 }
@@ -5011,6 +5159,54 @@ mod exact_instance_binding_tests {
 #[cfg(test)]
 mod forwarded_readback_tests {
     use super::*;
+
+    #[test]
+    fn a_readback_takes_the_recipients_own_lowering_and_never_a_raise() {
+        let sent = Communique {
+            attribution: SenderAttribution::Claimed,
+            attribution_basis: "named only".into(),
+            ..serde_json::from_value::<Communique>(json!({
+                "schema": "aikit.communique/v1", "communique_ref": "aikit:communique:raise",
+                "sequence": 1, "attribution": "claimed", "attribution_basis": "named only",
+                "to_position_ref": "position:child", "body": "words", "sent_at_unix_ms": 1,
+                "state": "pending", "origin_gateway_ref": "g"
+            }))
+            .unwrap()
+        };
+        let lowered = Communique {
+            attribution: SenderAttribution::Unknown,
+            attribution_basis:
+                "relayed by gateway g as the owner's; this gateway did not verify it".into(),
+            ..sent.clone()
+        };
+        let raised = Communique {
+            attribution: SenderAttribution::Verified,
+            attribution_basis: "relayed by gateway g as verified".into(),
+            ..sent.clone()
+        };
+        assert!(attribution_as_relayed(&sent, &sent));
+        assert!(!attribution_as_relayed(&sent, &lowered));
+        assert!(!attribution_as_relayed(&sent, &raised));
+        let verified = Communique {
+            attribution: SenderAttribution::Verified,
+            attribution_basis: "actual native sender generation".into(),
+            ..sent.clone()
+        };
+        let claimed = Communique {
+            attribution: SenderAttribution::Claimed,
+            attribution_basis:
+                "relayed by gateway g as verified; this gateway did not verify its occupant (x)"
+                    .into(),
+            ..sent.clone()
+        };
+        assert!(attribution_as_relayed(&verified, &claimed));
+        assert!(!attribution_as_relayed(&claimed, &verified));
+        let unexplained = Communique {
+            attribution_basis: "no relay named".into(),
+            ..claimed.clone()
+        };
+        assert!(!attribution_as_relayed(&verified, &unexplained));
+    }
     #[test]
     fn readback_observes_exact_remote_delivery_without_another_effect() {
         let sender_dir = tempfile::tempdir().unwrap();
@@ -5019,7 +5215,7 @@ mod forwarded_readback_tests {
         let recipient = LocalGateway::default_for(&AikitHome::at(recipient_dir.path()));
         let original = expect_accepted(
             sender
-                .call(GatewayCommand::SendCommunique {
+                .call_as_runtime(GatewayCommand::SendCommunique {
                     draft: Box::new(CommuniqueDraft {
                         communique_ref: "aikit:communique:remote-readback".into(),
                         from_position_ref: Some("position:parent".into()),
@@ -5072,6 +5268,13 @@ mod forwarded_readback_tests {
         )
         .unwrap();
         assert_eq!(before["state"], "pending");
+        // The recipient could not verify the relayed occupant itself, so its
+        // journal holds the record as Claimed, naming the relay.
+        assert_eq!(before["attribution"], "claimed");
+        assert!(before["attribution_basis"]
+            .as_str()
+            .unwrap()
+            .starts_with("relayed by gateway "));
         recipient
             .call(GatewayCommand::AcknowledgeCommuniques {
                 position_ref: "position:child".into(),

@@ -10,10 +10,13 @@
 
 use std::time::{Duration, Instant};
 
+use aikit_adapters::connection_process::ModelEnvironment;
 use aikit_adapters::{
     AgentHostTurnSource, ConversationHarnessProtocol, ConversationTurn, ConversationTurnOutcome,
-    ConversationTurnRequest, ConversationTurnSource, TOOL_LESS_TURN_USED_A_TOOL,
+    ConversationTurnRequest, ConversationTurnSource, HARNESS_NOT_CONFINED,
+    TOOL_LESS_TURN_USED_A_TOOL,
 };
+use aikit_core::credential::SecretValue;
 use aikit_core::resource::ResourceRef;
 use tempfile::TempDir;
 
@@ -26,6 +29,7 @@ import json, sys, threading, time
 
 counter = 0
 cancel = {}
+TOOLS = json.loads(sys.argv[1]) if len(sys.argv) > 1 else []
 lock = threading.Lock()
 
 def send(obj):
@@ -36,6 +40,20 @@ def run_turn(native, request_id, text):
     steps = 2 if "quick" in text else 8
     pause = 0.0 if "quick" in text else 0.25
     stop = "end_turn"
+    if "tell your env" in text:
+        import os
+        listing = os.listdir(os.environ.get("HOME", "/nonexistent")) if os.path.isdir(os.environ.get("HOME", "")) else None
+        said = json.dumps({"env": sorted(os.environ), "home": os.environ.get("HOME"), "cwd": os.getcwd(),
+                           "home_listing": listing, "credential": os.environ.get("ANTHROPIC_API_KEY")})
+        send({"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": native,
+              "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": said}}}})
+        send({"jsonrpc": "2.0", "id": request_id, "result": {"stopReason": stop}})
+        return
+    for kind in ("tool_result", "mcp_tool_progress"):
+        if "send a " + kind in text:
+            send({"jsonrpc": "2.0", "method": "session/update", "params": {
+                "sessionId": native, "update": {"sessionUpdate": kind, "toolCallId": "read-1",
+                                                "content": [{"type": "text", "text": "/etc/hosts"}]}}})
     if "use a tool" in text:
         send({"jsonrpc": "2.0", "method": "session/update", "params": {
             "sessionId": native,
@@ -69,7 +87,10 @@ for line in sys.stdin:
         with lock:
             counter += 1
             native = "native-%d" % counter
-        send({"jsonrpc": "2.0", "id": message["id"], "result": {"sessionId": native}})
+        result = {"sessionId": native}
+        if TOOLS is not None:
+            result["tools"] = TOOLS
+        send({"jsonrpc": "2.0", "id": message["id"], "result": result})
     elif method == "session/prompt":
         native = message["params"]["sessionId"]
         text = "".join(
@@ -86,19 +107,26 @@ for line in sys.stdin:
 "#;
 
 fn source() -> Option<(AgentHostTurnSource, TempDir)> {
+    source_reporting("[]")
+}
+
+/// The fixture, its session reporting `tools` (JSON; `null` reports no list).
+fn source_reporting(tools: &str) -> Option<(AgentHostTurnSource, TempDir)> {
     let dir = TempDir::new().unwrap();
-    let argv = vec![
-        "python3".to_string(),
+    let mut argv = vec![
+        python3()?,
         "-u".to_string(),
         "-c".to_string(),
         FIXTURE.to_string(),
     ];
+    argv.push(tools.to_owned());
     let source = AgentHostTurnSource::new(
         "acp-fixture",
         ConversationHarnessProtocol::Acp,
         argv,
-        dir.path().to_path_buf(),
+        dir.path().join("work"),
     );
+    std::fs::create_dir_all(dir.path().join("work")).unwrap();
     match source.sessions() {
         Ok(_) => Some((source, dir)),
         Err(error) if error.code() == "connection.process.spawn_failed" => {
@@ -112,6 +140,17 @@ fn source() -> Option<(AgentHostTurnSource, TempDir)> {
         }
         Err(error) => panic!("unexpected turn source failure: {error}"),
     }
+}
+
+/// python3 by its full path: a confined launch passes PATH on, but the
+/// fixture is named whole so the proof does not lean on it.
+fn python3() -> Option<String> {
+    std::env::var_os("PATH").and_then(|path| {
+        std::env::split_paths(&path)
+            .map(|dir| dir.join("python3"))
+            .find(|candidate| candidate.is_file())
+            .map(|found| found.display().to_string())
+    })
 }
 
 fn request(prompt: &str) -> ConversationTurnRequest {
@@ -237,4 +276,172 @@ fn a_tool_less_turn_that_calls_a_tool_is_stopped_and_answers_nothing() {
         ),
         "an ordinary source's turns may call tools"
     );
+}
+
+/// Confined before the prompt (DLW build ruling 2026-11-09): a tool-less
+/// turn is prompted only when the session it opened reports an empty tool
+/// list. A session that reports tools, or (on a protocol that reports them)
+/// no list at all, is refused before anything is prompted, in words naming
+/// the harness.
+#[test]
+fn a_tool_less_turn_is_refused_before_the_prompt_unless_its_session_reports_no_tools() {
+    for (tools, why) in [
+        (
+            r#"["Read", {"name": "Bash"}]"#,
+            "reports the tools Read, Bash",
+        ),
+        ("null", "reports no tool list"),
+    ] {
+        let Some((source, _dir)) = source_reporting(tools) else {
+            return;
+        };
+        let error = source
+            .without_tools()
+            .prompt(request("quick and plain"))
+            .err()
+            .unwrap_or_else(|| panic!("a session that {why} is not prompted"));
+        assert_eq!(error.code(), HARNESS_NOT_CONFINED, "{why}");
+        assert!(error.to_string().contains("acp-fixture"), "{error}");
+        assert!(error.to_string().contains(why), "{error}");
+    }
+    let Some((source, _dir)) = source_reporting("[]") else {
+        return;
+    };
+    // The source is held while its turn runs: dropping it stops its host.
+    let source = source.without_tools();
+    let turn = source.prompt(request("quick and plain")).unwrap();
+    assert!(matches!(
+        ended(turn.as_ref()),
+        ConversationTurnOutcome::Replied { .. }
+    ));
+
+    // pi is held to no tools by its launch flags alone: an argv without them
+    // is refused before anything is launched.
+    let dir = TempDir::new().unwrap();
+    let pi = |argv: &[&str]| {
+        AgentHostTurnSource::new(
+            "pi",
+            ConversationHarnessProtocol::PiRpc,
+            argv.iter().map(|arg| arg.to_string()).collect(),
+            dir.path().to_path_buf(),
+        )
+        .without_tools()
+        .prompt(request("quick"))
+        .err()
+        .expect("refused before launch")
+    };
+    let error = pi(&["/nonexistent/pi", "--mode", "rpc", "--no-tools"]);
+    assert_eq!(error.code(), HARNESS_NOT_CONFINED);
+    assert!(error.to_string().contains("--no-extensions"), "{error}");
+    let error = pi(&[
+        "/nonexistent/pi",
+        "--mode",
+        "rpc",
+        "-nt",
+        "-ne",
+        "-ns",
+        "--no-mcp",
+        "-nc",
+        "--tools",
+        "read",
+    ]);
+    assert_eq!(error.code(), HARNESS_NOT_CONFINED);
+    assert!(error.to_string().contains("--tools"), "{error}");
+    assert!(ConversationHarnessProtocol::PiRpc
+        .confines(&["pi", "-nt", "-ne", "-ns", "--no-mcp", "-nc"].map(String::from))
+        .is_ok());
+}
+
+/// The confined launch's environment: PATH and LANG, the provider's own
+/// credential variable, and an empty HOME of its own beside its empty
+/// working folder; nothing else of this process (no OI_*, no AIKit
+/// variable, no cargo environment) reaches the harness.
+#[test]
+fn a_confined_launch_sees_only_path_lang_its_credential_and_an_empty_home() {
+    let Some((source, dir)) = source() else {
+        return;
+    };
+    let work = dir.path().join("work");
+    let home = dir.path().join("work.home");
+    let environment = ModelEnvironment::isolated(&home)
+        .with_credential(
+            "ANTHROPIC_API_KEY",
+            SecretValue::new("fixture-credential").unwrap(),
+        )
+        .unwrap();
+    let source = source.without_tools().with_launch_environment(environment);
+    let turn = source.prompt(request("tell your env")).unwrap();
+    let ConversationTurnOutcome::Replied { text } = ended(turn.as_ref()) else {
+        panic!("the turn replies");
+    };
+    let said: serde_json::Value = serde_json::from_str(&text).unwrap();
+    let allowed = [
+        "PATH",
+        "LANG",
+        "HOME",
+        "ANTHROPIC_API_KEY",
+        "LC_CTYPE",
+        "__CF_USER_TEXT_ENCODING",
+    ];
+    for name in said["env"].as_array().unwrap() {
+        let name = name.as_str().unwrap();
+        assert!(
+            allowed.contains(&name),
+            "{name} reached a confined harness: {said}"
+        );
+    }
+    assert_eq!(said["home"], home.display().to_string());
+    assert_eq!(
+        said["home_listing"],
+        serde_json::json!([]),
+        "its HOME is empty"
+    );
+    assert_eq!(
+        std::fs::canonicalize(said["cwd"].as_str().unwrap()).unwrap(),
+        std::fs::canonicalize(&work).unwrap()
+    );
+    assert_eq!(said["credential"], "fixture-credential");
+
+    // The default confinement: the same, with no credential at all.
+    let Some((source, dir)) = source_reporting("[]") else {
+        return;
+    };
+    let source = source.without_tools();
+    let turn = source.prompt(request("tell your env")).unwrap();
+    let ConversationTurnOutcome::Replied { text } = ended(turn.as_ref()) else {
+        panic!("the turn replies");
+    };
+    let said: serde_json::Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(
+        said["home"],
+        dir.path().join("work.home").display().to_string()
+    );
+    assert!(said["credential"].is_null());
+    assert!(
+        said["env"].as_array().unwrap().len() < allowed.len(),
+        "{said}"
+    );
+}
+
+/// The guard is the backstop on every tool event: a tool's result, or a
+/// provider update about a tool, ends a tool-less turn as one that used a
+/// tool, whatever it said after.
+#[test]
+fn a_tool_result_or_a_tool_update_ends_a_tool_less_turn() {
+    for kind in ["tool_result", "mcp_tool_progress"] {
+        let Some((source, _dir)) = source() else {
+            return;
+        };
+        let source = source.without_tools();
+        let turn = source
+            .prompt(request(&format!("quick: send a {kind}")))
+            .unwrap();
+        assert_eq!(
+            ended(turn.as_ref()),
+            ConversationTurnOutcome::Failed {
+                reason: TOOL_LESS_TURN_USED_A_TOOL.into()
+            },
+            "{kind}"
+        );
+    }
 }

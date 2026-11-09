@@ -4,8 +4,8 @@ use std::{
 };
 
 use aikit_adapters::{
-    execute_gateway_command, run_gateway_service, AgencyGateway, GatewayRequestEnvelope,
-    GatewayResponseEnvelope, GatewayServiceConfig, DEFAULT_GATEWAY_MAX_FRAME_BYTES,
+    run_gateway_service, AgencyGateway, GatewayRequestEnvelope, GatewayResponseEnvelope,
+    GatewayServiceConfig, DEFAULT_GATEWAY_MAX_FRAME_BYTES,
 };
 use aikit_core::resource::ResourceRef;
 
@@ -114,9 +114,16 @@ fn run_stdio(mut gateway: AgencyGateway) -> Result<(), Box<dyn std::error::Error
             }
         };
         let shutdown = request.command.is_shutdown();
+        // The stdio carrier is its owner's pipe; it verifies no occupant, so
+        // a sender it carries is at most Claimed (DLW build ruling 2026-11-09).
+        let caller = aikit_adapters::GatewayCaller::Connection(aikit_adapters::GatewayConnection {
+            scope: aikit_adapters::CarrierScope::Owner,
+            presented: request.caller.clone().unwrap_or_default(),
+            verified: Vec::new(),
+        });
         let response = GatewayResponseEnvelope::from_result(
             request.request_id,
-            execute_gateway_command(&mut gateway, request.command),
+            aikit_adapters::execute_gateway_command_from(&mut gateway, request.command, &caller),
         );
         serde_json::to_writer(&mut stdout, &response)?;
         writeln!(&mut stdout)?;

@@ -2944,11 +2944,17 @@ pub struct GatewayDiscloseArgs {
     /// Its label, as the field shows it (at most 160 characters).
     #[arg(long, value_name = "TEXT")]
     pub label: Option<String>,
+    /// What the World shows of it, in words (at most 4000 characters): the
+    /// answer turn is given it, quoted.
+    #[arg(long, value_name = "TEXT")]
+    pub text: Option<String>,
     /// Withdraw it (at --star, from the whole field with --field, or everywhere).
     #[arg(long)]
     pub withdraw: bool,
     #[arg(long = "from-position", value_name = "POSITION")]
     pub from_position: Option<String>,
+    #[command(flatten)]
+    pub carrier: GatewayQueryArgs,
 }
 
 /// `aikit gateway answer-harness`.
@@ -2960,9 +2966,16 @@ pub struct GatewayAnswerHarnessArgs {
     /// Clear the election: asks then wait.
     #[arg(long)]
     pub clear: bool,
+    /// The provider's own credential variable, the one variable beside PATH
+    /// and LANG the confined harness is given.
+    #[arg(long = "credential-env", value_name = "VARIABLE")]
+    pub credential_env: Option<String>,
     #[arg(long = "from-position", value_name = "POSITION")]
     pub from_position: Option<String>,
-    /// The argv that launches the harness in its no-tools mode.
+    #[command(flatten)]
+    pub carrier: GatewayQueryArgs,
+    /// The argv that launches the harness in its no-tools mode (AIKit refuses
+    /// one it cannot hold to no tools).
     #[arg(last = true, value_name = "ARGV")]
     pub argv: Vec<String>,
 }

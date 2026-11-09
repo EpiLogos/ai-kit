@@ -234,6 +234,7 @@ impl<'a> Body<'a> {
             .env_remove("OI_POSITION_REF")
             .env_remove("OI_OCCUPANT_GENERATION")
             .env_remove("AIKIT_GATEWAY_TOKEN")
+            .env_remove("AIKIT_GATEWAY_TICK_MS")
             .env_remove("FIXTURE_OCCUPANCY")
             .current_dir(&self.home);
         if let Some(ledger) = &self.ledger {
@@ -357,6 +358,16 @@ struct Gateway {
 
 impl Gateway {
     fn serve(body: &Body<'_>, websocket: Option<(&str, &str)>) -> Self {
+        Self::serve_ticking(body, websocket, None)
+    }
+
+    /// Served with its own loop ticking every `tick_ms` (the service's
+    /// default period when `None`).
+    fn serve_ticking(
+        body: &Body<'_>,
+        websocket: Option<(&str, &str)>,
+        tick_ms: Option<u64>,
+    ) -> Self {
         let socket = body.home.join("state/gateway.sock");
         let mut args = vec!["gateway".to_owned(), "serve".to_owned()];
         if let Some((bind, token)) = websocket {
@@ -370,8 +381,11 @@ impl Gateway {
             ]);
         }
         let args: Vec<&str> = args.iter().map(String::as_str).collect();
-        let child = body
-            .command(&args)
+        let mut command = body.command(&args);
+        if let Some(ms) = tick_ms {
+            command.env("AIKIT_GATEWAY_TICK_MS", ms.to_string());
+        }
+        let child = command
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .spawn()
@@ -1563,7 +1577,7 @@ fn the_turn_boundary_delivers_quoted_communiques_and_marks_them_only_once_writte
         .as_str()
         .unwrap();
     assert!(context.contains("[gateway/communiques] 1 Communique for"));
-    assert!(context.contains(&format!("From: {GUARDIAN} [verified]")));
+    assert!(context.contains(&format!("From: \"{GUARDIAN}\" [verified]")));
     assert!(context.contains("   | From: central:position:project:O-I:boss [verified]"));
     assert!(!context
         .lines()
@@ -2374,7 +2388,8 @@ fn a_position_occupied_only_on_another_workcell_is_reached_through_that_workcell
 
     let (document, _) = steward.prompt(false);
     assert!(document.contains("Relay me."));
-    assert!(document.contains(&format!("From: {GUARDIAN} [verified]")));
+    // The hook answers JSON, so the quoted header reads escaped here.
+    assert!(document.contains(&format!("From: \\\"{GUARDIAN}\\\" [verified]")));
     let received = steward.ok(&["gateway", "conversation", "--with", GUARDIAN]);
     let delivered = &received["communiques"][0];
     assert_eq!(delivered["state"], "delivered");
@@ -2408,7 +2423,8 @@ fn a_position_occupied_only_on_another_workcell_is_reached_through_that_workcell
     assert_eq!(reply["forward"]["state"], "forwarded");
     let (document, _) = guardian.prompt(false);
     assert!(document.contains("On it."));
-    assert!(document.contains(&format!("From: {STEWARD} [verified]")));
+    // The hook answers JSON, so the quoted header reads escaped here.
+    assert!(document.contains(&format!("From: \\\"{STEWARD}\\\" [verified]")));
     let thread = guardian.ok(&["gateway", "conversation", "--with", STEWARD]);
     let answered = thread["communiques"]
         .as_array()
@@ -2500,8 +2516,22 @@ fn a_workcell_that_is_down_leaves_the_communique_held_until_a_relay_pass_finds_i
     let steward = b.as_occupant(STEWARD, "steward-b");
     let (document, _) = steward.prompt(false);
     assert!(document.contains("Are you up?"));
-    assert!(document.contains(&format!("From: {GUARDIAN} [verified]")));
+    // B declares no remote and A serves none, so B cannot ask A's own reading
+    // of its occupant: it keeps the relayed record as Claimed, naming the
+    // relay (DLW build ruling 2026-11-09). The hook answers JSON, so the
+    // quoted header reads escaped here.
+    assert!(
+        document.contains(&format!(
+            "From: \\\"{GUARDIAN}\\\" (claimed, not verified) [claimed]"
+        )),
+        "{document}"
+    );
     let delivered = journal_record(&b.home, &record["communique_ref"]);
+    assert_eq!(delivered["attribution"], "claimed");
+    assert!(delivered["attribution_basis"]
+        .as_str()
+        .unwrap()
+        .starts_with("relayed by gateway agency-gateway/a as verified"));
     assert_eq!(
         delivered["delivered_to_generation_ref"],
         generation("steward-b")
@@ -3166,8 +3196,10 @@ fn answer_of(reply: &Value) -> Value {
 }
 
 /// The answer harness: a stdlib-only ACP agent that keeps each prompt it is
-/// given (`prompt-N.txt`) and says what `reply.txt` holds; `TOOL` calls a tool
-/// first, as a harness that ignores its no-tools mode would.
+/// given (`prompt-N.txt`) and the environment it was launched in
+/// (`env-PID.json`), and says what `reply.txt` holds; `TOOL` calls a tool
+/// first, as a harness that ignores its no-tools mode would; its session
+/// reports the tools `tools.json` names (none without it).
 const ANSWER_HARNESS: &str = r#"
 import json, os, sys
 folder = sys.argv[1]
@@ -3185,7 +3217,10 @@ for line in sys.stdin:
         send({"jsonrpc": "2.0", "id": message["id"], "result": {"protocolVersion": 1,
               "agentCapabilities": {"loadSession": True, "sessionCapabilities": {"resume": {}}}}})
     elif method in ("session/new", "session/load", "session/resume"):
-        send({"jsonrpc": "2.0", "id": message["id"], "result": {"sessionId": "answer-1"}})
+        tools = [] if not os.path.exists(os.path.join(folder, "tools.json")) else json.load(open(os.path.join(folder, "tools.json")))
+        send({"jsonrpc": "2.0", "id": message["id"], "result": {"sessionId": "answer-1", "tools": tools}})
+        with open(os.path.join(folder, "env-%d.json" % os.getpid()), "w") as kept:
+            json.dump({"env": sorted(os.environ), "home": os.environ.get("HOME"), "cwd": os.getcwd()}, kept)
     elif method == "session/prompt":
         turns += 1
         text = "".join(p.get("text", "") if isinstance(p, dict) else str(p) for p in message["params"]["prompt"])
@@ -3349,7 +3384,7 @@ fn a_worlds_agent_answers_an_ask_in_one_bounded_turn_from_what_its_world_shows_a
     let window = body(&world, "a", "workcell:a", "agency-gateway/a");
     let scribe = window.as_occupant(SCRIBE, "scribe-1");
     let steward = window.as_occupant(STEWARD, "steward-1");
-    let service = Gateway::serve(&window, None);
+    let service = Gateway::serve_ticking(&window, None, Some(300));
 
     // What a World shows is the person's own record, never a body's.
     assert_eq!(
@@ -3369,6 +3404,47 @@ fn a_worlds_agent_answers_an_ask_in_one_bounded_turn_from_what_its_world_shows_a
             .refused(&["gateway", "disclose", "--world", "project", "--part", "part:x", "--field"])
             ["code"],
         "gateway.disclose_invalid"
+    );
+    // The person's own act is the person's connection's alone (DLW build
+    // ruling 2026-11-09): a Position body that unsets OI_POSITION_REF still
+    // presents its occupant generation, and the gateway refuses it.
+    let unset = Body {
+        position: None,
+        ..scribe.clone()
+    };
+    assert_eq!(
+        unset.refused(&[
+            "gateway",
+            "disclose",
+            "--world",
+            "project:O-I",
+            "--part",
+            "part:x",
+            "--field"
+        ])["code"],
+        "gateway.world_agent_not_the_person"
+    );
+    let (ok, refused) = json_first(
+        &unset,
+        &[
+            "gateway",
+            "answer-harness",
+            "--protocol",
+            "acp",
+            "--",
+            "true",
+        ],
+    );
+    assert!(!ok);
+    assert_eq!(
+        refused["error"]["code"],
+        "gateway.world_agent_not_the_person"
+    );
+    assert!(
+        refused
+            .to_string()
+            .contains("presents a Position or an occupant generation"),
+        "{refused}"
     );
     the_world_shows(&window);
     // A withdrawal takes back exactly what it names (O-I's agentDiscloseRelay
@@ -3428,7 +3504,7 @@ fn a_worlds_agent_answers_an_ask_in_one_bounded_turn_from_what_its_world_shows_a
     assert!(!turn.contains(&ask_ref), "{turn}");
     assert!(
         turn.contains(&format!(
-            "Reply: aikit gateway send --reply-to {plain_ref} --body \"...\""
+            "Reply: aikit gateway send --reply-to \"{plain_ref}\" --body \"...\""
         )),
         "{turn}"
     );
@@ -3456,10 +3532,9 @@ fn a_worlds_agent_answers_an_ask_in_one_bounded_turn_from_what_its_world_shows_a
         r#"{"schema":"oi.world-agent-answer/v1","words":"It is the second plate.","cites":["part:plate-2"]}"#,
     );
 
-    // The occupant's next turn starts the answer apart from itself; the
+    // The gateway's own loop answers it as the scribe's verified occupant,
+    // with no turn of the occupant's (DLW build ruling 2026-11-09): the
     // answer is held on the line back to the window, verified.
-    let next = scribe.prompt(false).0;
-    assert!(!next.contains("Which plate is this?"), "{next}");
     let replies = replies_once(&window, &ask_ref, 1);
     done_once(&scribe, &ask_ref);
     assert!(replies["waiting"].is_null(), "{replies}");
@@ -3491,8 +3566,42 @@ fn a_worlds_agent_answers_an_ask_in_one_bounded_turn_from_what_its_world_shows_a
     );
     assert!(prompt.contains("- part:essay\n"), "{prompt}");
     assert!(
-        prompt.contains("not to answer from:\n- part:diary\n- part:elsewhere\n"),
+        prompt.contains("not to answer from:\n  | part:diary\n  | part:elsewhere\n"),
         "{prompt}"
+    );
+    assert!(prompt.contains("its own claim, not verified"), "{prompt}");
+    assert!(
+        prompt.contains("which anyone at the star already sees"),
+        "{prompt}"
+    );
+    // Launched confined: PATH and LANG only beside its own empty HOME, in an
+    // empty folder of its own; nothing of AIKit's, Central's or the occupant's.
+    let launches: Vec<Value> = std::fs::read_dir(&harness)
+        .unwrap()
+        .filter_map(Result::ok)
+        .filter(|entry| entry.file_name().to_string_lossy().starts_with("env-"))
+        .map(|entry| serde_json::from_str(&std::fs::read_to_string(entry.path()).unwrap()).unwrap())
+        .collect();
+    assert_eq!(launches.len(), 1, "one launch");
+    for name in launches[0]["env"].as_array().unwrap() {
+        assert!(
+            [
+                "PATH",
+                "LANG",
+                "HOME",
+                "LC_CTYPE",
+                "__CF_USER_TEXT_ENCODING"
+            ]
+            .contains(&name.as_str().unwrap()),
+            "{name} reached the answer harness: {}",
+            launches[0]
+        );
+    }
+    let launched_home = launches[0]["home"].as_str().unwrap();
+    assert!(launched_home.ends_with("work.home"), "{launched_home}");
+    assert!(
+        !std::path::Path::new(launched_home).exists(),
+        "its HOME went with its turn"
     );
     for absent in ["forged", "Are you there?", "next turn", "My diary"] {
         assert!(!prompt.contains(absent), "{absent}: {prompt}");
@@ -3669,7 +3778,9 @@ fn an_ask_is_answered_or_declined_once_and_only_where_it_truly_came_from() {
     let window = body(&world, "a", "workcell:a", "agency-gateway/a");
     let scribe = window.as_occupant(SCRIBE, "scribe-1");
     let guardian = window.as_occupant(GUARDIAN, "guardian-1");
-    let service = Gateway::serve(&window, None);
+    // The gateway's own pass is held off (an hour's period) so each answer
+    // here is the one this test starts.
+    let service = Gateway::serve_ticking(&window, None, Some(3_600_000));
     the_world_shows(&window);
     disclose(
         &window,
@@ -3732,6 +3843,21 @@ fn an_ask_is_answered_or_declined_once_and_only_where_it_truly_came_from() {
         );
     }
 
+    // A harness whose session reports tools is never prompted: the ask is
+    // declined in words naming the harness (DLW build ruling 2026-11-09).
+    std::fs::write(harness.join("tools.json"), r#"["Read"]"#).unwrap();
+    let turns = prompts_kept(&harness).len();
+    let ask_ref = ask(&world_agent_ask_of("project:O-I", json!([])));
+    let declined = scribe.ok(&["gateway", "answer", &ask_ref]);
+    assert_eq!(declined["answered"], false);
+    let why = declined["declined"]["why"].as_str().unwrap();
+    assert!(
+        why.contains("acp (python3)") && why.contains("reports the tools Read"),
+        "{why}"
+    );
+    assert_eq!(prompts_kept(&harness).len(), turns, "never prompted");
+    std::fs::remove_file(harness.join("tools.json")).unwrap();
+
     // An offer the World shows there may be pointed to.
     harness_says(
         &harness,
@@ -3776,7 +3902,7 @@ fn an_ask_is_answered_or_declined_once_and_only_where_it_truly_came_from() {
         "no turn for another World"
     );
 
-    // A Claimed asker is no destination: refused, set aside, nothing sent.
+    // A Claimed asker is no destination: refused, closed declined, nothing sent.
     let claimed = window.ok(&[
         "gateway",
         "send",
@@ -3797,10 +3923,14 @@ fn an_ask_is_answered_or_declined_once_and_only_where_it_truly_came_from() {
             .all(|record| record["reply_to"] != claimed_ref.as_str()),
         "nothing reaches the Position it only claimed"
     );
+    let closed = scribe.ok(&["gateway", "message", &claimed_ref]);
     assert_eq!(
-        scribe.ok(&["gateway", "message", &claimed_ref])["communique"]["state"],
-        "delivered",
-        "set aside, never started again"
+        closed["communique"]["state"], "delivered",
+        "closed, never started again"
+    );
+    assert!(
+        closed.to_string().contains("the ask ended: declined"),
+        "{closed}"
     );
 
     // A verified Position's ask is answered to that Position.
@@ -3834,7 +3964,7 @@ fn an_agent_asked_on_another_workcell_answers_where_it_stands_and_the_window_rea
     world.claim_in(b.ledger.as_ref().unwrap(), SCRIBE, "scribe-b", "workcell:b");
     let (bind_a, bind_b) = (free_port(), free_port());
     let gateway_a = Gateway::serve(&a, Some((&bind_a, TOKEN)));
-    let gateway_b = Gateway::serve(&b, Some((&bind_b, TOKEN)));
+    let gateway_b = Gateway::serve_ticking(&b, Some((&bind_b, TOKEN)), Some(300));
     declare(&a, "workcell:b", &bind_b);
     declare(&b, "workcell:a", &bind_a);
     let scribe = b.as_occupant(SCRIBE, "scribe-b");
@@ -3866,7 +3996,7 @@ fn an_agent_asked_on_another_workcell_answers_where_it_stands_and_the_window_rea
         &harness,
         r#"{"schema":"oi.world-agent-answer/v1","words":"The second plate.","cites":["part:essay"]}"#,
     );
-    scribe.prompt(false);
+    // B's own loop answers it; no occupant prompts.
     let replies = replies_once(&a, &ask_ref, 1);
     done_once(&scribe, &ask_ref);
     assert_eq!(replies["relayed"], true);

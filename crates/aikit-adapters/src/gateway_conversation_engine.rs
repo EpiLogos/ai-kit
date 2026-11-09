@@ -736,6 +736,88 @@ pub enum ConversationHarnessProtocol {
     PrimeRpc,
 }
 
+/// The pi flags that launch it with nothing to call: no tools (built-in or
+/// extension), no extensions, no skills, no MCP and no context files.
+const PI_CONFINING_FLAGS: [(&str, Option<&str>); 5] = [
+    ("--no-tools", Some("-nt")),
+    ("--no-extensions", Some("-ne")),
+    ("--no-skills", Some("-ns")),
+    ("--no-mcp", None),
+    ("--no-context-files", Some("-nc")),
+];
+/// The pi flags that would give a confined launch something to call again.
+const PI_WIDENING_FLAGS: [&str; 7] = [
+    "--tools",
+    "-t",
+    "--extension",
+    "-e",
+    "--skill",
+    "--no-builtin-tools",
+    "-nbt",
+];
+
+impl ConversationHarnessProtocol {
+    /// How AIKit holds this protocol's harness to no tools before any prompt
+    /// (DLW build ruling 2026-11-09), or why it cannot for this argv:
+    ///
+    /// - pi, by its own launch flags: every confining flag present, none that
+    ///   widens it again;
+    /// - ACP, by the session it opens reporting an empty tool list;
+    /// - Prime RPC, by the session it attaches to reporting an empty tool
+    ///   registry.
+    pub fn confines(self, argv: &[String]) -> std::result::Result<&'static str, String> {
+        match self {
+            Self::PiRpc => {
+                let has = |flag: &str| argv.iter().any(|arg| arg == flag);
+                let missing: Vec<&str> = PI_CONFINING_FLAGS
+                    .iter()
+                    .filter(|(long, short)| !has(long) && short.is_none_or(|short| !has(short)))
+                    .map(|(long, _)| *long)
+                    .collect();
+                if !missing.is_empty() {
+                    return Err(format!(
+                        "pi is held to no tools only by its own launch flags, and this argv lacks {}",
+                        missing.join(", ")
+                    ));
+                }
+                if let Some(flag) = PI_WIDENING_FLAGS.iter().find(|flag| has(flag)) {
+                    return Err(format!(
+                        "this pi argv names {flag}, which gives the turn something to call"
+                    ));
+                }
+                Ok("pi launched with its tools, extensions, skills, MCP and context files disabled")
+            }
+            Self::Acp => Ok("an ACP agent whose session reports an empty tool list when it opens"),
+            Self::PrimeRpc => {
+                Ok("a Prime session that reports an empty tool registry when it is attached")
+            }
+        }
+    }
+
+    /// Whether this protocol's session reports its own tools (and must, for
+    /// a turn that takes none).
+    fn session_reports_tools(self) -> bool {
+        matches!(self, Self::Acp | Self::PrimeRpc)
+    }
+}
+
+/// Whether a signal is a tool at work: its call, its result, a provider
+/// update about one, or a Prime child run.
+fn is_tool_event(kind: &ConnectionSignalKind) -> bool {
+    match kind {
+        ConnectionSignalKind::ToolCall { .. } | ConnectionSignalKind::ToolResult { .. } => true,
+        ConnectionSignalKind::ProviderUpdate { session_update, .. } => {
+            session_update.contains("tool")
+        }
+        ConnectionSignalKind::Status { message } => message.starts_with("prime-rlm-child:"),
+        _ => false,
+    }
+}
+
+/// How long a tool-less turn's harness may take to start (launch, handshake
+/// and session open) unless the source is given its own bound.
+pub const TOOL_LESS_STARTUP_BOUND: Duration = Duration::from_secs(60);
+
 /// A turn source backed by a real [`AgentSessionHost`] driving a real harness
 /// process. The host launches lazily on the first prompt; one host carries the
 /// binding's agent sessions. A canonical New with a regenerated
@@ -754,7 +836,14 @@ pub struct AgentHostTurnSource {
     skill_roots: Option<Vec<PathBuf>>,
     /// Whether this source's turns take no tool (`without_tools`).
     tool_less: bool,
+    /// The launch environment; `None` inherits this process's.
+    environment: Option<crate::connection_process::ModelEnvironment>,
+    /// The bound on starting the harness (launch, handshake, session open).
+    startup_bound: Option<Duration>,
 }
+
+/// Why a tool-less turn was not prompted: its harness is not held to none.
+pub const HARNESS_NOT_CONFINED: &str = "gateway_conversation.harness_not_confined";
 
 /// How a tool-less turn ends when its harness calls a tool anyway.
 pub const TOOL_LESS_TURN_USED_A_TOOL: &str =
@@ -775,6 +864,8 @@ impl AgentHostTurnSource {
             host: Arc::new(OnceLock::new()),
             skill_roots: None,
             tool_less: false,
+            environment: None,
+            startup_bound: None,
         }
     }
 
@@ -784,10 +875,90 @@ impl AgentHostTurnSource {
     /// and ends `Failed` with [`TOOL_LESS_TURN_USED_A_TOOL`], so nothing a tool
     /// reached becomes its reply. Launch the harness in its own no-tools mode
     /// as well; this is the bound held here, at the seam, whatever it was given.
+    ///
+    /// Confined before the prompt, not interrupted after it (DLW build ruling
+    /// 2026-11-09): the harness is launched with PATH and LANG only, an empty
+    /// HOME of its own (beside the working folder, `<cwd>.home`) and no MCP
+    /// servers, within [`TOOL_LESS_STARTUP_BOUND`]; a protocol whose argv
+    /// cannot be confined is refused before launch, and a session that reports
+    /// tools (or, where its protocol reports them, reports none) is refused
+    /// before the prompt. The guard stays as the backstop, on every tool
+    /// event: a call, a result, a provider update about one, a Prime child run.
     pub fn without_tools(mut self) -> Self {
         self.skill_roots = Some(Vec::new());
         self.tool_less = true;
+        // A host launched before is not confined: this source launches its own.
+        self.host = Arc::new(OnceLock::new());
+        let home = self.cwd.with_file_name(format!(
+            "{}.home",
+            self.cwd
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_else(|| "turn".into())
+        ));
+        self.environment = Some(crate::connection_process::ModelEnvironment::isolated(home));
+        self.startup_bound = Some(TOOL_LESS_STARTUP_BOUND);
         self
+    }
+
+    /// Launch under this environment instead (a confined one carrying the
+    /// provider's own credential variable, say).
+    pub fn with_launch_environment(
+        mut self,
+        environment: crate::connection_process::ModelEnvironment,
+    ) -> Self {
+        self.environment = Some(environment);
+        self.host = Arc::new(OnceLock::new());
+        self
+    }
+
+    /// Bound the harness's start (launch, handshake, session open).
+    pub fn with_startup_bound(mut self, bound: Duration) -> Self {
+        self.startup_bound = Some(bound);
+        self
+    }
+
+    /// Refuse a tool-less turn whose harness is not held to no tools.
+    fn check_confined_argv(&self) -> Result<()> {
+        if !self.tool_less {
+            return Ok(());
+        }
+        self.protocol
+            .confines(&self.argv)
+            .map(|_| ())
+            .map_err(|why| {
+                AikitError::new(
+                    HARNESS_NOT_CONFINED,
+                    format!(
+                        "the {} harness cannot be held to no tools: {why}",
+                        self.harness_name
+                    ),
+                )
+            })
+    }
+
+    /// After the session opened and before the prompt: a tool-less turn's
+    /// session must declare no tools.
+    fn check_confined_session(&self, lane: &crate::agent_session_host::SessionLane) -> Result<()> {
+        if !self.tool_less {
+            return Ok(());
+        }
+        let refuse = |why: String| {
+            Err(AikitError::new(
+                HARNESS_NOT_CONFINED,
+                format!("the {} harness was not prompted: {why}", self.harness_name),
+            ))
+        };
+        match &lane.binding().declared_tools {
+            Some(tools) if !tools.is_empty() => refuse(format!(
+                "its session reports the tools {}, and this turn takes none",
+                tools.join(", ")
+            )),
+            None if self.protocol.session_reports_tools() => {
+                refuse("its session reports no tool list, so AIKit cannot hold it to none".into())
+            }
+            _ => Ok(()),
+        }
     }
 
     /// Name the Agent Skills roots explicitly (deterministic proof); the
@@ -810,48 +981,101 @@ impl AgentHostTurnSource {
     }
 
     fn host(&self) -> Result<&Mutex<AgentSessionHost>> {
+        self.host_before(None)
+    }
+
+    fn host_before(&self, deadline: Option<Instant>) -> Result<&Mutex<AgentSessionHost>> {
         if let Some(host) = self.host.get() {
             return Ok(host);
         }
+        self.check_confined_argv()?;
+        let isolated_home = self
+            .environment
+            .as_ref()
+            .and_then(crate::connection_process::ModelEnvironment::isolated_home);
+        if self.tool_less && isolated_home.is_none() {
+            return Err(AikitError::new(
+                HARNESS_NOT_CONFINED,
+                format!(
+                    "the {} harness takes no tool, so it is launched only in an isolated environment of its own",
+                    self.harness_name
+                ),
+            ));
+        }
+        if let Some(home) = isolated_home {
+            std::fs::create_dir_all(home).map_err(|error| {
+                AikitError::new(
+                    "gateway_conversation.isolated_home",
+                    format!("the harness's own empty HOME could not be made: {error}"),
+                )
+            })?;
+        }
+        let environment = self.environment.as_ref();
+        let cwd = Some(self.cwd.as_path());
+        let limits = AgentSessionHostLimits::default;
         let connection_ref = ResourceRef::parse("agent-connection/gateway-conversation")?;
         let provenance = vec!["gateway conversation engine".into()];
         let host = match self.protocol {
-            ConversationHarnessProtocol::Acp => AgentSessionHost::launch(
-                crate::interactive_connection::AcpStableConnectionAdapter::new(
-                    connection_ref,
-                    provenance,
-                ),
-                &self.argv,
-                Some(self.cwd.as_path()),
-                AgentSessionHostLimits::default(),
-            )?,
-            ConversationHarnessProtocol::PiRpc => AgentSessionHost::launch(
-                crate::pi_rpc_connection::PiRpcConnectionAdapter::new(
-                    connection_ref,
-                    self.cwd.display().to_string(),
-                    provenance,
-                ),
-                &self.argv,
-                Some(self.cwd.as_path()),
-                AgentSessionHostLimits::default(),
-            )?,
-            ConversationHarnessProtocol::PrimeRpc => AgentSessionHost::launch(
-                crate::prime_rpc_connection::PrimeRpcConnectionAdapter::new(
-                    connection_ref,
-                    self.cwd.display().to_string(),
-                    provenance,
-                ),
-                &self.argv,
-                Some(self.cwd.as_path()),
-                AgentSessionHostLimits::default(),
-            )?,
+            ConversationHarnessProtocol::Acp => {
+                AgentSessionHost::launch_with_journal_and_environment(
+                    crate::interactive_connection::AcpStableConnectionAdapter::new(
+                        connection_ref,
+                        provenance,
+                    ),
+                    &self.argv,
+                    cwd,
+                    limits(),
+                    None,
+                    environment,
+                )?
+            }
+            ConversationHarnessProtocol::PiRpc => {
+                AgentSessionHost::launch_with_journal_and_environment(
+                    crate::pi_rpc_connection::PiRpcConnectionAdapter::new(
+                        connection_ref,
+                        self.cwd.display().to_string(),
+                        provenance,
+                    ),
+                    &self.argv,
+                    cwd,
+                    limits(),
+                    None,
+                    environment,
+                )?
+            }
+            ConversationHarnessProtocol::PrimeRpc => {
+                AgentSessionHost::launch_with_journal_and_environment(
+                    crate::prime_rpc_connection::PrimeRpcConnectionAdapter::new(
+                        connection_ref,
+                        self.cwd.display().to_string(),
+                        provenance,
+                    ),
+                    &self.argv,
+                    cwd,
+                    limits(),
+                    None,
+                    environment,
+                )?
+            }
         };
-        host.initialize()?;
+        match deadline {
+            Some(deadline) => host.initialize_before(deadline)?,
+            None => host.initialize()?,
+        };
         let _ = self.host.set(Mutex::new(host));
         self.host.get().ok_or_else(poisoned)
     }
 
     fn open_lane(&self, host: &Mutex<AgentSessionHost>, agent_session: &ResourceRef) -> Result<()> {
+        self.open_lane_before(host, agent_session, None)
+    }
+
+    fn open_lane_before(
+        &self,
+        host: &Mutex<AgentSessionHost>,
+        agent_session: &ResourceRef,
+        deadline: Option<Instant>,
+    ) -> Result<()> {
         let locked = host.lock().map_err(|_| poisoned())?;
         if locked.lane(agent_session).is_ok() {
             return Ok(());
@@ -867,14 +1091,18 @@ impl AgentHostTurnSource {
                 SessionOpenMode::Attach
             }
         };
-        locked.open_session(SessionOpenRequest {
+        let request = SessionOpenRequest {
             mode,
             native_session_id: None,
             cwd: self.cwd.display().to_string(),
             additional_directories: Vec::new(),
             mcp_servers: Vec::new(),
             agent_session: Some(agent_session.clone()),
-        })?;
+        };
+        match deadline {
+            Some(deadline) => locked.open_session_before(request, deadline)?,
+            None => locked.open_session(request)?,
+        };
         Ok(())
     }
 
@@ -952,10 +1180,13 @@ impl ConversationTurnSource for AgentHostTurnSource {
     }
 
     fn prompt(&self, request: ConversationTurnRequest) -> Result<Arc<dyn ConversationTurn>> {
-        let host = self.host()?;
-        self.open_lane(host, &request.agent_session_ref)?;
+        // One bound for the whole start: launch, handshake and session open.
+        let deadline = self.startup_bound.map(|bound| Instant::now() + bound);
+        let host = self.host_before(deadline)?;
+        self.open_lane_before(host, &request.agent_session_ref, deadline)?;
         let locked = host.lock().map_err(|_| poisoned())?;
         let lane = locked.lane(&request.agent_session_ref)?;
+        self.check_confined_session(&lane)?;
         let handle = lane.prompt(self.prompt_payload(&request.prompt))?;
         drop(locked);
         let slot = Arc::new(TurnSlot::with_progress(Arc::new(TurnProgress::new())));
@@ -968,6 +1199,13 @@ impl ConversationTurnSource for AgentHostTurnSource {
             let mut used_a_tool = false;
             loop {
                 let outcome = match reader_handle.recv() {
+                    Some(HostEvent::Signal(signal)) if tool_less && is_tool_event(&signal.kind) => {
+                        if !used_a_tool {
+                            used_a_tool = true;
+                            let _ = reader_handle.interrupt(Some("this turn takes no tool".into()));
+                        }
+                        continue;
+                    }
                     Some(HostEvent::Signal(signal)) => {
                         match signal.kind {
                             // Fine-grained deltas accumulate the turn's final
@@ -979,13 +1217,6 @@ impl ConversationTurnSource for AgentHostTurnSource {
                             ConnectionSignalKind::AgentMessageSegment { text: segment } => {
                                 if let Some(progress) = &progress {
                                     progress.push_segment(segment);
-                                }
-                            }
-                            ConnectionSignalKind::ToolCall { .. } if tool_less => {
-                                if !used_a_tool {
-                                    used_a_tool = true;
-                                    let _ = reader_handle
-                                        .interrupt(Some("this turn takes no tool".into()));
                                 }
                             }
                             ConnectionSignalKind::ToolCall { payload } => {

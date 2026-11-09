@@ -2110,6 +2110,7 @@ fn conversation_operations_round_trip_as_portable_json() {
     let encoded = serde_json::to_value(aikit_adapters::GatewayRequestEnvelope {
         request_id: Some("op-1".into()),
         command,
+        caller: None,
     })
     .unwrap();
     assert_eq!(encoded["command"]["type"], "conversation");

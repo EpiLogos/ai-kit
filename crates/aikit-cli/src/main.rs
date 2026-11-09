@@ -1619,10 +1619,15 @@ fn cmd_gateway_dispatch(command: GatewayCmd, cwd: &std::path::Path) -> Result<Re
                 config.websocket_bind.clone().unwrap_or_default(),
                 config.websocket_bearer_token.clone().unwrap_or_default(),
             );
+            // The service's period: AIKIT_GATEWAY_TICK_MS when set (at least
+            // 100 ms), else the Routine dispatcher's own interval.
+            let tick_ms = std::env::var("AIKIT_GATEWAY_TICK_MS")
+                .ok()
+                .and_then(|raw| raw.trim().parse::<u64>().ok())
+                .filter(|ms| *ms >= 100)
+                .unwrap_or(aikit_cli::routine_dispatch::TICK_INTERVAL_MS as u64);
             let ticks = Some(GatewayTickLoop {
-                interval: std::time::Duration::from_millis(
-                    aikit_cli::routine_dispatch::TICK_INTERVAL_MS as u64,
-                ),
+                interval: std::time::Duration::from_millis(tick_ms),
                 hook: Box::new(aikit_cli::gateway_contact::GatewayServiceTick {
                     dispatcher,
                     relay: aikit_cli::gateway_contact::CommuniqueRelayTick {
@@ -1940,10 +1945,12 @@ fn cmd_gateway_dispatch(command: GatewayCmd, cwd: &std::path::Path) -> Result<Re
             )?)
         }
         GatewaySub::Disclose(a) => {
-            let owners = aikit_cli::gateway_owners::ProcessOwners::from_env();
+            // The person's own act: written through the gateway runtime, which
+            // takes it only from the person's own connection.
+            let (_, gateway, _) = contact_seams(&home, &a.carrier)?;
             gateway_data(aikit_cli::gateway_contact::world_agent::disclose(
                 &home,
-                &owners,
+                &gateway,
                 aikit_cli::gateway_contact::world_agent::DiscloseRequest {
                     world_ref: &a.world_ref,
                     part_ref: &a.part_ref,
@@ -1951,21 +1958,25 @@ fn cmd_gateway_dispatch(command: GatewayCmd, cwd: &std::path::Path) -> Result<Re
                     to_field: a.to_field,
                     kind: a.kind.as_deref(),
                     label: a.label.as_deref(),
+                    text: a.text.as_deref(),
                     withdraw: a.withdraw,
                     from_position: a.from_position.as_deref(),
                 },
             )?)
         }
         GatewaySub::AnswerHarness(a) => {
-            let owners = aikit_cli::gateway_owners::ProcessOwners::from_env();
+            let (_, gateway, _) = contact_seams(&home, &a.carrier)?;
             gateway_data(
                 aikit_cli::gateway_contact::world_agent::elect_answer_harness(
                     &home,
-                    &owners,
-                    a.protocol.as_deref(),
-                    a.argv,
-                    a.clear,
-                    a.from_position.as_deref(),
+                    &gateway,
+                    aikit_cli::gateway_contact::world_agent::ElectHarness {
+                        protocol: a.protocol.as_deref(),
+                        argv: a.argv,
+                        credential_env: a.credential_env.as_deref(),
+                        clear: a.clear,
+                        from_position: a.from_position.as_deref(),
+                    },
                 )?,
             )
         }

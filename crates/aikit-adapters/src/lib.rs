@@ -166,11 +166,13 @@ pub use gateway_coexistence::{
     GatewayCoexistenceGate, GATEWAY_COEXISTENCE_FILE_NAME, GATEWAY_COEXISTENCE_SCHEMA,
 };
 pub use gateway_communique::{
-    is_sender_of_address, sender_of_address, Communique, CommuniqueCount, CommuniqueDraft,
-    CommuniqueForward, CommuniqueForwardOutcome, CommuniqueHandling, CommuniqueInstance,
-    CommuniqueInstanceHold, CommuniqueJournal, CommuniqueRouting, CommuniqueState,
-    CommuniqueTransition, SenderAttribution, COMMUNIQUE_REF_PREFIX, COMMUNIQUE_SCHEMA,
-    MAX_COMMUNIQUE_BODY_BYTES, SENDER_OF_PREFIX,
+    body_schema, is_answer_body, is_ask_body, is_sender_of_address, sender_of_address, Communique,
+    CommuniqueCount, CommuniqueDraft, CommuniqueForward, CommuniqueForwardOutcome,
+    CommuniqueHandling, CommuniqueInstance, CommuniqueInstanceHold, CommuniqueJournal,
+    CommuniqueRouting, CommuniqueState, CommuniqueTransition, SenderAttribution,
+    ASKS_WAITING_FULL_WORDS, ASK_EXPIRES_AFTER_MS, COMMUNIQUE_REF_PREFIX, COMMUNIQUE_SCHEMA,
+    MAX_ASKS_WAITING_PER_ASKER, MAX_ASKS_WAITING_PER_POSITION, MAX_COMMUNIQUE_BODY_BYTES,
+    MAX_COMMUNIQUE_REF_BYTES, SENDER_OF_PREFIX, WORLD_AGENT_ANSWER_SCHEMA, WORLD_AGENT_ASK_SCHEMA,
 };
 pub use gateway_connector::{
     verify_connector_descriptor, ConnectorCapabilities, ConnectorConformance,
@@ -198,7 +200,8 @@ pub use gateway_conversation_engine::{
     ConversationTurnOutcome, ConversationTurnRequest, ConversationTurnSource, DrainReport,
     DrainedTurn, EnginePolicy, FixtureScript, FixtureTurnSource, GatewayAskRequest,
     GatewayAskRoute, GatewayAskRouter, GatewayConversationEngine, GatewayTurnSourceResolver,
-    SlashParse, StreamTiming, TurnProgress, TurnStreamItem, TOOL_LESS_TURN_USED_A_TOOL,
+    SlashParse, StreamTiming, TurnProgress, TurnStreamItem, HARNESS_NOT_CONFINED,
+    TOOL_LESS_STARTUP_BOUND, TOOL_LESS_TURN_USED_A_TOOL,
 };
 pub use gateway_posture::{
     sha256_of_file, CarrierScope, GatewayBuildIdentity, GatewayLifecycle, GatewayListenerReading,
@@ -207,27 +210,30 @@ pub use gateway_posture::{
     GATEWAY_FEATURE_ENCOUNTER_RELAY, GATEWAY_FEATURE_UNSUPPORTED_COMMAND,
 };
 pub use gateway_runtime::{
-    connector_descriptor, execute_gateway_command, text_send, AgencyGateway,
-    GatewayActuationControlIntent, GatewayActuationControlOperation, GatewayAgentReply,
-    GatewayAgentReplyFailure, GatewayBinding, GatewayCommand, GatewayConversationOperation,
+    connector_descriptor, execute_gateway_command, execute_gateway_command_from, text_send,
+    AgencyGateway, GatewayActuationControlIntent, GatewayActuationControlOperation,
+    GatewayAgentReply, GatewayAgentReplyFailure, GatewayBinding, GatewayCaller,
+    GatewayCallerIdentity, GatewayCommand, GatewayConnection, GatewayConversationOperation,
     GatewayDiscovery, GatewayEcology, GatewayEcologyAgency, GatewayEcologySession,
     GatewayEcologyStream, GatewayEcologySurface, GatewayErrorEnvelope, GatewayForkOrigin,
     GatewayIngressDecision, GatewayIngressPolicy, GatewayIngressResult, GatewayInvocationMode,
     GatewayOccupancyReading, GatewayOwnerUnavailable, GatewayReplay, GatewayRequestEnvelope,
     GatewayResponse, GatewayResponseEnvelope, GatewaySnapshot, GatewayStatus, GatewayStreamEvent,
-    GatewayStreamJournal, ACTUATION_STREAM_SCHEMA as GATEWAY_ACTUATION_STREAM_SCHEMA,
-    AGENCY_GATEWAY_VERSION, GATEWAY_ECOLOGY_AUTHORITY_LAW,
-    GATEWAY_FEATURE_COMMUNIQUE_EXACT_INSTANCE, GATEWAY_FEATURE_COMMUNIQUE_HANDLING,
-    GATEWAY_INVOCATION_MODES, GATEWAY_OCCUPANCY_READING_SCHEMA, GATEWAY_PROTOCOL_FEATURES,
+    GatewayStreamJournal, VerifiedOccupant,
+    ACTUATION_STREAM_SCHEMA as GATEWAY_ACTUATION_STREAM_SCHEMA, AGENCY_GATEWAY_VERSION,
+    GATEWAY_ECOLOGY_AUTHORITY_LAW, GATEWAY_FEATURE_COMMUNIQUE_EXACT_INSTANCE,
+    GATEWAY_FEATURE_COMMUNIQUE_HANDLING, GATEWAY_INVOCATION_MODES,
+    GATEWAY_OCCUPANCY_READING_SCHEMA, GATEWAY_PROTOCOL_FEATURES, MAX_WORLD_AGENT_RECORD_BYTES,
+    OCCUPANT_GENERATION_ENV, OCCUPANT_POSITION_ENV,
 };
 pub use gateway_service::{
-    acquire_gateway_state_lock, execute_against_state_file, persist_gateway_state,
-    restore_gateway_state, run_gateway_service, run_gateway_service_on_websocket_listener,
-    run_gateway_service_with_hooks, run_gateway_service_with_ticks, GatewayConversationHooks,
-    GatewayEncounterRelay, GatewayOccupancyReader, GatewayServiceConfig, GatewayServiceHooks,
-    GatewayServiceRuntime, GatewayStateLock, GatewayTick, GatewayTickLoop, SubscriptionHub,
-    SubscriptionSink, TickAtStop, DEFAULT_GATEWAY_MAX_FRAME_BYTES, GATEWAY_SERVICE_CARRIER_VERSION,
-    TICK_STOP_GRACE,
+    acquire_gateway_state_lock, execute_against_state_file, execute_against_state_file_from,
+    local_caller, persist_gateway_state, restore_gateway_state, run_gateway_service,
+    run_gateway_service_on_websocket_listener, run_gateway_service_with_hooks,
+    run_gateway_service_with_ticks, GatewayConversationHooks, GatewayEncounterRelay,
+    GatewayOccupancyReader, GatewayServiceConfig, GatewayServiceHooks, GatewayServiceRuntime,
+    GatewayStateLock, GatewayTick, GatewayTickLoop, SubscriptionHub, SubscriptionSink, TickAtStop,
+    DEFAULT_GATEWAY_MAX_FRAME_BYTES, GATEWAY_SERVICE_CARRIER_VERSION, TICK_STOP_GRACE,
 };
 pub use harness_disclosure::{
     disclose, ComposedEntry, DriftEntry, DriftKind, HarnessDisclosure, NativeEntry,
