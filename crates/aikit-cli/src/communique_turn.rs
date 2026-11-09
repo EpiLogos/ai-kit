@@ -80,6 +80,9 @@ pub struct TurnDelivery {
     /// Where in the turn it lands; absent is the turn boundary.
     #[serde(default, skip_serializing_if = "TurnMoment::is_boundary")]
     pub moment: TurnMoment,
+    /// The records carried as their ref alone, too large to preview here.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub whole: Vec<String>,
 }
 
 /// One aggregate budget, including attribution, retrieval commands and JSON
@@ -161,39 +164,63 @@ pub fn pending_communiques_at(
     };
     // A durable Position route is every occupant's; an exact-instance route
     // is only its own generation's, on its required Workcell.
+    // An ask of this World's agent never enters the live session (DLW build
+    // ruling 2026-11-09): it waits for its bounded answer turn.
     let records: Vec<Communique> = records
         .into_iter()
         .filter(|record| {
             moment.carries(record)
                 && record.deliverable_to(&occupant.generation_ref, occupant.workcell_ref.as_deref())
+                && !crate::gateway_contact::world_agent::is_ask_body(&record.body)
         })
         .collect();
     if records.is_empty() {
         return Ok(None);
     }
-    let mut carried = Vec::new();
+    let mut carried: Vec<Communique> = Vec::new();
+    // Records too large to preview within the envelope: carried as their ref
+    // and the command that reads them whole, never popped unsaid (DLW build
+    // ruling 2026-11-09), so the records behind them still arrive.
+    let mut whole: Vec<String> = Vec::new();
     let total = records.len();
-    for record in records {
-        if carried.len() == budget.records {
-            break;
-        }
-        carried.push(record);
-        let text = render(occupant, &carried, total, budget.preview_bytes, moment);
+    let fits = |carried: &[Communique], whole: &[String]| {
         let candidate = TurnDelivery {
             occupant: occupant.clone(),
             communique_refs: carried.iter().map(|r| r.communique_ref.clone()).collect(),
-            text,
+            text: render(
+                occupant,
+                carried,
+                whole,
+                total,
+                budget.preview_bytes,
+                moment,
+            ),
             pending_count: total,
             preview_bytes: budget.preview_bytes,
             moment,
+            whole: whole.to_vec(),
         };
         // Pi retains the offer in details while carrying text in content;
         // include both and bounded session/provenance framing in the budget.
         let bytes = handoff_envelope_bytes(&candidate);
-        if bytes > budget.serialized_bytes || bytes > budget.token_upper_bound {
-            carried.pop();
+        bytes <= budget.serialized_bytes && bytes <= budget.token_upper_bound
+    };
+    for record in records {
+        if carried.len() == budget.records {
             break;
         }
+        let reference = record.communique_ref.clone();
+        carried.push(record);
+        if fits(&carried, &whole) {
+            continue;
+        }
+        whole.push(reference);
+        if fits(&carried, &whole) {
+            continue;
+        }
+        whole.pop();
+        carried.pop();
+        break;
     }
     if carried.is_empty() {
         return Ok(None);
@@ -201,10 +228,18 @@ pub fn pending_communiques_at(
     Ok(Some(TurnDelivery {
         occupant: occupant.clone(),
         communique_refs: carried.iter().map(|r| r.communique_ref.clone()).collect(),
-        text: render(occupant, &carried, total, budget.preview_bytes, moment),
+        text: render(
+            occupant,
+            &carried,
+            &whole,
+            total,
+            budget.preview_bytes,
+            moment,
+        ),
         pending_count: total,
         preview_bytes: budget.preview_bytes,
         moment,
+        whole,
     }))
 }
 
@@ -222,6 +257,7 @@ fn handoff_envelope_bytes(delivery: &TurnDelivery) -> usize {
 fn render(
     occupant: &TurnOccupant,
     records: &[Communique],
+    whole: &[String],
     total: usize,
     preview_bytes: usize,
     moment: TurnMoment,
@@ -272,7 +308,11 @@ fn render(
                 );
             }
         }
-        let mut end = record.body.len().min(preview_bytes);
+        let mut end = if whole.contains(&record.communique_ref) {
+            0
+        } else {
+            record.body.len().min(preview_bytes)
+        };
         while !record.body.is_char_boundary(end) {
             end -= 1;
         }
@@ -281,18 +321,32 @@ fn render(
             out.push_str(line);
             out.push('\n');
         }
-        if end < record.body.len() {
+        if end == 0 && !record.body.is_empty() {
+            out.push_str("   | [too large to preview within this handoff; read it whole below]\n");
+        } else if end < record.body.len() {
             out.push_str("   | [preview truncated; retrieve the full record below]\n");
         }
         out.push_str(&format!(
             "   Full record: aikit --json gateway message {}\n",
             record.communique_ref
         ));
-        if let Some(from) = &record.from_position_ref {
-            out.push_str(&format!(
+        // Reply is offered only where a reply reaches someone: a sender's
+        // Position, or the field's window at no Position. A connector's `/ask`
+        // is answered on its own chat path (DLW build ruling 2026-11-09).
+        match (&record.from_position_ref, record.attribution) {
+            (Some(from), _) => out.push_str(&format!(
                 "   Reply: aikit gateway send --to {from} --reply-to {} --body \"...\"\n",
                 record.communique_ref
-            ));
+            )),
+            (None, aikit_adapters::SenderAttribution::Unknown)
+                if !crate::gateway_contact::asked_from_a_connector(record) =>
+            {
+                out.push_str(&format!(
+                    "   Reply: aikit gateway send --reply-to {} --body \"...\"\n",
+                    record.communique_ref
+                ))
+            }
+            (None, _) => {}
         }
     }
     if moment == TurnMoment::MidTurn {
@@ -380,6 +434,15 @@ pub fn offer_at_turn_boundary(decision: &mut HookDecision, event: &HookEvent) {
         }
     };
     let gateway = crate::gateway_contact::LocalGateway::default_for(&home);
+    // The asks that wait here are answered apart from this turn, once each.
+    if moment == TurnMoment::Boundary {
+        crate::gateway_contact::world_agent::start_waiting_answers(
+            &home,
+            &occupant.position_ref,
+            &gateway,
+            &crate::gateway_contact::world_agent::spawn_answer,
+        );
+    }
     let pending = match moment {
         TurnMoment::Boundary => pending_communiques_for_turn(&occupant, &gateway),
         TurnMoment::MidTurn => pending_steers_mid_turn(&occupant, &gateway),
@@ -561,6 +624,7 @@ pub fn handoff_for_occupant(
         || render(
             occupant,
             &records,
+            &delivery.whole,
             delivery.pending_count,
             delivery.preview_bytes,
             delivery.moment,
@@ -1074,6 +1138,192 @@ mod tests {
         assert!(handoff_for_occupant(&wrong, &gateway, Some(commit)).is_err());
         assert!(
             message_for_occupant(&occupant(), &gateway, "aikit:communique:exact-retrieval").is_ok()
+        );
+    }
+
+    fn send_from(
+        gateway: &LocalGateway,
+        reference: &str,
+        body: &str,
+        from: Option<&str>,
+        basis: &str,
+    ) {
+        gateway
+            .call(GatewayCommand::SendCommunique {
+                draft: Box::new(CommuniqueDraft {
+                    communique_ref: format!("aikit:communique:{reference}"),
+                    from_position_ref: from.map(str::to_owned),
+                    from_generation_ref: from.map(|_| "actuation:generation:sender".to_owned()),
+                    attribution: if from.is_some() {
+                        SenderAttribution::Verified
+                    } else {
+                        SenderAttribution::Unknown
+                    },
+                    attribution_basis: basis.into(),
+                    to_position_ref: occupant().position_ref,
+                    to_workcell_ref: None,
+                    to_instance: None,
+                    instance_hold: None,
+                    body: body.into(),
+                    handling: Default::default(),
+                    sent_at_unix_ms: 100,
+                    state: CommuniqueState::Pending,
+                    state_basis: "native owner acceptance".into(),
+                    reply_to: None,
+                    forward_to_workcell_ref: None,
+                    routing: None,
+                }),
+            })
+            .unwrap();
+    }
+
+    /// One record never wedges an inbox (DLW build ruling 2026-11-09). An ask
+    /// of this World's agent, however large, never enters the live session; a
+    /// record whose preview alone overflows the envelope is carried as its ref
+    /// and the command that reads it whole; and the record behind both still
+    /// arrives, on this turn.
+    #[test]
+    fn an_oversize_record_first_never_wedges_the_inbox() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = AikitHome::at(dir.path());
+        let gateway = LocalGateway::default_for(&home);
+        let sources: Vec<Value> = (0..60)
+            .map(|index| json!({"part_ref": format!("part:p{index}"), "star_ref": "star:s", "kind": "page", "label": "L".repeat(150)}))
+            .collect();
+        let ask = json!({"schema": "oi.world-agent-ask/v1", "ask_ref": "ask:big", "star_ref": "star:s",
+            "asked_by_world_ref": "world:w", "world_ref": "project:O-I", "words": "w".repeat(1900),
+            "sources": sources, "answer_in": "oi.world-agent-answer/v1"});
+        send_from(
+            &gateway,
+            "ask-first",
+            &ask.to_string(),
+            None,
+            "no Position named",
+        );
+        let sender = Some("central:position:control:root:sender");
+        send_from(
+            &gateway,
+            "oversize",
+            &"\"\\".repeat(1500),
+            sender,
+            "verified sender occupancy",
+        );
+        // The envelope is set just below what the oversize record's preview
+        // alone would take, so only its ref and the command that reads it
+        // whole can stand in it; the record behind it is sent after.
+        let roomy = HandoffBudget {
+            records: 8,
+            serialized_bytes: 16_384,
+            token_upper_bound: 16_384,
+            preview_bytes: 512,
+        };
+        let previewed = pending_communiques_with_budget(&occupant(), &gateway, roomy)
+            .unwrap()
+            .expect("previewed in a roomy envelope");
+        assert!(
+            !previewed.text.contains("read it whole below"),
+            "{}",
+            previewed.text
+        );
+        let tight = handoff_envelope_bytes(&previewed) - 1;
+        let budget = HandoffBudget {
+            serialized_bytes: tight,
+            token_upper_bound: tight,
+            ..roomy
+        };
+        send_from(
+            &gateway,
+            "after",
+            "The one behind.",
+            sender,
+            "verified sender occupancy",
+        );
+        let delivery = pending_communiques_with_budget(&occupant(), &gateway, budget)
+            .unwrap()
+            .expect("the records behind an oversize one still arrive");
+        assert_eq!(
+            delivery.communique_refs,
+            ["aikit:communique:oversize", "aikit:communique:after"],
+            "the ask is never offered to the session"
+        );
+        assert!(handoff_envelope_bytes(&delivery) <= tight);
+        assert!(
+            delivery
+                .text
+                .contains("too large to preview within this handoff; read it whole below"),
+            "{}",
+            delivery.text
+        );
+        assert!(delivery
+            .text
+            .contains("Full record: aikit --json gateway message aikit:communique:oversize"));
+        assert!(delivery.text.contains("   | The one behind."));
+        assert!(!delivery.text.contains("ask:big"), "{}", delivery.text);
+        assert!(!delivery.text.contains("www"), "{}", delivery.text);
+
+        let commit = json!({"delivery": delivery, "carried_text": delivery.text});
+        let confirmed = handoff_for_occupant(&occupant(), &gateway, Some(commit)).unwrap();
+        assert_eq!(
+            confirmed["acknowledged"],
+            json!(["aikit:communique:oversize", "aikit:communique:after"])
+        );
+        assert!(
+            pending_communiques_with_budget(&occupant(), &gateway, budget)
+                .unwrap()
+                .is_none(),
+            "the ask waits for its answer turn, never for this session"
+        );
+        assert!(message_for_occupant(&occupant(), &gateway, "aikit:communique:ask-first").is_ok());
+    }
+
+    /// Reply is offered only where a reply reaches someone (DLW build ruling
+    /// 2026-11-09): to a sender's Position, and on the line back to the field's
+    /// window at no Position. A connector's `/ask` is answered on its own chat
+    /// path, so no `--reply-to` is offered for it.
+    #[test]
+    fn reply_is_offered_only_where_a_reply_reaches_someone() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = AikitHome::at(dir.path());
+        let gateway = LocalGateway::default_for(&home);
+        send_from(
+            &gateway,
+            "window",
+            "From the field.",
+            None,
+            "no Position named",
+        );
+        send_from(
+            &gateway,
+            "connector",
+            "From a chat.",
+            None,
+            "no Position named; asked from connector conversation c-1 on slack (binding b, agent session s, agency a)",
+        );
+        let sender = "central:position:control:root:sender";
+        send_from(
+            &gateway,
+            "positioned",
+            "From a Position.",
+            Some(sender),
+            "verified sender occupancy",
+        );
+        let text = pending_communiques_for_turn(&occupant(), &gateway)
+            .unwrap()
+            .unwrap()
+            .text;
+        assert!(
+            text.contains("Reply: aikit gateway send --reply-to aikit:communique:window --body"),
+            "{text}"
+        );
+        assert!(
+            !text.contains("--reply-to aikit:communique:connector"),
+            "{text}"
+        );
+        assert!(
+            text.contains(&format!(
+                "Reply: aikit gateway send --to {sender} --reply-to aikit:communique:positioned --body"
+            )),
+            "{text}"
         );
     }
 }

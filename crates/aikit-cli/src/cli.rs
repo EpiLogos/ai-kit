@@ -1240,6 +1240,10 @@ fn gateway_route(command: &GatewaySub) -> &'static str {
         GatewaySub::Team { .. } => "cmd_gateway_team",
         GatewaySub::Conversation(_) => "cmd_gateway_conversation",
         GatewaySub::Heard(_) => "cmd_gateway_heard",
+        GatewaySub::Replies(_) => "cmd_gateway_replies",
+        GatewaySub::Answer(_) => "cmd_gateway_answer",
+        GatewaySub::Disclose(_) => "cmd_gateway_disclose",
+        GatewaySub::AnswerHarness(_) => "cmd_gateway_answer_harness",
         GatewaySub::Delegate(_) => "cmd_gateway_delegate",
         GatewaySub::Forward(_) => "cmd_gateway_forward",
         GatewaySub::Remote(c) => match &c.command {
@@ -2444,6 +2448,24 @@ pub enum GatewaySub {
     /// Position, so it reads what a sender may know; the whole record stays
     /// its occupant's (`message`).
     Heard(GatewayHeardArgs),
+    /// The replies to a Communique you sent from no Position (a window, a
+    /// desk), read by its ref: whole, since the words are yours to read; a
+    /// relayed one is read at the gateway that took it.
+    Replies(GatewayRepliesArgs),
+    /// Answer an ask of your World's agent at a star
+    /// (`oi.world-agent-ask/v1`) through ONE bounded, tool-less turn on the
+    /// harness the person elected: it is given only the words asked and the
+    /// parts your World shows there, and answers in
+    /// `oi.world-agent-answer/v1`, checked before it is sent. Run as the
+    /// asked Position's occupant; the ask never enters a live session.
+    Answer(GatewayAnswerArgs),
+    /// Record what your World shows at a star, or to the whole field, or
+    /// withdraw it: all an ask of its agent there may draw on. The person's
+    /// own window records it; a body at a Position may not.
+    Disclose(GatewayDiscloseArgs),
+    /// Elect (or clear, or read) the harness asks of a World's agent are
+    /// answered with, launched in its own no-tools mode. The person's act.
+    AnswerHarness(GatewayAnswerHarnessArgs),
     /// Cross a Communique into obligation-bearing work: Factory assigns custody
     /// to its recipient Position and the Communique is marked escalated.
     Delegate(GatewayDelegateArgs),
@@ -2751,8 +2773,11 @@ pub struct GatewayWhoArgs {
 #[derive(Debug, Args)]
 pub struct GatewaySendArgs {
     /// Recipient Position: `central:position:<world>:<slug>` or `@handle`.
+    /// Omitted with --reply-to, the reply goes where what it answers came
+    /// from: its sender's Position, or the line back to a sender that stood
+    /// at no Position.
     #[arg(long, value_name = "POSITION|@HANDLE")]
-    pub to: String,
+    pub to: Option<String>,
     /// The words to send.
     #[arg(long, value_name = "TEXT", conflicts_with = "body_file")]
     pub body: Option<String>,
@@ -2873,6 +2898,73 @@ pub struct GatewayHeardArgs {
     pub communique_ref: String,
     #[command(flatten)]
     pub carrier: GatewayQueryArgs,
+}
+
+/// `aikit gateway replies`.
+#[derive(Debug, Args)]
+pub struct GatewayRepliesArgs {
+    /// The Communique you sent (`aikit:communique:…`, as `send` answered it).
+    #[arg(value_name = "COMMUNIQUE_REF")]
+    pub communique_ref: String,
+    #[command(flatten)]
+    pub carrier: GatewayQueryArgs,
+}
+
+/// `aikit gateway answer`.
+#[derive(Debug, Args)]
+pub struct GatewayAnswerArgs {
+    /// The ask (`aikit:communique:…`).
+    #[arg(value_name = "COMMUNIQUE_REF")]
+    pub communique_ref: String,
+    /// Speak as this Position when the body carries no OI_POSITION_REF.
+    #[arg(long = "from-position", value_name = "POSITION")]
+    pub from_position: Option<String>,
+    #[command(flatten)]
+    pub carrier: GatewayQueryArgs,
+}
+
+/// `aikit gateway disclose`.
+#[derive(Debug, Args)]
+pub struct GatewayDiscloseArgs {
+    /// The World that shows it, named whole (`project:NAME`).
+    #[arg(long = "world", value_name = "WORLD_REF")]
+    pub world_ref: String,
+    /// The part shown.
+    #[arg(long = "part", value_name = "PART_REF")]
+    pub part_ref: String,
+    /// The star it is shown at.
+    #[arg(long = "star", value_name = "STAR_REF")]
+    pub star_ref: Option<String>,
+    /// Shown to the whole field (and so at every star).
+    #[arg(long = "field")]
+    pub to_field: bool,
+    /// Its kind, as the field shows it.
+    #[arg(long, value_name = "KIND")]
+    pub kind: Option<String>,
+    /// Its label, as the field shows it (at most 160 characters).
+    #[arg(long, value_name = "TEXT")]
+    pub label: Option<String>,
+    /// Withdraw it (at --star, from the whole field with --field, or everywhere).
+    #[arg(long)]
+    pub withdraw: bool,
+    #[arg(long = "from-position", value_name = "POSITION")]
+    pub from_position: Option<String>,
+}
+
+/// `aikit gateway answer-harness`.
+#[derive(Debug, Args)]
+pub struct GatewayAnswerHarnessArgs {
+    /// `acp`, `pi-rpc` or `prime-rpc`.
+    #[arg(long, value_name = "PROTOCOL")]
+    pub protocol: Option<String>,
+    /// Clear the election: asks then wait.
+    #[arg(long)]
+    pub clear: bool,
+    #[arg(long = "from-position", value_name = "POSITION")]
+    pub from_position: Option<String>,
+    /// The argv that launches the harness in its no-tools mode.
+    #[arg(last = true, value_name = "ARGV")]
+    pub argv: Vec<String>,
 }
 
 /// `aikit gateway delegate`.

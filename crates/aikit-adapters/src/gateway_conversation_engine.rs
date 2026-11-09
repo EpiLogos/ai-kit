@@ -752,7 +752,13 @@ pub struct AgentHostTurnSource {
     /// `None` means the standard roots: the home `~/.agents/skills` and the
     /// working directory's `.agents/skills`.
     skill_roots: Option<Vec<PathBuf>>,
+    /// Whether this source's turns take no tool (`without_tools`).
+    tool_less: bool,
 }
+
+/// How a tool-less turn ends when its harness calls a tool anyway.
+pub const TOOL_LESS_TURN_USED_A_TOOL: &str =
+    "the turn called a tool, and this turn takes none: it was stopped, and nothing it said is its answer";
 
 impl AgentHostTurnSource {
     pub fn new(
@@ -768,7 +774,20 @@ impl AgentHostTurnSource {
             cwd,
             host: Arc::new(OnceLock::new()),
             skill_roots: None,
+            tool_less: false,
         }
+    }
+
+    /// Turns that take no tool (ai-kit #601: a World's agent answering an ask
+    /// only from what its World shows): no Agent Skills root is carried, and a
+    /// turn whose harness calls a tool all the same is interrupted at that call
+    /// and ends `Failed` with [`TOOL_LESS_TURN_USED_A_TOOL`], so nothing a tool
+    /// reached becomes its reply. Launch the harness in its own no-tools mode
+    /// as well; this is the bound held here, at the seam, whatever it was given.
+    pub fn without_tools(mut self) -> Self {
+        self.skill_roots = Some(Vec::new());
+        self.tool_less = true;
+        self
     }
 
     /// Name the Agent Skills roots explicitly (deterministic proof); the
@@ -943,8 +962,10 @@ impl ConversationTurnSource for AgentHostTurnSource {
         let reader_slot = Arc::clone(&slot);
         let progress = slot.progress();
         let reader_handle = handle.clone();
+        let tool_less = self.tool_less;
         thread::spawn(move || {
             let mut text = String::new();
+            let mut used_a_tool = false;
             loop {
                 let outcome = match reader_handle.recv() {
                     Some(HostEvent::Signal(signal)) => {
@@ -960,6 +981,13 @@ impl ConversationTurnSource for AgentHostTurnSource {
                                     progress.push_segment(segment);
                                 }
                             }
+                            ConnectionSignalKind::ToolCall { .. } if tool_less => {
+                                if !used_a_tool {
+                                    used_a_tool = true;
+                                    let _ = reader_handle
+                                        .interrupt(Some("this turn takes no tool".into()));
+                                }
+                            }
                             ConnectionSignalKind::ToolCall { payload } => {
                                 if let (Some(progress), Some(line)) =
                                     (&progress, tool_use_line(&payload))
@@ -970,6 +998,11 @@ impl ConversationTurnSource for AgentHostTurnSource {
                             _ => {}
                         }
                         continue;
+                    }
+                    Some(HostEvent::TurnEnded(_)) if used_a_tool => {
+                        ConversationTurnOutcome::Failed {
+                            reason: TOOL_LESS_TURN_USED_A_TOOL.into(),
+                        }
                     }
                     Some(HostEvent::TurnEnded(record)) => match record.stop {
                         TurnStop::Completed { .. } => ConversationTurnOutcome::Replied { text },

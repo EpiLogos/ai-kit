@@ -166,10 +166,11 @@ pub use gateway_coexistence::{
     GatewayCoexistenceGate, GATEWAY_COEXISTENCE_FILE_NAME, GATEWAY_COEXISTENCE_SCHEMA,
 };
 pub use gateway_communique::{
-    Communique, CommuniqueCount, CommuniqueDraft, CommuniqueForward, CommuniqueForwardOutcome,
-    CommuniqueHandling, CommuniqueInstance, CommuniqueInstanceHold, CommuniqueJournal,
-    CommuniqueRouting, CommuniqueState, CommuniqueTransition, SenderAttribution,
-    COMMUNIQUE_REF_PREFIX, COMMUNIQUE_SCHEMA, MAX_COMMUNIQUE_BODY_BYTES,
+    is_sender_of_address, sender_of_address, Communique, CommuniqueCount, CommuniqueDraft,
+    CommuniqueForward, CommuniqueForwardOutcome, CommuniqueHandling, CommuniqueInstance,
+    CommuniqueInstanceHold, CommuniqueJournal, CommuniqueRouting, CommuniqueState,
+    CommuniqueTransition, SenderAttribution, COMMUNIQUE_REF_PREFIX, COMMUNIQUE_SCHEMA,
+    MAX_COMMUNIQUE_BODY_BYTES, SENDER_OF_PREFIX,
 };
 pub use gateway_connector::{
     verify_connector_descriptor, ConnectorCapabilities, ConnectorConformance,
@@ -197,7 +198,7 @@ pub use gateway_conversation_engine::{
     ConversationTurnOutcome, ConversationTurnRequest, ConversationTurnSource, DrainReport,
     DrainedTurn, EnginePolicy, FixtureScript, FixtureTurnSource, GatewayAskRequest,
     GatewayAskRoute, GatewayAskRouter, GatewayConversationEngine, GatewayTurnSourceResolver,
-    SlashParse, StreamTiming, TurnProgress, TurnStreamItem,
+    SlashParse, StreamTiming, TurnProgress, TurnStreamItem, TOOL_LESS_TURN_USED_A_TOOL,
 };
 pub use gateway_posture::{
     sha256_of_file, CarrierScope, GatewayBuildIdentity, GatewayLifecycle, GatewayListenerReading,

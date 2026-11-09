@@ -11,8 +11,8 @@
 use std::time::{Duration, Instant};
 
 use aikit_adapters::{
-    AgentHostTurnSource, ConversationHarnessProtocol, ConversationTurnOutcome,
-    ConversationTurnRequest, ConversationTurnSource,
+    AgentHostTurnSource, ConversationHarnessProtocol, ConversationTurn, ConversationTurnOutcome,
+    ConversationTurnRequest, ConversationTurnSource, TOOL_LESS_TURN_USED_A_TOOL,
 };
 use aikit_core::resource::ResourceRef;
 use tempfile::TempDir;
@@ -36,6 +36,11 @@ def run_turn(native, request_id, text):
     steps = 2 if "quick" in text else 8
     pause = 0.0 if "quick" in text else 0.25
     stop = "end_turn"
+    if "use a tool" in text:
+        send({"jsonrpc": "2.0", "method": "session/update", "params": {
+            "sessionId": native,
+            "update": {"sessionUpdate": "tool_call", "toolCallId": "read-1", "title": "Read",
+                       "kind": "read", "status": "pending", "rawInput": {"path": "/etc/hosts"}}}})
     for index in range(steps):
         with lock:
             if cancel.get(native):
@@ -182,5 +187,54 @@ fn stop_actually_cancels_the_harness_turn_and_the_lane_frees_for_the_next_prompt
     assert!(
         finished_receipt.contains("already ended"),
         "the finished turn says so: {finished_receipt}"
+    );
+}
+
+fn ended(turn: &dyn ConversationTurn) -> ConversationTurnOutcome {
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        match turn.wait_timeout(Duration::from_millis(250)) {
+            Some(outcome) => return outcome,
+            None if Instant::now() > deadline => panic!("the turn never ended"),
+            None => continue,
+        }
+    }
+}
+
+/// A source whose turns take no tool (ai-kit #601: a World's agent answering
+/// an ask from what its World shows): a harness that calls a tool all the same
+/// is stopped at that call, and the turn ends failed, so nothing it said after
+/// a tool is taken for its answer. A turn that calls none replies as ever, and
+/// an ordinary source still carries its tool calls.
+#[test]
+fn a_tool_less_turn_that_calls_a_tool_is_stopped_and_answers_nothing() {
+    let Some((held, _dir)) = source() else {
+        return;
+    };
+    let tool_less = held.without_tools();
+    let turn = tool_less.prompt(request("quick: use a tool")).unwrap();
+    assert_eq!(
+        ended(turn.as_ref()),
+        ConversationTurnOutcome::Failed {
+            reason: TOOL_LESS_TURN_USED_A_TOOL.into()
+        },
+        "a tool call ends the turn failed, whatever the harness said after it"
+    );
+    let next = tool_less.prompt(request("quick and plain")).unwrap();
+    let ConversationTurnOutcome::Replied { text } = ended(next.as_ref()) else {
+        panic!("a turn that calls no tool replies");
+    };
+    assert!(text.contains("quick and plain"), "{text}");
+
+    let Some((ordinary, _other)) = source() else {
+        return;
+    };
+    let turn = ordinary.prompt(request("quick: use a tool")).unwrap();
+    assert!(
+        matches!(
+            ended(turn.as_ref()),
+            ConversationTurnOutcome::Replied { .. }
+        ),
+        "an ordinary source's turns may call tools"
     );
 }

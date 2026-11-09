@@ -33,6 +33,21 @@ pub const COMMUNIQUE_SCHEMA: &str = "aikit.communique/v1";
 pub const COMMUNIQUE_REF_PREFIX: &str = "aikit:communique:";
 /// Bodies are contact, not payload transport; a larger artefact is a ref.
 pub const MAX_COMMUNIQUE_BODY_BYTES: usize = 64 * 1024;
+/// The line back to whoever sent a Communique from no Position (a window, a
+/// desk): `aikit:sender-of:<communique ref>` (ai-kit #601).
+pub const SENDER_OF_PREFIX: &str = "aikit:sender-of:";
+
+/// The address a reply to `communique_ref` takes when its sender stood at no
+/// Position. It is nobody's Position: the reply is held in the journal that
+/// holds what it answers, and read there by that ref.
+pub fn sender_of_address(communique_ref: &str) -> String {
+    format!("{SENDER_OF_PREFIX}{communique_ref}")
+}
+
+/// Whether an address is the line back to a sender with no Position.
+pub fn is_sender_of_address(address: &str) -> bool {
+    address.starts_with(SENDER_OF_PREFIX)
+}
 
 /// Delivery state. `held` = the recipient Position was vacant when the
 /// Communique was accepted; it is delivered to the next occupant that claims
@@ -300,6 +315,12 @@ impl Communique {
     pub fn awaits_local_delivery(&self) -> bool {
         self.state.is_undelivered()
             && !matches!(self.forward, Some(CommuniqueForward::Forwarded { .. }))
+    }
+
+    /// A reply held for a sender with no Position: nobody's Position mail, so
+    /// no relay pass re-routes it and no Position counts it.
+    pub fn is_reply_to_no_position(&self) -> bool {
+        is_sender_of_address(&self.to_position_ref)
     }
 
     /// Whether an occupant generation standing on `workcell_ref` may receive
@@ -629,6 +650,9 @@ impl CommuniqueJournal {
                 )
             })?;
         }
+        if is_sender_of_address(&draft.to_position_ref) {
+            self.check_reply_to_no_position(&draft)?;
+        }
         if let Some(existing) = self.index.get(&draft.communique_ref) {
             let existing = &self.records[*existing];
             let same = existing.from_position_ref == draft.from_position_ref
@@ -695,6 +719,58 @@ impl CommuniqueJournal {
         Ok((record, false))
     }
 
+    /// A reply to a sender with no Position (ai-kit #601) names what it
+    /// answers as `reply_to`, and what it answers came from no Position here;
+    /// it is held where what it answers is held, so it is never relayed and
+    /// binds no instance.
+    fn check_reply_to_no_position(&self, draft: &CommuniqueDraft) -> Result<()> {
+        let answered = &draft.to_position_ref[SENDER_OF_PREFIX.len()..];
+        if draft.reply_to.as_deref() != Some(answered) {
+            return Err(invalid(
+                "agency_gateway.communique_invalid",
+                format!(
+                    "a reply to a sender with no Position names what it answers: reply_to is {answered}"
+                ),
+            ));
+        }
+        let record = self.get(answered)?;
+        if let Some(position) = &record.from_position_ref {
+            return Err(invalid(
+                "agency_gateway.communique_invalid",
+                format!(
+                    "{answered} came from Position {position}: a reply to it is addressed there"
+                ),
+            ));
+        }
+        if record.attribution == SenderAttribution::Owner {
+            return Err(invalid(
+                "agency_gateway.communique_invalid",
+                format!("{answered} came from the owner: a reply to them is addressed to @owner"),
+            ));
+        }
+        if draft.forward_to_workcell_ref.is_some() || draft.to_instance.is_some() {
+            return Err(invalid(
+                "agency_gateway.communique_invalid",
+                "a reply to a sender with no Position is held where what it answers is held: it is never relayed and binds no instance",
+            ));
+        }
+        // The line back is the asked occupant's only (DLW build ruling
+        // 2026-11-09): a reply on it comes from the verified occupant of the
+        // Position what it answers was sent to.
+        if draft.attribution != SenderAttribution::Verified
+            || draft.from_position_ref.as_deref() != Some(record.to_position_ref.as_str())
+        {
+            return Err(invalid(
+                "agency_gateway.communique_invalid",
+                format!(
+                    "a reply on the line back to {answered}'s sender comes from the verified occupant of {}, to which it was sent",
+                    record.to_position_ref
+                ),
+            ));
+        }
+        Ok(())
+    }
+
     /// Accept a Communique relayed by another Workcell's gateway. The record
     /// keeps its identity, sender attribution and origin; this journal gives it
     /// a local sequence and names the relaying gateway.
@@ -713,6 +789,12 @@ impl CommuniqueJournal {
         }
         non_empty("communique_ref", &communique.communique_ref)?;
         non_empty("to_position_ref", &communique.to_position_ref)?;
+        if communique.is_reply_to_no_position() {
+            return Err(invalid(
+                "agency_gateway.communique_invalid",
+                "a reply to a sender with no Position is held where what it answers is held; it is never relayed",
+            ));
+        }
         check_body(&communique.body)?;
         check_attribution(
             communique.attribution,
@@ -979,7 +1061,11 @@ impl CommuniqueJournal {
     /// Undelivered counts per recipient Position (uncapped).
     pub fn counts(&self) -> Vec<CommuniqueCount> {
         let mut counts: BTreeMap<&str, CommuniqueCount> = BTreeMap::new();
-        for record in self.records.iter().filter(|r| r.awaits_local_delivery()) {
+        for record in self
+            .records
+            .iter()
+            .filter(|r| r.awaits_local_delivery() && !r.is_reply_to_no_position())
+        {
             let entry = counts
                 .entry(record.to_position_ref.as_str())
                 .or_insert_with(|| CommuniqueCount {
@@ -1003,7 +1089,7 @@ impl CommuniqueJournal {
     pub fn forward_queue(&self) -> Vec<Communique> {
         self.records
             .iter()
-            .filter(|record| record.awaits_local_delivery())
+            .filter(|record| record.awaits_local_delivery() && !record.is_reply_to_no_position())
             .cloned()
             .collect()
     }
@@ -1818,5 +1904,124 @@ mod tests {
         assert_eq!(inbox[0].transitions.last().unwrap().at_unix_ms, 300);
         assert_eq!(inbox[1].transitions.last().unwrap().at_unix_ms, 400);
         assert!(CommuniqueJournal::restore(remote.records().to_vec()).is_ok());
+    }
+
+    /// A sender with no Position (a window, a desk) has a way back (ai-kit
+    /// #601): a reply addressed to whoever sent what it answers. It names that
+    /// line as `reply_to`, is never relayed, and is nobody's Position mail: no
+    /// relay pass re-routes it and no Position counts it undelivered. It is
+    /// read by the ref its sender holds.
+    #[test]
+    fn a_reply_to_a_sender_with_no_position_is_held_for_whoever_holds_its_ref() {
+        let mut journal = CommuniqueJournal::default();
+        let (asked, _) = journal
+            .send("g", draft("asked", None, B, CommuniqueState::Pending))
+            .unwrap();
+        let (positioned, _) = journal
+            .send(
+                "g",
+                draft("positioned", Some(A), B, CommuniqueState::Pending),
+            )
+            .unwrap();
+        let back = sender_of_address(&asked.communique_ref);
+        assert_eq!(back, format!("aikit:sender-of:{}", asked.communique_ref));
+        assert!(is_sender_of_address(&back));
+        assert!(!is_sender_of_address(B));
+
+        let reply = |reference: &str, reply_to: Option<&str>| CommuniqueDraft {
+            reply_to: reply_to.map(str::to_owned),
+            ..draft(reference, Some(B), &back, CommuniqueState::Pending)
+        };
+        let error = journal.send("g", reply("no-ref", None)).unwrap_err();
+        assert_eq!(error.code(), "agency_gateway.communique_invalid");
+        assert!(
+            error.to_string().contains("names what it answers"),
+            "{error}"
+        );
+        let error = journal
+            .send("g", reply("other-ref", Some(&positioned.communique_ref)))
+            .unwrap_err();
+        assert_eq!(error.code(), "agency_gateway.communique_invalid");
+        let to_position = CommuniqueDraft {
+            reply_to: Some(positioned.communique_ref.clone()),
+            ..draft(
+                "to-a-position",
+                Some(B),
+                &sender_of_address(&positioned.communique_ref),
+                CommuniqueState::Pending,
+            )
+        };
+        let error = journal.send("g", to_position).unwrap_err();
+        assert_eq!(error.code(), "agency_gateway.communique_invalid");
+        assert!(error.to_string().contains(A), "{error}");
+        let relayed = CommuniqueDraft {
+            forward_to_workcell_ref: Some("workcell:b".into()),
+            ..reply("relayed", Some(&asked.communique_ref))
+        };
+        let error = journal.send("g", relayed).unwrap_err();
+        assert_eq!(error.code(), "agency_gateway.communique_invalid");
+
+        let (answered, _) = journal
+            .send("g", reply("answer", Some(&asked.communique_ref)))
+            .unwrap();
+        assert_eq!(journal.inbox(&back), vec![answered.clone()]);
+        assert!(
+            journal
+                .forward_queue()
+                .iter()
+                .all(|record| record.communique_ref != answered.communique_ref),
+            "a reply to no Position is never re-routed"
+        );
+        assert!(
+            journal
+                .counts()
+                .iter()
+                .all(|count| count.position_ref != back),
+            "a reply to no Position is no Position's undelivered mail"
+        );
+        assert!(CommuniqueJournal::restore(journal.records().to_vec()).is_ok());
+    }
+
+    /// The line back is the asked occupant's only (DLW build ruling
+    /// 2026-11-09): a reply on it is taken only from the verified occupant of
+    /// the Position what it answers was sent to. A Claimed or Unknown replier,
+    /// or another Position's verified occupant, is refused; a reply held there
+    /// is never taken in by another gateway's relay.
+    #[test]
+    fn the_line_back_takes_a_reply_only_from_the_verified_occupant_it_was_sent_to() {
+        let mut journal = CommuniqueJournal::default();
+        let (asked, _) = journal
+            .send("g", draft("asked", None, B, CommuniqueState::Pending))
+            .unwrap();
+        let back = sender_of_address(&asked.communique_ref);
+        let reply = |reference: &str, from: Option<&str>| CommuniqueDraft {
+            reply_to: Some(asked.communique_ref.clone()),
+            ..draft(reference, from, &back, CommuniqueState::Pending)
+        };
+        let claimed = CommuniqueDraft {
+            from_generation_ref: None,
+            attribution: SenderAttribution::Claimed,
+            ..reply("claimed", Some(B))
+        };
+        for (what, refused) in [
+            ("a Claimed replier", claimed),
+            ("a replier at no Position", reply("unknown", None)),
+            ("another Position's occupant", reply("another", Some(A))),
+        ] {
+            let error = journal.send("g", refused).unwrap_err();
+            assert_eq!(error.code(), "agency_gateway.communique_invalid", "{what}");
+            assert!(
+                error.to_string().contains("verified occupant of"),
+                "{what}: {error}"
+            );
+        }
+        assert!(journal.inbox(&back).is_empty(), "nothing refused is held");
+
+        let (answered, _) = journal.send("g", reply("answer", Some(B))).unwrap();
+        assert_eq!(journal.inbox(&back), vec![answered.clone()]);
+        let mut elsewhere = CommuniqueJournal::default();
+        let error = elsewhere.ingest(answered, "g", 20).unwrap_err();
+        assert_eq!(error.code(), "agency_gateway.communique_invalid");
+        assert!(error.to_string().contains("never relayed"), "{error}");
     }
 }

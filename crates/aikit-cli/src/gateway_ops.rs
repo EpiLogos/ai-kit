@@ -191,6 +191,8 @@ pub fn takes_carrier(command: &GatewaySub) -> bool {
             | GatewaySub::Inbox(_)
             | GatewaySub::Conversation(_)
             | GatewaySub::Heard(_)
+            | GatewaySub::Replies(_)
+            | GatewaySub::Answer(_)
             | GatewaySub::Delegate(_)
             | GatewaySub::Forward(_)
             | GatewaySub::Agent(_)
@@ -217,11 +219,15 @@ pub fn override_carriers(command: &mut crate::cli::GatewayCmd, carrier: GatewayQ
         G::Inbox(a) => a.carrier = carrier,
         G::Conversation(a) => a.carrier = carrier,
         G::Heard(a) => a.carrier = carrier,
+        G::Replies(a) => a.carrier = carrier,
+        G::Answer(a) => a.carrier = carrier,
         G::Delegate(a) => a.carrier = carrier,
         G::Agent(a) => a.carrier = carrier,
         G::Ingress(a) => a.carrier = carrier,
         G::NativeOwner(a) => a.carrier = carrier,
         G::Handoff { .. }
+        | G::Disclose(_)
+        | G::AnswerHarness(_)
         | G::Message { .. }
         | G::Team { .. }
         | G::Serve(_)

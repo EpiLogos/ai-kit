@@ -54,12 +54,12 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use aikit_adapters::{
-    gateway_command_within, Communique, CommuniqueDraft, CommuniqueForward,
-    CommuniqueForwardOutcome, CommuniqueHandling, CommuniqueInstance, CommuniqueInstanceHold,
-    CommuniqueRouting, CommuniqueState, GatewayAskRequest, GatewayAskRoute, GatewayCarrierTarget,
-    GatewayCommand, GatewayResponse, ListenerClass, SenderAttribution, COMMUNIQUE_REF_PREFIX,
-    GATEWAY_FEATURE_COMMUNIQUE_EXACT_INSTANCE, GATEWAY_FEATURE_COMMUNIQUE_HANDLING,
-    GATEWAY_PROTOCOL_FEATURES,
+    gateway_command_within, is_sender_of_address, sender_of_address, Communique, CommuniqueDraft,
+    CommuniqueForward, CommuniqueForwardOutcome, CommuniqueHandling, CommuniqueInstance,
+    CommuniqueInstanceHold, CommuniqueRouting, CommuniqueState, GatewayAskRequest, GatewayAskRoute,
+    GatewayCarrierTarget, GatewayCommand, GatewayResponse, ListenerClass, SenderAttribution,
+    COMMUNIQUE_REF_PREFIX, GATEWAY_FEATURE_COMMUNIQUE_EXACT_INSTANCE,
+    GATEWAY_FEATURE_COMMUNIQUE_HANDLING, GATEWAY_PROTOCOL_FEATURES,
 };
 use aikit_core::{AikitError, Result};
 use aikit_store::AikitHome;
@@ -74,6 +74,9 @@ use crate::secret_location::SecretLocation;
 
 #[path = "gateway_owner_address.rs"]
 pub mod owner_address;
+
+#[path = "gateway_world_agent.rs"]
+pub mod world_agent;
 
 pub const POPULATION_READING_SCHEMA: &str = "aikit.population-reading/v1";
 pub const GATEWAY_REMOTES_SCHEMA: &str = "aikit.gateway-remotes/v1";
@@ -1268,7 +1271,9 @@ fn owner_unavailable_refusal(what: &str, unavailable: &OwnerUnavailable) -> Aiki
 // ---------------------------------------------------------------------------
 
 pub struct SendRequest<'a> {
-    pub to: &'a str,
+    /// The recipient. `None` answers `reply_to` where it came from: its
+    /// sender's Position, or the line back to a sender with no Position.
+    pub to: Option<&'a str>,
     pub body: String,
     pub reply_to: Option<String>,
     pub from_position: Option<&'a str>,
@@ -1743,6 +1748,44 @@ pub fn send(
     cwd: &Path,
     request: SendRequest<'_>,
 ) -> Result<Value> {
+    // Only an ask's bounded answer turn answers it (ai-kit #601, DLW build
+    // ruling 2026-11-09): no plain send carries an answer, or replies to an ask.
+    if world_agent::is_answer_body(&request.body) {
+        return Err(world_agent::only_answer_answers(
+            "These words are shaped as an answer (oi.world-agent-answer/v1)",
+        ));
+    }
+    // What the words would answer: `--reply-to`, or the ref a line back names.
+    let line_back = request
+        .to
+        .and_then(|to| to.strip_prefix(aikit_adapters::SENDER_OF_PREFIX));
+    for answered in [request.reply_to.as_deref(), line_back]
+        .into_iter()
+        .flatten()
+    {
+        if let Ok(GatewayResponse::CommuniqueRecord { communique }) =
+            gateway.call(GatewayCommand::ReadCommunique {
+                communique_ref: answered.into(),
+            })
+        {
+            if world_agent::answers_an_ask(&communique) {
+                return Err(world_agent::only_answer_answers(&format!(
+                    "{answered} is an ask of a World's agent"
+                )));
+            }
+        }
+    }
+    send_unchecked(home, owners, gateway, cwd, request)
+}
+
+/// [`send`] without the ask checks: the answer turn's own way out.
+fn send_unchecked(
+    home: &AikitHome,
+    owners: &dyn ContactOwners,
+    gateway: &dyn GatewayAccess,
+    cwd: &Path,
+    request: SendRequest<'_>,
+) -> Result<Value> {
     if request.body.trim().is_empty() {
         return Err(three_part(
             "gateway.empty_body",
@@ -1751,9 +1794,30 @@ pub fn send(
             "Pass the words with --body TEXT or --body-file PATH.",
         ));
     }
+    // No recipient named: the reply goes where what it answers came from
+    // (ai-kit #601).
+    let to = match (request.to, request.reply_to.as_deref()) {
+        (Some(to), _) if is_sender_of_address(to) => {
+            return send_to_no_position(owners, gateway, cwd, request)
+        }
+        (Some(to), _) => to.to_owned(),
+        (None, Some(reply_to)) => match reply_route(gateway, reply_to)? {
+            Some(position) => position,
+            None => return send_to_no_position(owners, gateway, cwd, request),
+        },
+        (None, None) => {
+            return Err(three_part(
+                "gateway.no_recipient",
+                "Neither --to nor --reply-to names who the words are for.",
+                nothing_sent(),
+                "Name the recipient with --to POSITION|@HANDLE, or answer a Communique with --reply-to COMMUNIQUE_REF.",
+            ))
+        }
+    };
+    let to = to.as_str();
     // The person occupies no Position: addressing them is a request in
     // Central's receiving ledger, which their Inbox reads.
-    if owner_address::is_owner_address(request.to) {
+    if owner_address::is_owner_address(to) {
         return owner_address::send_to_owner(owners, &request);
     }
     if request.require_workcell.is_some() && request.instance.is_none() {
@@ -1765,7 +1829,7 @@ pub fn send(
         ));
     }
     let sender = resolve_sender(owners, request.from_position)?;
-    let recipient = resolve_recipient(owners, request.to, request.project_world, cwd)?;
+    let recipient = resolve_recipient(owners, to, request.project_world, cwd)?;
     let (local_workcell, workcell_basis) = local_workcell(owners, cwd);
     let now = now_unix_ms();
 
@@ -1952,6 +2016,99 @@ pub fn send(
     )
 }
 
+/// Where a reply to `reply_to` goes when no recipient is named: the Position
+/// its sender spoke from, or `None` for the line back to a sender that stood
+/// at no Position. A Communique from the person is answered through `@owner`.
+fn reply_route(gateway: &dyn GatewayAccess, reply_to: &str) -> Result<Option<String>> {
+    let answered = expect_record(gateway.call(GatewayCommand::ReadCommunique {
+        communique_ref: reply_to.into(),
+    })?)
+    .map_err(|error| {
+        three_part(
+            "gateway.reply_to_unknown",
+            format!("--reply-to names {reply_to}, which this Workcell's gateway does not hold: {error}"),
+            nothing_sent(),
+            "Answer a Communique this Workcell received (`aikit gateway inbox`), or name the recipient with --to.",
+        )
+    })?;
+    if answered.attribution == SenderAttribution::Owner {
+        return Err(three_part(
+            "gateway.reply_to_the_owner",
+            format!("{reply_to} came from the person, who occupies no Position."),
+            nothing_sent(),
+            format!("Answer them with --to @owner --reply-to {reply_to}."),
+        ));
+    }
+    Ok(answered.from_position_ref)
+}
+
+/// A reply to a sender that stood at no Position (a window, a desk; ai-kit
+/// #601): held in this Workcell's journal, where what it answers is held, on
+/// the line back to it (`aikit:sender-of:<ref>`), for whoever holds that ref
+/// to read (`aikit gateway replies`). It is nobody's Position mail: never
+/// relayed, never counted, never bound to an instance.
+fn send_to_no_position(
+    owners: &dyn ContactOwners,
+    gateway: &dyn GatewayAccess,
+    cwd: &Path,
+    request: SendRequest<'_>,
+) -> Result<Value> {
+    let Some(reply_to) = request.reply_to.clone() else {
+        return Err(three_part(
+            "gateway.no_recipient",
+            "The line back to a sender with no Position is named by what it answers, and no --reply-to was given.",
+            nothing_sent(),
+            "Answer the Communique with --reply-to COMMUNIQUE_REF and no --to.",
+        ));
+    };
+    if request.instance.is_some() {
+        return Err(three_part(
+            "gateway.instance_without_position",
+            "The sender of what you answer stood at no Position, so there is no occupancy generation to bind.",
+            nothing_sent(),
+            "Drop --instance: the reply is held for whoever holds the ref it answers.",
+        ));
+    }
+    let sender = resolve_sender(owners, request.from_position)?;
+    let (local_workcell, workcell_basis) = local_workcell(owners, cwd);
+    let line = sender_of_address(&reply_to);
+    let draft = CommuniqueDraft {
+        communique_ref: new_communique_ref(),
+        from_position_ref: sender.from_position_ref.clone(),
+        from_generation_ref: sender.from_generation_ref.clone(),
+        attribution: sender.attribution,
+        attribution_basis: sender.basis.clone(),
+        to_position_ref: line.clone(),
+        to_workcell_ref: None,
+        to_instance: None,
+        instance_hold: None,
+        body: request.body,
+        handling: request.handling,
+        sent_at_unix_ms: now_unix_ms(),
+        state: CommuniqueState::Pending,
+        state_basis: format!(
+            "held where {reply_to} is held, for whoever holds that ref: its sender stood at no Position"
+        ),
+        reply_to: Some(reply_to.clone()),
+        forward_to_workcell_ref: None,
+        routing: None,
+    };
+    accept_and_relay(
+        gateway,
+        draft,
+        None,
+        json!({
+            "recipient": {"reply_line": line, "answers": reply_to, "position_ref": null,
+                "basis": "its sender stood at no Position; the reply is read by the ref it answers (aikit gateway replies)"},
+            "sender": sender,
+            "route": "reply-to-no-position",
+            "local_workcell": { "ref": local_workcell, "basis": workcell_basis },
+            "delivery": null,
+            "remotes": [],
+        }),
+    )
+}
+
 fn new_communique_ref() -> String {
     format!(
         "{COMMUNIQUE_REF_PREFIX}{}",
@@ -2127,6 +2284,64 @@ pub fn forwarded_readback(home: &AikitHome, communique: &Communique) -> Result<O
         })?;
     forwarded_readback_via(communique, remote, remote_gateway_ref, &carrier_call).map(Some)
 }
+/// The replies held on another Workcell's gateway for a Communique this one
+/// relayed there (ai-kit #601): read from the gateway that accepted it, whose
+/// identity is checked first, as `forwarded_readback` checks it.
+pub fn forwarded_replies(
+    home: &AikitHome,
+    communique: &Communique,
+) -> Result<Option<(String, Vec<Communique>)>> {
+    let Some(CommuniqueForward::Forwarded {
+        workcell_ref,
+        remote_gateway_ref,
+        ..
+    }) = &communique.forward
+    else {
+        return Ok(None);
+    };
+    let remotes = load_remotes(home)?;
+    let remote = remotes
+        .remotes
+        .iter()
+        .find(|remote| &remote.workcell_ref == workcell_ref)
+        .ok_or_else(|| {
+            three_part(
+                "gateway.remote_undeclared",
+                "The Workcell it was relayed to has no declared route here.",
+                "Its replies are held at that Workcell's gateway.",
+                remote_command(workcell_ref),
+            )
+        })?;
+    forwarded_replies_via(communique, remote, remote_gateway_ref, &carrier_call).map(Some)
+}
+
+fn forwarded_replies_via(
+    communique: &Communique,
+    remote: &GatewayRemote,
+    expected_gateway: &str,
+    carrier: RemoteCarrier<'_>,
+) -> Result<(String, Vec<Communique>)> {
+    let GatewayResponse::Status { status } = carrier(remote, GatewayCommand::Status)? else {
+        return Err(AikitError::new(
+            "gateway.remote_replies_unreadable",
+            "Remote gateway identity could not be observed",
+        ));
+    };
+    if status.gateway_ref.as_str() != expected_gateway {
+        return Err(AikitError::new(
+            "gateway.remote_replies_changed",
+            "The gateway that accepted the relay is no longer the remote owner",
+        ));
+    }
+    let records = expect_list(carrier(
+        remote,
+        GatewayCommand::CommuniqueInbox {
+            position_ref: sender_of_address(&communique.communique_ref),
+        },
+    )?)?;
+    Ok((expected_gateway.to_owned(), records))
+}
+
 fn forwarded_readback_via(
     communique: &Communique,
     remote: &GatewayRemote,
@@ -2543,6 +2758,15 @@ fn resolve_ask_sender(owners: &dyn ContactOwners, ask: &GatewayAskRequest) -> Se
     ))
 }
 
+/// What a connector-originated ask says of its origin in its attribution basis.
+const CONNECTOR_ASK_BASIS: &str = "asked from connector conversation";
+
+/// Whether a Communique was asked from a connector conversation (`/ask`): it is
+/// answered on that chat's own path, never on a reply line.
+pub fn asked_from_a_connector(record: &Communique) -> bool {
+    record.attribution_basis.contains(CONNECTOR_ASK_BASIS)
+}
+
 /// Resolve one connector-originated ask into an accepted-shaped draft: the
 /// sender attributed from occupancy, the recipient resolved by Central, the
 /// route taken from occupancy (`route_to_occupancy` — the same decision
@@ -2584,7 +2808,7 @@ pub fn route_ask_with_owners(
         }
     };
     let attribution_basis = format!(
-        "{}; asked from connector conversation {} on {} (binding {}, agent session {}, agency \
+        "{}; {CONNECTOR_ASK_BASIS} {} on {} (binding {}, agent session {}, agency \
          {})",
         sender.basis,
         ask.conversation_id,
@@ -3293,6 +3517,104 @@ pub fn heard(
         "escalated_custody_ref": record.escalated_custody_ref,
         "relayed": relayed,
         "remote_delivery": remote_delivery,
+    }))
+}
+
+// ---------------------------------------------------------------------------
+// replies
+// ---------------------------------------------------------------------------
+
+/// `aikit gateway replies`'s reading.
+pub const COMMUNIQUE_REPLIES_SCHEMA: &str = "aikit.communique-replies/v1";
+
+/// The replies to one Communique its sender sent from no Position (ai-kit
+/// #601): what was answered on the line back to it, read by the ref the sender
+/// holds — whole, since the words are the sender's to read. A Communique
+/// relayed to another Workcell is answered there, where its recipient stands:
+/// `remote` reads that gateway's line, and a remote that cannot be read is
+/// said (`complete: false`), never taken for no answer. A Communique sent from
+/// a Position is answered at that Position, and refused here.
+pub fn replies(
+    gateway: &dyn GatewayAccess,
+    reference: &str,
+    remote: impl FnOnce(&Communique) -> Result<Option<(String, Vec<Communique>)>>,
+) -> Result<Value> {
+    if !reference.starts_with(COMMUNIQUE_REF_PREFIX) {
+        return Err(three_part(
+            "gateway.replies_not_a_communique",
+            format!("{reference} is not a Communique ref ({COMMUNIQUE_REF_PREFIX}…)."),
+            "Nothing was read.",
+            "Name the ref `aikit gateway send` answered.",
+        ));
+    }
+    let record = expect_record(gateway.call(GatewayCommand::ReadCommunique {
+        communique_ref: reference.into(),
+    })?)?;
+    if let Some(position) = &record.from_position_ref {
+        return Err(three_part(
+            "gateway.replies_to_a_position",
+            format!("{reference} was sent from Position {position}, so its replies are addressed to that Position."),
+            "Nothing was read.",
+            format!("Read them as its occupant: aikit gateway conversation --position {position} --with {}", record.to_position_ref),
+        ));
+    }
+    let line = sender_of_address(reference);
+    // Only the verified occupant of the Position it was sent to answers on the
+    // line back (DLW build ruling 2026-11-09): anything else held there is no
+    // reply to it, and is not read out.
+    let asked = record.to_position_ref.clone();
+    let answers = |records: Vec<Communique>| {
+        records
+            .into_iter()
+            .filter(|reply| {
+                reply.to_position_ref == line
+                    && reply.reply_to.as_deref() == Some(reference)
+                    && reply.attribution == SenderAttribution::Verified
+                    && reply.from_position_ref.as_deref() == Some(asked.as_str())
+            })
+            .collect::<Vec<_>>()
+    };
+    let mut found = answers(expect_list(gateway.call(
+        GatewayCommand::CommuniqueInbox {
+            position_ref: line.clone(),
+        },
+    )?)?);
+    let relayed = matches!(record.forward, Some(CommuniqueForward::Forwarded { .. }));
+    let (remote_replies, complete) = if relayed {
+        match remote(&record) {
+            Ok(Some((gateway_ref, records))) => {
+                for reply in answers(records) {
+                    if found
+                        .iter()
+                        .all(|kept| kept.communique_ref != reply.communique_ref)
+                    {
+                        found.push(reply);
+                    }
+                }
+                (json!({"state": "read", "gateway_ref": gateway_ref}), true)
+            }
+            Ok(None) => (Value::Null, true),
+            Err(error) => (
+                json!({"state": "unreadable", "code": error.code(), "error": error.to_string()}),
+                false,
+            ),
+        }
+    } else {
+        (Value::Null, true)
+    };
+    // An ask not yet answered waits for its World's agent, and says so.
+    let waiting = (found.is_empty() && world_agent::is_ask_body(&record.body))
+        .then_some(world_agent::WAITING_WORDS);
+    Ok(json!({
+        "schema": COMMUNIQUE_REPLIES_SCHEMA,
+        "communique_ref": record.communique_ref,
+        "to_position_ref": record.to_position_ref,
+        "reply_line": line,
+        "waiting": waiting,
+        "replies": found,
+        "relayed": relayed,
+        "complete": complete,
+        "remote_replies": remote_replies,
     }))
 }
 
