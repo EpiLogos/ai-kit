@@ -247,9 +247,10 @@ pub fn persist_gateway_state(gateway: &AgencyGateway, state_file: Option<&Path>)
 /// CLI verb executing a command straight against the state file because no
 /// service answered) holds it for one command. The two can therefore never
 /// interleave: the service keeps its state in memory and rewrites the whole
-/// file after every command, so an offline write under a running service would
-/// be silently lost. The lock is released by the kernel when the holder exits,
-/// so a crashed holder never wedges the file.
+/// file after every command that changes it (a read leaves the file as it
+/// was), so an offline write under a running service would be silently lost
+/// at the service's next write. The lock is released by the kernel when the
+/// holder exits, so a crashed holder never wedges the file.
 pub struct GatewayStateLock {
     _file: fs::File,
     path: PathBuf,
@@ -2954,6 +2955,251 @@ mod tests {
         assert_ne!(inode(), before, "a change is written again");
         let kept = std::fs::read_to_string(&state).unwrap();
         assert!(kept.contains("pi-rpc"), "{kept}");
+    }
+
+    /// A service holding something of each kind a command reads or changes:
+    /// a connector, a binding and its stream, a delivery prepared, a plain
+    /// Communique, an exact-instance one, an ask waiting and a World's Agent
+    /// record (606c).
+    fn populated() -> Arc<Mutex<AgencyGateway>> {
+        use crate::gateway_communique::{
+            CommuniqueDraft, CommuniqueInstance, CommuniqueInstanceHold, CommuniqueState,
+            WORLD_AGENT_ANSWER_SCHEMA, WORLD_AGENT_ASK_SCHEMA,
+        };
+        use serde_json::json;
+        let gateway = Arc::new(Mutex::new(gateway()));
+        let ask = |command: Value| {
+            let answer = over_service(&gateway, command.clone());
+            assert_eq!(answer["ok"], true, "{command}: {answer}");
+        };
+        ask(
+            json!({"type": "register-connector", "descriptor": purity_connector(PURITY_CONNECTOR)}),
+        );
+        ask(json!({"type": "bind", "binding": purity_binding(PURITY_BINDING, "main")}));
+        ask(json!({"type": "ingest", "event": purity_event("one")}));
+        ask(
+            json!({"type": "prepare-operation", "binding_ref": PURITY_BINDING,
+            "operation": {"kind": "send", "text": "out"}}),
+        );
+        ask(json!({"type": "send-communique", "draft": communique_draft("plain")}));
+        let instance = CommuniqueDraft {
+            to_instance: Some(CommuniqueInstance {
+                generation_ref: "gen-keeper".into(),
+                required_workcell_ref: None,
+                agent_session_ref: None,
+                agency_ref: None,
+            }),
+            instance_hold: Some(CommuniqueInstanceHold::InstanceAbsent),
+            ..communique_draft("instance")
+        };
+        ask(json!({"type": "send-communique", "draft": instance}));
+        let waiting = CommuniqueDraft {
+            body: json!({"schema": WORLD_AGENT_ASK_SCHEMA, "ask_ref": "ask:purity",
+                "star_ref": "star:rosarium", "asked_by_world_ref": "world:asker",
+                "world_ref": "project:O-I", "words": "Who keeps this?", "sources": [],
+                "answer_in": WORLD_AGENT_ANSWER_SCHEMA})
+            .to_string(),
+            state: CommuniqueState::Pending,
+            ..communique_draft("ask")
+        };
+        ask(json!({"type": "send-communique", "draft": waiting}));
+        ask(
+            json!({"type": "set-world-agent-record", "key": "answer-harness",
+            "record": {"protocol": "pi-rpc"}}),
+        );
+        gateway
+    }
+
+    /// One request from the person's own carrier, as the service takes it,
+    /// with no occupancy owner behind it.
+    fn over_service(gateway: &Arc<Mutex<AgencyGateway>>, command: Value) -> Value {
+        let runtime = test_runtime();
+        let mut subscriptions = ConnectionSubscriptions::new(Arc::clone(&runtime.hub));
+        let input =
+            serde_json::json!({"request_id": "r", "command": command, "caller": null}).to_string();
+        let (response, _, _) = execute_serialized_request(
+            gateway,
+            &runtime,
+            &input,
+            None,
+            None,
+            &mut subscriptions,
+            crate::gateway_posture::CarrierScope::Owner,
+        )
+        .unwrap();
+        serde_json::from_str(&response).unwrap()
+    }
+
+    const PURITY_CONNECTOR: &str = "gateway-connector/purity/main";
+    const PURITY_BINDING: &str = "gateway-binding/purity";
+    const PURITY_STREAM: &str = "actuation-stream/purity";
+    const KEEPER: &str = "central:position:control:root:keeper";
+
+    fn purity_connector(connector_ref: &str) -> Value {
+        serde_json::json!({"version": crate::gateway_connector::GATEWAY_CONNECTOR_SDK_VERSION,
+            "connector_ref": connector_ref, "platform": "purity",
+            "implementation": "gateway-purity-test",
+            "capabilities": {"operations": ["send", "typing"], "max_text_bytes": 4096,
+                "media_types": [], "provenance": ["fixture"]},
+            "provenance": ["fixture"]})
+    }
+
+    fn purity_binding(binding_ref: &str, conversation: &str) -> Value {
+        serde_json::json!({"binding_ref": binding_ref, "connector_ref": PURITY_CONNECTOR,
+            "address": {"platform": "purity", "conversation_id": conversation},
+            "agent_session_ref": "agent-session/purity", "agency_ref": "agency/purity",
+            "actuation_ref": "actuation/purity",
+            "actuation_stream_ref": format!("{PURITY_STREAM}{}",
+                if conversation == "main" { String::new() } else { format!("-{conversation}") }),
+            "ingress": {"default": "allow", "sender_overrides": {}}})
+    }
+
+    fn purity_event(name: &str) -> Value {
+        serde_json::json!({"event_ref": format!("gateway-ingress/purity-{name}"),
+            "connector_ref": PURITY_CONNECTOR,
+            "address": {"platform": "purity", "conversation_id": "main"},
+            "sender": {"native_sender_id": "owner", "kind": "human"}, "kind": "message",
+            "native_event_id": format!("purity-native-{name}"),
+            "native_message_id": format!("purity-message-{name}"), "text": name})
+    }
+
+    /// 606c (DLW build ruling 2026-11-09): the service skips its write after
+    /// a command `is_read_only` names, so every such command must leave the
+    /// state as it was. The table holds one of every command, checked against
+    /// the commands serde knows, so a new one cannot be left out of it. Each
+    /// runs against a populated service: a read leaves `snapshot()` unchanged,
+    /// and every other command changes it there (apart from the three the
+    /// service answers outside the kernel's state), so a change listed as a
+    /// read by mistake goes red too.
+    #[test]
+    fn every_read_leaves_a_populated_services_state_as_it_was_and_every_change_changes_it() {
+        use serde_json::json;
+        use std::collections::BTreeSet;
+        let relayed = {
+            let gateway = populated();
+            let snapshot = gateway.lock().unwrap().snapshot();
+            let mut record = serde_json::to_value(
+                snapshot
+                    .communiques
+                    .iter()
+                    .find(|record| record.communique_ref == "aikit:communique:plain")
+                    .unwrap(),
+            )
+            .unwrap();
+            record["communique_ref"] = json!("aikit:communique:relayed");
+            record["origin_gateway_ref"] = json!("agency-gateway/elsewhere");
+            record
+        };
+        let first_delivery = "gateway-operation/00000000000000000001";
+        let table = [
+            json!({"type": "native-owner", "world_ref": "world:purity"}),
+            json!({"type": "protocol"}),
+            json!({"type": "discover"}),
+            json!({"type": "status"}),
+            json!({"type": "ecology"}),
+            json!({"type": "register-connector",
+                "descriptor": purity_connector("gateway-connector/purity/other")}),
+            json!({"type": "bind", "binding": purity_binding("gateway-binding/purity-two", "two")}),
+            json!({"type": "unbind", "binding_ref": PURITY_BINDING}),
+            json!({"type": "ingest", "event": purity_event("two")}),
+            json!({"type": "replay", "stream_ref": PURITY_STREAM, "limit": 10}),
+            json!({"type": "subscribe", "stream_ref": PURITY_STREAM}),
+            json!({"type": "prepare-operation", "binding_ref": PURITY_BINDING,
+                "operation": {"kind": "typing", "active": true}}),
+            json!({"type": "record-delivery", "receipt": {"operation_ref": first_delivery,
+                "connector_ref": PURITY_CONNECTOR, "state": "delivered"}}),
+            json!({"type": "set-connector-health",
+                "health": {"connector_ref": PURITY_CONNECTOR, "state": "connected"}}),
+            json!({"type": "control", "binding_ref": PURITY_BINDING, "operation": "interrupt"}),
+            json!({"type": "set-ingress-rule", "binding_ref": PURITY_BINDING, "kind": "agent",
+                "decision": "deny"}),
+            json!({"type": "conversation", "binding_ref": PURITY_BINDING,
+                "operation": {"op": "status"}}),
+            json!({"type": "snapshot"}),
+            json!({"type": "restore", "snapshot": gateway().snapshot()}),
+            json!({"type": "send-communique", "draft": communique_draft("more")}),
+            json!({"type": "ingest-communique", "communique": relayed,
+                "relayed_by": "agency-gateway/elsewhere"}),
+            json!({"type": "set-world-agent-record", "key": "shown", "record": {"stars": []}}),
+            json!({"type": "read-world-agent-record", "key": "answer-harness"}),
+            json!({"type": "waiting-asks"}),
+            json!({"type": "close-ask", "communique_ref": "aikit:communique:ask",
+                "basis": "purity", "at_unix_ms": 2}),
+            json!({"type": "communique-inbox", "position_ref": KEEPER}),
+            json!({"type": "acknowledge-communiques", "position_ref": KEEPER,
+                "generation_ref": "gen-keeper", "communique_refs": ["aikit:communique:plain"],
+                "delivered_at_unix_ms": 2, "via": "purity"}),
+            json!({"type": "communique-conversation", "position_ref": KEEPER,
+                "with_position_ref": ASKED}),
+            json!({"type": "read-communique", "communique_ref": "aikit:communique:plain"}),
+            json!({"type": "escalate-communique", "communique_ref": "aikit:communique:plain",
+                "custody_ref": "factory:custody:purity", "escalated_at_unix_ms": 2,
+                "basis": "purity"}),
+            json!({"type": "communique-counts"}),
+            json!({"type": "communique-forward-queue"}),
+            json!({"type": "record-communique-forward", "communique_ref": "aikit:communique:plain",
+                "outcome": {"outcome": "failed", "workcell_ref": "workcell:b",
+                    "error": "unreachable", "at_unix_ms": 2}}),
+            json!({"type": "record-communique-standing",
+                "communique_ref": "aikit:communique:instance", "state": "pending",
+                "at_unix_ms": 2, "basis": "purity"}),
+            json!({"type": "occupancy-read", "position_ref": ASKED}),
+            json!({"type": "occupancy-list"}),
+            json!({"type": "encounter-relay", "action": "agency-read", "request": {}}),
+            json!({"type": "shutdown"}),
+        ];
+        // Every command serde knows, as its own refusal of an unknown one
+        // names them: none may be missing from the table.
+        let refusal = serde_json::from_value::<GatewayCommand>(json!({"type": "-"}))
+            .unwrap_err()
+            .to_string();
+        let known: BTreeSet<String> = refusal
+            .split_once("expected one of ")
+            .map(|(_, names)| {
+                names
+                    .split(", ")
+                    .map(|name| name.trim_matches('`').to_owned())
+                    .collect()
+            })
+            .unwrap_or_default();
+        let tabled: BTreeSet<String> = table
+            .iter()
+            .map(|command| command["type"].as_str().unwrap().to_owned())
+            .collect();
+        assert_eq!(
+            tabled, known,
+            "one of every command, so the purity check runs each ({refusal})"
+        );
+        // Answered by what the service holds besides the kernel: an owner
+        // offered, the conversation engine, the service's own stop.
+        let outside = ["native-owner", "conversation", "shutdown"];
+        // Reads the service answers from its Workcell's owners, none here.
+        let owners = ["occupancy-read", "occupancy-list", "encounter-relay"];
+        for command in &table {
+            let kind = command["type"].as_str().unwrap();
+            let parsed: GatewayCommand = serde_json::from_value(command.clone())
+                .unwrap_or_else(|error| panic!("{command}: {error}"));
+            let gateway = populated();
+            let before = gateway.lock().unwrap().snapshot();
+            let answer = over_service(&gateway, command.clone());
+            let after = gateway.lock().unwrap().snapshot();
+            if parsed.is_read_only() {
+                if !owners.contains(&kind) {
+                    assert_eq!(answer["ok"], true, "{command}: {answer}");
+                }
+                assert!(
+                    after == before,
+                    "{kind} is listed as a read, but it changed the state: {answer}"
+                );
+            } else if !outside.contains(&kind) {
+                assert_eq!(answer["ok"], true, "{command}: {answer}");
+                assert!(
+                    after != before,
+                    "{kind} is no read, so here it must change the state, or a listing \
+                     of it as a read would pass unseen: {answer}"
+                );
+            }
+        }
     }
 
     #[test]
