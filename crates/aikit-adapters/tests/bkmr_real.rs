@@ -662,4 +662,155 @@ mod project_text_capsule {
             "a search must not silently mutate native database or sidecar bytes"
         );
     }
+
+    /// The capsule over `primary`, with `env` set as well (the folder its private copy is made in, a PATH).
+    fn capsule_in(
+        root: &Path,
+        primary: &Path,
+        env: &[(&str, std::ffi::OsString)],
+        args: &[&str],
+    ) -> Output {
+        let script = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../contrib/bkmr/capsules/script/search/project-text/payload/search-text.sh");
+        let mut command = Command::new("/bin/sh");
+        command
+            .env_remove("AIKIT_BKMR_DB_SET")
+            .env_remove("BKMR_DB_URL")
+            .env("AIKIT_BKMR_DB", primary)
+            .envs(env.iter().map(|(name, value)| (*name, value)))
+            .arg(script)
+            .args(args);
+        capture(root, "authored capsule", &mut command)
+    }
+
+    /// Round 55 item 9 (DLW build ruling 2026-11-09): bkmr 7.x opens a database it searches for writing, and first switches it
+    /// to WAL journal mode. A database kept in rollback-journal mode, as bkmr 6.x made them, is left as it was by a search, and
+    /// the search's private copy is gone after it.
+    #[test]
+    fn real_767_capsule_search_leaves_a_rollback_journal_database_as_it_was() {
+        let Some(dir) = fixture() else {
+            return;
+        };
+        let db = seed(dir.path(), "rollback.db", "rollback-native");
+        let connection = rusqlite::Connection::open(&db).unwrap();
+        let mode: String = connection
+            .query_row("PRAGMA journal_mode = DELETE", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(mode, "delete");
+        drop(connection);
+        let copies = dir.path().join("copies");
+        fs::create_dir(&copies).unwrap();
+        let before = database_bytes(&db);
+        assert_eq!(before[1..], [None, None], "the seed leaves no sidecar");
+        let output = capsule_in(
+            dir.path(),
+            &db,
+            &[("TMPDIR", copies.clone().into())],
+            &["capsulequasar"],
+        );
+        assert_eq!(output.status, 0);
+        assert!(output.stdout.contains("rollback-native"));
+        assert_eq!(
+            database_bytes(&db),
+            before,
+            "a search must not switch the database's journal mode"
+        );
+        assert_eq!(fs::read_dir(&copies).unwrap().count(), 0, "no copy is left");
+    }
+
+    /// The same item: a search whose bkmr never closes the database, because a harness's timeout kills it, leaves the bound
+    /// database and its sidecars as they were. #611's CI failure had this shape: after a search an empty `-wal` and a `-shm`
+    /// stood beside the unchanged database, where none stood before. A `bkmr` first on PATH runs the real one and kills it once
+    /// the database it was given is open, so its close never runs.
+    #[test]
+    fn real_767_capsule_search_cut_short_leaves_the_database_and_its_sidecars_as_they_were() {
+        let Some(dir) = fixture() else {
+            return;
+        };
+        let db = seed(dir.path(), "cut.db", "cut-native");
+        let real = std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())
+            .map(|folder| folder.join("bkmr"))
+            .find(|bkmr| bkmr.is_file())
+            .expect("the real bkmr on PATH");
+        let shim = dir.path().join("shim");
+        fs::create_dir(&shim).unwrap();
+        fs::write(
+            shim.join("bkmr"),
+            "#!/bin/sh\n\"$AIKIT_TEST_REAL_BKMR\" \"$@\" &\npid=$!\nn=0\n\
+             while [ ! -e \"$BKMR_DB_URL-shm\" ] && [ \"$n\" -lt 1000000 ]; do n=$((n + 1)); done\n\
+             kill -KILL \"$pid\" 2>/dev/null\nwait \"$pid\"\n",
+        )
+        .unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(shim.join("bkmr"), fs::Permissions::from_mode(0o755)).unwrap();
+        let mut path = std::ffi::OsString::from(&shim);
+        path.push(":");
+        path.push(std::env::var_os("PATH").unwrap_or_default());
+        let copies = dir.path().join("copies");
+        fs::create_dir(&copies).unwrap();
+        let before = database_bytes(&db);
+        assert_eq!(before[1..], [None, None], "the seed leaves no sidecar");
+        let output = capsule_in(
+            dir.path(),
+            &db,
+            &[
+                ("PATH", path),
+                ("AIKIT_TEST_REAL_BKMR", real.into()),
+                ("TMPDIR", copies.clone().into()),
+            ],
+            &["capsulequasar"],
+        );
+        assert_ne!(output.status, 0, "the search was cut short");
+        assert_eq!(
+            database_bytes(&db),
+            before,
+            "a search cut short must not leave sidecars beside the database"
+        );
+        assert_eq!(fs::read_dir(&copies).unwrap().count(), 0, "no copy is left");
+    }
+
+    /// The same item: the search's private copy is taken with the database's `-wal`, where a writer that has not checkpointed yet
+    /// keeps what it committed. A bookmark changed by such a writer is found by its new words, and the database and its sidecars,
+    /// the writer's own, are left as they were.
+    #[test]
+    fn real_767_capsule_search_reads_what_still_stands_in_the_wal() {
+        let Some(dir) = fixture() else {
+            return;
+        };
+        let db = seed(dir.path(), "wal.db", "wal-native");
+        let writer = rusqlite::Connection::open(&db).unwrap();
+        let mode: String = writer
+            .query_row("PRAGMA journal_mode = WAL", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(mode, "wal");
+        // One small change stays under the automatic checkpoint's threshold, and the writer stays open, so it stays in the -wal.
+        writer
+            .execute(
+                "UPDATE bookmarks SET \"desc\" = \"desc\" || ' walquasar'",
+                [],
+            )
+            .unwrap();
+        let before = database_bytes(&db);
+        assert!(
+            before[1].as_ref().is_some_and(|wal| !wal.is_empty()),
+            "the change stands in the -wal"
+        );
+        let copies = dir.path().join("copies");
+        fs::create_dir(&copies).unwrap();
+        let output = capsule_in(
+            dir.path(),
+            &db,
+            &[("TMPDIR", copies.clone().into())],
+            &["walquasar"],
+        );
+        assert_eq!(output.status, 0);
+        assert!(output.stdout.contains("wal-native"), "{}", output.stdout);
+        assert_eq!(
+            database_bytes(&db),
+            before,
+            "a search must not change the database or the writer's sidecars"
+        );
+        assert_eq!(fs::read_dir(&copies).unwrap().count(), 0, "no copy is left");
+        drop(writer);
+    }
 }

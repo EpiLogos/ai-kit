@@ -15,7 +15,10 @@ reason = "`search --json` and BKMR_DB_URL both exist from 6.5.0."
 
 # No network and no credentials, on every supported bkmr version. The database
 # is outside the project tree, hence read:outside. Measured on 6.5.0:
-# `bkmr search --json` leaves the database file byte-identical.
+# `bkmr search --json` leaves the database file byte-identical. From 7.x bkmr
+# opens a database it searches for writing (WAL journal mode, migrations, -wal
+# and -shm sidecars), so the payload hands bkmr a private copy and never the
+# bound database: the database and its sidecars are only read.
 [effects]
 filesystem = ["read:outside"]
 network = false

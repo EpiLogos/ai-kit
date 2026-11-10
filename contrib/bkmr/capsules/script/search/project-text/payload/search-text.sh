@@ -2,9 +2,17 @@
 # search-text.sh - full-text search of the bkmr database bound to this context.
 #
 # Offline, no credentials, ~30 ms on the databases this was written against.
-# Uses `bkmr search --json`, which is read-only. `bkmr show --json` is NOT used:
-# it bumps access_count and the update timestamp, so reading with it would
+# Uses `bkmr search --json`, which changes no bookmark. `bkmr show --json` is NOT
+# used: it bumps access_count and the update timestamp, so reading with it would
 # rewrite the corpus a search is supposed to observe.
+#
+# bkmr 7.x opens every database it reads for writing, a search's included: it
+# switches the database to WAL journal mode, runs its migrations, and makes the
+# -wal and -shm sidecars that its exit does not always remove. A search must
+# leave the bound database and its sidecars as they were, so bkmr is never given
+# them: it reads a private copy of each database (its -wal too, where committed
+# bookmarks can still stand), made in a folder of this search's own and removed
+# when the search ends.
 
 set -eu
 
@@ -62,9 +70,29 @@ Declare one in .aikit/project.toml:
 
 AIKit exports it as AIKIT_BKMR_DB/BKMR_DB_URL when the context is applied." 78
 
+copies=
+trap '[ -z "$copies" ] || rm -rf "$copies"' EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
 run_one() {
   # $1 = database path
-  BKMR_DB_URL=$1
+  if [ -z "$copies" ]; then
+    copies=$(mktemp -d "${TMPDIR:-/tmp}/aikit-bkmr-search.XXXXXX") || {
+      printf '%s: could not make a private folder to search a copy in\n' "$me" >&2
+      return 74
+    }
+  fi
+  copy=$copies/search.db
+  rm -f "$copy" "$copy-wal" "$copy-shm"
+  if ! cp "$1" "$copy" || { [ -f "$1-wal" ] && ! cp "$1-wal" "$copy-wal"; }; then
+    printf '%s: could not copy the database to search it: %s\n' "$me" "$1" >&2
+    return 74
+  fi
+  chmod u+w "$copy"
+  [ ! -f "$copy-wal" ] || chmod u+w "$copy-wal"
+  BKMR_DB_URL=$copy
   export BKMR_DB_URL
   set -- search --np --limit "$limit"
   [ "$raw" -eq 1 ] || set -- "$@" --json
