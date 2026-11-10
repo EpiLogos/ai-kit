@@ -1533,6 +1533,16 @@ fn read_body_file(path: &std::path::Path) -> Result<String> {
 fn cmd_gateway(command: GatewayCmd, cwd: &std::path::Path) -> Result<Reply> {
     let mut command = command;
     let at = command.at.clone();
+    // A send refused before anything is handed on says it kept nothing (606b),
+    // its `--at` route among those refusals (606c).
+    let sending = matches!(command.command, GatewaySub::Send(_));
+    let refused = |error| {
+        if sending {
+            aikit_cli::gateway_contact::refused_before_handing(error)
+        } else {
+            error
+        }
+    };
     if let Some(reference) = &at {
         if !aikit_cli::gateway_ops::takes_carrier(&command.command) {
             return Err(AikitError::new(
@@ -1545,8 +1555,8 @@ fn cmd_gateway(command: GatewayCmd, cwd: &std::path::Path) -> Result<Reply> {
                 ),
             ));
         }
-        let home = AikitHome::discover()?;
-        let carrier = aikit_cli::gateway_ops::at_carrier(&home, reference)?;
+        let home = AikitHome::discover().map_err(refused)?;
+        let carrier = aikit_cli::gateway_ops::at_carrier(&home, reference).map_err(refused)?;
         aikit_cli::gateway_ops::override_carriers(&mut command, carrier);
     }
     let reply = cmd_gateway_dispatch(command, cwd)?;

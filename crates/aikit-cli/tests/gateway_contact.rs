@@ -3837,6 +3837,24 @@ fn a_refused_send_says_in_data_whether_it_kept_anything() {
         envelope["error"]["details"]["recorded"], "false",
         "{envelope}"
     );
+
+    // Routed by `--at` to a Workcell that declares no endpoint (606c):
+    // refused before anything is handed on.
+    let undeclared = window.refused(&[
+        "gateway",
+        "--at",
+        "workcell:elsewhere",
+        "send",
+        "--to",
+        STEWARD,
+        "--body",
+        &ask("Over there?"),
+    ]);
+    assert_eq!(
+        undeclared["code"], "gateway.remote_undeclared",
+        "{undeclared}"
+    );
+    assert_eq!(undeclared["details"]["recorded"], "false", "{undeclared}");
 }
 
 #[test]
@@ -4044,6 +4062,20 @@ fn a_worlds_agent_answers_an_ask_in_one_bounded_turn_from_what_its_world_shows_a
             ]
             .contains(&name.as_str().unwrap()),
             "{name} reached the answer harness: {}",
+            launches[0]
+        );
+    }
+    // The list is read from the harness's own shell: an empty one would pass
+    // the check above with nothing checked (606c), so what every confined
+    // launch is given must be in it.
+    for given in ["PATH", "HOME"] {
+        assert!(
+            launches[0]["env"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|name| name == given),
+            "{given} is given to every confined launch: {}",
             launches[0]
         );
     }
@@ -4335,6 +4367,17 @@ fn a_pi_that_cannot_be_confined_now_leaves_the_ask_waiting_and_status_says_why()
             assert!(
                 CONFINED_ENV.contains(&name.as_str().unwrap()),
                 "{name} reached pi's --version: {read}"
+            );
+        }
+        // Not an empty list read from a shell that printed another shape (606c).
+        for given in ["PATH", "HOME"] {
+            assert!(
+                read["env"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|name| name == given),
+                "{given} is given to every --version read: {read}"
             );
         }
         assert_eq!(read["home_empty"], true, "{read}");
