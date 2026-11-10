@@ -3855,6 +3855,41 @@ fn a_refused_send_says_in_data_whether_it_kept_anything() {
         "{undeclared}"
     );
     assert_eq!(undeclared["details"]["recorded"], "false", "{undeclared}");
+
+    // With no home to find, neither AIKIT_HOME nor HOME set (606d; #607's
+    // review, finding 2): refused before anything is handed on, by `--at`'s
+    // home discovery and, with no route, by the dispatch's.
+    for route in [&["--at", "workcell:elsewhere"][..], &[]] {
+        let mut args = vec!["gateway"];
+        args.extend_from_slice(route);
+        args.extend([
+            "send",
+            "--to",
+            STEWARD,
+            "--body",
+            "Where is home?",
+            "--json",
+        ]);
+        let mut homeless = window.command(&args);
+        homeless.env_remove("AIKIT_HOME").env_remove("HOME");
+        let output = homeless.output().unwrap();
+        let envelope: Value = serde_json::from_slice(&output.stdout).unwrap_or_else(|_| {
+            panic!(
+                "{route:?}: stdout={} stderr={}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            )
+        });
+        assert!(!output.status.success(), "{route:?}: {envelope}");
+        assert_eq!(
+            envelope["error"]["code"], "home.not_found",
+            "{route:?}: {envelope}"
+        );
+        assert_eq!(
+            envelope["error"]["details"]["recorded"], "false",
+            "{route:?}: {envelope}"
+        );
+    }
 }
 
 #[test]

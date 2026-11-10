@@ -1850,7 +1850,10 @@ impl GatewayCommand {
 
     /// Reads that change no semantic state. An offline execution against the
     /// state file does not rewrite the file for these, nor does a running
-    /// service after it answers one (606b).
+    /// service after it answers one (606b). It means the command leaves this
+    /// gateway's own state as it was, not that it writes nothing anywhere:
+    /// the encounter relay's send, delivery and delivery-reply are writes at
+    /// the encounter's owner, listed for that reason (606d).
     pub fn is_read_only(&self) -> bool {
         matches!(
             self,
