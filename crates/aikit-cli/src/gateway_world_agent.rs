@@ -275,6 +275,12 @@ pub struct DisclosedPart {
     /// What the World shows of it, in words: given to the answer turn, quoted.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub text: Option<String>,
+    /// Who told it (`disclose --by`): the person's window tells as
+    /// `field-window`. Absent, it was told by hand, or before AIKit kept
+    /// tellers, and it is not the window's (F11, DLW build ruling 2026-11-09).
+    /// Never given to the answer turn.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub teller: Option<String>,
 }
 
 /// What one World shows at stars and to the whole field.
@@ -396,10 +402,10 @@ pub fn read_disclosure(gateway: &dyn GatewayAccess, world_ref: &str) -> Result<W
 }
 
 /// `aikit gateway disclose --list`: what AIKit holds one World shows, as
-/// data (DLW build ruling 2026-11-09, 601c ruling 2). It reads and changes
-/// nothing, so the person's window can set the field right against it when it
-/// goes live. A read, as the gateway's own record read is: the answer turn
-/// reads the same record.
+/// data, each part with who told it (DLW build ruling 2026-11-09, 601c ruling
+/// 2; F11). It reads and changes nothing, so the person's window can set its
+/// own parts in the field right against it when it goes live. A read, as the
+/// gateway's own record read is: the answer turn reads the same record.
 pub fn list_disclosed(gateway: &dyn GatewayAccess, world_ref: &str) -> Result<Value> {
     if !qualified_world(world_ref) {
         return Err(three_part(
@@ -428,15 +434,26 @@ pub struct DiscloseRequest<'a> {
     pub kind: Option<&'a str>,
     pub label: Option<&'a str>,
     /// What the World shows of it, in words (at most 4000 characters).
+    /// `None` keeps the text the part already has.
     pub text: Option<&'a str>,
     pub withdraw: bool,
     pub from_position: Option<&'a str>,
+    /// Who tells it; `None` is the hand (F11).
+    pub teller: Option<&'a str>,
+}
+
+/// How a part's teller is said: by name, or by hand.
+fn told_by(teller: Option<&str>) -> String {
+    teller.map_or_else(|| "by hand".to_owned(), |teller| format!("by {teller}"))
 }
 
 /// Record that a World shows a part at a star or to the whole field, or
 /// withdraw it. The gateway runtime takes it only from the person's own
 /// connection; this is what an ask of that World's agent at that star may
-/// draw on.
+/// draw on. Each part keeps who told it (F11, DLW build ruling 2026-11-09):
+/// only its own teller tells it again, never taking over another's (the hand
+/// is a teller too), and a re-tell with no text keeps its text; a withdrawal
+/// with a teller takes back only that teller's parts.
 pub fn disclose(
     home: &AikitHome,
     gateway: &dyn GatewayAccess,
@@ -486,6 +503,9 @@ pub fn disclose(
     if let Some(kind) = request.kind.filter(|kind| !plain_ref(kind)) {
         return Err(refuse(format!("{kind} is not a plain kind.")));
     }
+    if let Some(teller) = request.teller.filter(|teller| !plain_ref(teller)) {
+        return Err(refuse(format!("{teller} is not a plain teller.")));
+    }
     let _lock = locked(home, request.world_ref)?;
     let mut record = read_disclosure(gateway, request.world_ref)?;
     let star = request.star_ref.map(str::to_owned);
@@ -495,6 +515,41 @@ pub fn disclose(
     let same = |part: &DisclosedPart| {
         part.part_ref == request.part_ref && (everywhere || part.star_ref == star)
     };
+    // A show is a withdrawal too, of the same part shown in the same place,
+    // so both meet the teller the same way; a withdrawal with no teller takes
+    // back any part (F11).
+    if !request.withdraw || request.teller.is_some() {
+        if let Some(other) = record
+            .parts
+            .iter()
+            .find(|part| same(part) && part.teller.as_deref() != request.teller)
+        {
+            let at = other.star_ref.as_deref().map_or_else(
+                || "to the whole field".to_owned(),
+                |star| format!("at {star}"),
+            );
+            return Err(three_part(
+                "gateway.disclose_not_its_teller",
+                format!(
+                    "{} is shown {at} as told {}, not {}.",
+                    other.part_ref,
+                    told_by(other.teller.as_deref()),
+                    told_by(request.teller)
+                ),
+                if request.withdraw {
+                    "Nothing was withdrawn."
+                } else {
+                    "Nothing was recorded."
+                },
+                "Only the one that told a part tells it again or takes it back by name; withdrawn by hand (--withdraw, no --by), it can be told anew.",
+            ));
+        }
+    }
+    let kept_text = record
+        .parts
+        .iter()
+        .find(|part| same(part))
+        .and_then(|part| part.text.clone());
     let before = record.parts.len();
     record.parts.retain(|part| !same(part));
     if !request.withdraw {
@@ -503,7 +558,8 @@ pub fn disclose(
             star_ref: star,
             kind: request.kind.map(str::to_owned),
             label: request.label.map(str::to_owned),
-            text: request.text.map(str::to_owned),
+            text: request.text.map(str::to_owned).or(kept_text),
+            teller: request.teller.map(str::to_owned),
         });
     }
     let value = serde_json::to_value(&record).expect("a disclosure encodes");
@@ -2321,6 +2377,7 @@ mod tests {
             kind: Some("page".into()),
             label: Some(label.into()),
             text: None,
+            teller: None,
         }
     }
 
