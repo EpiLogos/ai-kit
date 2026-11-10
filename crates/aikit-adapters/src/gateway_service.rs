@@ -2959,8 +2959,9 @@ mod tests {
 
     /// A service holding something of each kind a command reads or changes:
     /// a connector, a binding and its stream, a delivery prepared, a plain
-    /// Communique, an exact-instance one, an ask waiting and a World's Agent
-    /// record (606c).
+    /// Communique, an exact-instance one, an ask waiting, a World's Agent
+    /// record (606c), and one Communique from one Position to another, so the
+    /// conversation between them reads it (606d).
     fn populated() -> Arc<Mutex<AgencyGateway>> {
         use crate::gateway_communique::{
             CommuniqueDraft, CommuniqueInstance, CommuniqueInstanceHold, CommuniqueState,
@@ -3003,6 +3004,12 @@ mod tests {
             ..communique_draft("ask")
         };
         ask(json!({"type": "send-communique", "draft": waiting}));
+        let between = CommuniqueDraft {
+            from_position_ref: Some(ASKED.into()),
+            attribution: crate::gateway_communique::SenderAttribution::Claimed,
+            ..communique_draft("between")
+        };
+        ask(json!({"type": "send-communique", "draft": between}));
         ask(
             json!({"type": "set-world-agent-record", "key": "answer-harness",
             "record": {"protocol": "pi-rpc"}}),
@@ -3170,8 +3177,13 @@ mod tests {
             tabled, known,
             "one of every command, so the purity check runs each ({refusal})"
         );
-        // Answered by what the service holds besides the kernel: an owner
-        // offered, the conversation engine, the service's own stop.
+        // Listed as reads or not, these change nothing the service writes
+        // after a command (606d; #607's review, finding 3): native-owner is
+        // answered before that write (execute_serialized_request returns
+        // first), and so is conversation with an engine present, which then
+        // changes the kernel and persists it itself (here, with no engine,
+        // the kernel refuses it); shutdown changes nothing, and the stop
+        // writes the state.
         let outside = ["native-owner", "conversation", "shutdown"];
         // Reads the service answers from its Workcell's owners, none here.
         let owners = ["occupancy-read", "occupancy-list", "encounter-relay"];
@@ -3186,6 +3198,23 @@ mod tests {
             if parsed.is_read_only() {
                 if !owners.contains(&kind) {
                     assert_eq!(answer["ok"], true, "{command}: {answer}");
+                }
+                // A read that answers a list finds something in what
+                // populated() holds, so a change it made to what it found
+                // could not pass unseen (606d; #607's review, finding 1).
+                let response = &answer["response"];
+                let listed = match response["type"].as_str() {
+                    Some("communique-list") => Some(&response["communiques"]),
+                    Some("communique-counts") => Some(&response["counts"]),
+                    Some("replay") => Some(&response["replay"]["events"]),
+                    _ => None,
+                };
+                if let Some(listed) = listed {
+                    assert!(
+                        listed.as_array().is_some_and(|items| !items.is_empty()),
+                        "{kind} reads an empty list here, so a change to what it finds would \
+                         pass unseen: {answer}"
+                    );
                 }
                 assert!(
                     after == before,
