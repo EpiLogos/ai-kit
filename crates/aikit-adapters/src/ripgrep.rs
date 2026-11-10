@@ -14,6 +14,14 @@
 //!
 //! Exit status is data: 0 means matches, 1 means a clean no-matches answer,
 //! 2 means ripgrep itself failed. Only the last is an error.
+//!
+//! A glob is matched against each root-relative path ([`SearchRequest`]).
+//! ripgrep matches `--glob` against a path relative to its working directory,
+//! so each root that is a directory is searched by its own process, started in
+//! that root, over `.`, and its hits are named under the root again
+//! ([`SearchRequest::passes`]). The folders above a root are never part of what
+//! a glob sees: an ancestor named `target` or `ProjectCentral` excludes nothing,
+//! and an anchored `/secret/**` withholds the root's own `secret` folder.
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -103,9 +111,20 @@ impl SearchRequest {
         }
     }
 
-    /// The exact argv this request runs. Tests assert on this so the flags the
-    /// contract depends on are pinned in one place.
+    /// The exact argv of this request over its roots as given. Tests assert on
+    /// this so the flags the contract depends on are pinned in one place. A
+    /// root that is a directory is searched over `.` from inside it instead
+    /// ([`SearchRequest::passes`]); the flags are the same.
     pub fn argv(&self, executable: &Path) -> Vec<String> {
+        self.argv_over(
+            executable,
+            self.roots
+                .iter()
+                .map(|root| root.to_string_lossy().into_owned()),
+        )
+    }
+
+    fn argv_over(&self, executable: &Path, paths: impl IntoIterator<Item = String>) -> Vec<String> {
         let mut argv = vec![
             executable.to_string_lossy().into_owned(),
             "--json".into(),
@@ -146,29 +165,98 @@ impl SearchRequest {
         }
         argv.push("-e".into());
         argv.push(self.pattern.clone());
-        for root in &self.roots {
-            argv.push(root.to_string_lossy().into_owned());
-        }
+        argv.extend(paths);
         argv
+    }
+
+    /// The ripgrep processes this request runs. Each root that is a directory
+    /// is searched by its own, started in that root, over `.`, so its globs
+    /// are matched against root-relative paths, as the contract says, and
+    /// never against the folders above it. The roots that are not directories
+    /// (single files, where no glob applies) share one, over their paths as
+    /// given, started wherever the runner starts it. A relative executable
+    /// path (`tools/rg`) is named from here for a pass started in a root, so
+    /// it is the same program wherever that pass starts.
+    pub fn passes(&self, executable: &Path) -> Vec<RipgrepPass> {
+        let (folders, files): (Vec<&PathBuf>, Vec<&PathBuf>) = self
+            .roots
+            .iter()
+            .partition(|root| std::fs::metadata(root).is_ok_and(|meta| meta.is_dir()));
+        let started_in_a_root = started_anywhere(executable);
+        let mut passes: Vec<RipgrepPass> = folders
+            .into_iter()
+            .map(|root| RipgrepPass {
+                root: Some(root.clone()),
+                argv: self.argv_over(&started_in_a_root, [".".to_string()]),
+            })
+            .collect();
+        if !files.is_empty() {
+            passes.push(RipgrepPass {
+                root: None,
+                argv: self.argv_over(
+                    executable,
+                    files
+                        .into_iter()
+                        .map(|file| file.to_string_lossy().into_owned()),
+                ),
+            });
+        }
+        passes
     }
 
     /// The exact argv of the count form of this request: the same scope,
     /// budgets and globs, answering `path NUL matching-line-count` per file
     /// instead of match events. Nothing is truncated: every file is counted.
     pub fn count_argv(&self, executable: &Path) -> Vec<String> {
-        let mut argv = self.argv(executable);
-        if let Some(json) = argv.iter().position(|arg| arg == "--json") {
-            argv.splice(json..=json, ["--count".to_string(), "--null".to_string()]);
-        }
-        if let Some(cap) = argv.iter().position(|arg| arg == "--max-count") {
-            argv.drain(cap..=cap + 1);
-        }
-        argv
+        counted(self.argv(executable))
     }
 
     fn is_no_match(&self) -> bool {
         self.pattern.is_empty()
     }
+}
+
+/// The executable as a pass started in another folder must name it: a bare
+/// name is looked up on `PATH` wherever it starts, and an absolute path is the
+/// same anywhere, but a relative path with a folder in it is named from here.
+fn started_anywhere(executable: &Path) -> PathBuf {
+    if executable.is_relative() && executable.components().count() > 1 {
+        std::path::absolute(executable).unwrap_or_else(|_| executable.to_path_buf())
+    } else {
+        executable.to_path_buf()
+    }
+}
+
+/// One ripgrep process of a request ([`SearchRequest::passes`]): the root it is
+/// started in and searches over `.`, or none for the pass over single files
+/// named as given, and its argv.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RipgrepPass {
+    pub root: Option<PathBuf>,
+    pub argv: Vec<String>,
+}
+
+impl RipgrepPass {
+    /// A path ripgrep named, as the request named it: under the pass's root,
+    /// where ripgrep walked `.` from inside it.
+    fn named(&self, path: PathBuf) -> PathBuf {
+        match &self.root {
+            Some(root) if path.is_relative() => root.join(path.strip_prefix(".").unwrap_or(&path)),
+            _ => path,
+        }
+    }
+}
+
+/// The count form of a match argv: `path NUL matching-line-count` per file in
+/// place of match events, every file counted.
+fn counted(mut argv: Vec<String>) -> Vec<String> {
+    if let Some(json) = argv.iter().position(|arg| arg == "--json") {
+        argv.splice(json..=json, ["--count".to_string(), "--null".to_string()]);
+    }
+    if let Some(cap) = argv.iter().position(|arg| arg == "--max-count") {
+        argv.drain(cap..=cap + 1);
+    }
+    argv
 }
 
 fn format_filesize(bytes: u64) -> String {
@@ -198,6 +286,47 @@ pub struct RipgrepOutcome {
     pub matches: Vec<RipgrepMatch>,
     pub files_searched: usize,
     pub truncated: bool,
+}
+
+impl RipgrepOutcome {
+    /// One pass's outcome added to the request's, its paths named under the
+    /// pass's root.
+    fn add(&mut self, pass: &RipgrepPass, part: RipgrepOutcome) {
+        self.files_searched += part.files_searched;
+        self.truncated |= part.truncated;
+        self.matches
+            .extend(part.matches.into_iter().map(|matched| RipgrepMatch {
+                path: pass.named(matched.path),
+                ..matched
+            }));
+    }
+}
+
+/// The one wall-clock budget every pass of a request shares.
+struct Deadline(Option<std::time::Instant>);
+
+impl Deadline {
+    fn new(budget: Option<Duration>) -> Self {
+        Self(budget.and_then(|budget| std::time::Instant::now().checked_add(budget)))
+    }
+
+    /// What is left of the budget for the next pass, or a timeout once it is
+    /// spent, as the runner names one.
+    fn remaining(&self, argv: &[String]) -> Result<Option<Duration>> {
+        let Some(deadline) = self.0 else {
+            return Ok(None);
+        };
+        let left = deadline.saturating_duration_since(std::time::Instant::now());
+        if left.is_zero() {
+            return Err(AikitError::new(
+                "mux.command_timeout",
+                "ripgrep's search budget was spent before its next pass",
+            )
+            .with("command", argv.join(" "))
+            .with("execution_started", "false"));
+        }
+        Ok(Some(left))
+    }
 }
 
 pub struct RipgrepSearcher<R> {
@@ -246,16 +375,26 @@ impl<R: CommandRunner> RipgrepSearcher<R> {
                 "ripgrep search requested with no authorised roots",
             ));
         }
-        let argv = request.argv(&self.executable);
         // The declared wall-clock budget is enforced here, at the one place
         // every knowledge-path search travels through: a pathological tree
         // costs one timeout, not an unbounded wait. The runner seam does the
         // killing; a timed-out search is a runner error, not a failed search.
-        let output = match request.timeout {
-            Some(budget) => self.runner.run_with_timeout(&argv, budget)?,
-            None => self.runner.run(&argv)?,
-        };
-        Self::outcome_of(request, &argv, &output)
+        // Every pass of the request shares the one budget.
+        let deadline = Deadline::new(request.timeout);
+        let mut outcome = RipgrepOutcome::default();
+        for pass in request.passes(&self.executable) {
+            let timeout = deadline.remaining(&pass.argv)?;
+            let output = match &pass.root {
+                Some(root) => self.runner.run_in(root, &pass.argv, timeout)?,
+                None => match timeout {
+                    Some(budget) => self.runner.run_with_timeout(&pass.argv, budget)?,
+                    None => self.runner.run(&pass.argv)?,
+                },
+            };
+            let kept = request.limit.saturating_sub(outcome.matches.len());
+            outcome.add(&pass, Self::outcome_of(kept, &pass.argv, &output)?);
+        }
+        Ok(outcome)
     }
 
     /// [`RipgrepSearcher::search`] with what is read bounded as well as what
@@ -269,34 +408,53 @@ impl<R: CommandRunner> RipgrepSearcher<R> {
         if request.is_no_match() || request.roots.is_empty() || request.limit == usize::MAX {
             return self.search(request);
         }
-        let argv = request.argv(&self.executable);
-        // Both streams share the allowance half and half: stdout's half is
-        // the match budget.
-        let allowance = request
-            .limit
-            .saturating_add(1)
-            .saturating_mul(MATCH_EVENT_BYTES)
-            .saturating_mul(2);
-        let budget = request.timeout.unwrap_or(BOUNDED_SEARCH_TIMEOUT);
-        match self.runner.run_with_limits(&argv, budget, allowance, false) {
-            Ok(output) => Self::outcome_of(request, &argv, &output),
-            Err(error) if error.code() == "mux.command_output_limit" => Ok(RipgrepOutcome {
-                truncated: true,
-                ..RipgrepOutcome::default()
-            }),
-            Err(error) if error.code() == "mux.command_limits_unsupported" => self.search(request),
-            Err(error) => Err(error),
+        let deadline = Deadline::new(Some(request.timeout.unwrap_or(BOUNDED_SEARCH_TIMEOUT)));
+        let mut outcome = RipgrepOutcome::default();
+        for pass in request.passes(&self.executable) {
+            let kept = request.limit.saturating_sub(outcome.matches.len());
+            // Both streams share the allowance half and half: stdout's half is
+            // the match budget, what this pass may still keep.
+            let allowance = kept
+                .saturating_add(1)
+                .saturating_mul(MATCH_EVENT_BYTES)
+                .saturating_mul(2);
+            let budget = deadline
+                .remaining(&pass.argv)?
+                .unwrap_or(BOUNDED_SEARCH_TIMEOUT);
+            let output = match &pass.root {
+                Some(root) => self
+                    .runner
+                    .run_in_with_limits(root, &pass.argv, budget, allowance, false),
+                None => self
+                    .runner
+                    .run_with_limits(&pass.argv, budget, allowance, false),
+            };
+            match output {
+                Ok(output) => outcome.add(&pass, Self::outcome_of(kept, &pass.argv, &output)?),
+                Err(error) if error.code() == "mux.command_output_limit" => {
+                    return Ok(RipgrepOutcome {
+                        truncated: true,
+                        ..RipgrepOutcome::default()
+                    })
+                }
+                Err(error) if error.code() == "mux.command_limits_unsupported" => {
+                    return self.search(request)
+                }
+                Err(error) => return Err(error),
+            }
         }
+        Ok(outcome)
     }
 
+    /// One pass's answer, keeping at most `kept` matches.
     fn outcome_of(
-        request: &SearchRequest,
+        kept: usize,
         argv: &[String],
         output: &crate::runner::Output,
     ) -> Result<RipgrepOutcome> {
         // 0 = matches, 1 = clean no-match. Both parse their stream; only a
         // ripgrep failure (2) becomes an error.
-        let outcome = parse_events(&output.stdout, request.limit)?;
+        let outcome = parse_events(&output.stdout, kept)?;
         if output.status == 0 || output.status == 1 {
             return Ok(outcome);
         }
@@ -322,35 +480,40 @@ impl<R: CommandRunner> RipgrepSearcher<R> {
         if request.is_no_match() {
             return Ok(Vec::new());
         }
-        let argv = request.count_argv(&self.executable);
-        #[allow(unused_imports)]
-        use std::io::Write as _;
-        let output = match request.timeout {
-            Some(budget) => self.runner.run_with_timeout(&argv, budget)?,
-            None => self.runner.run(&argv)?,
-        };
-        if output.status != 0 && output.status != 1 {
-            return Err(AikitError::new(
-                "search.ripgrep_failed",
-                format!("ripgrep count exited with status {}", output.status),
-            )
-            .with("command", argv.join(" ")));
-        }
+        let deadline = Deadline::new(request.timeout);
         let mut counts = Vec::new();
-        for line in output.stdout.lines() {
-            let Some((path, count)) = line.split_once('\0') else {
-                // rg names paths only when it walks a scope; over a single
-                // file root it prints the bare count, and that count is that
-                // file's.
-                if request.roots.len() == 1 {
-                    if let Ok(count) = line.trim().parse::<u64>() {
-                        counts.push((request.roots[0].clone(), count));
-                    }
-                }
-                continue;
+        for pass in request.passes(&self.executable) {
+            let argv = counted(pass.argv.clone());
+            let timeout = deadline.remaining(&argv)?;
+            let output = match &pass.root {
+                Some(root) => self.runner.run_in(root, &argv, timeout)?,
+                None => match timeout {
+                    Some(budget) => self.runner.run_with_timeout(&argv, budget)?,
+                    None => self.runner.run(&argv)?,
+                },
             };
-            if let Ok(count) = count.trim().parse::<u64>() {
-                counts.push((PathBuf::from(path), count));
+            if output.status != 0 && output.status != 1 {
+                return Err(AikitError::new(
+                    "search.ripgrep_failed",
+                    format!("ripgrep count exited with status {}", output.status),
+                )
+                .with("command", argv.join(" ")));
+            }
+            for line in output.stdout.lines() {
+                let Some((path, count)) = line.split_once('\0') else {
+                    // rg names paths only when it walks a scope; over a single
+                    // file root it prints the bare count, and that count is that
+                    // file's.
+                    if request.roots.len() == 1 && pass.root.is_none() {
+                        if let Ok(count) = line.trim().parse::<u64>() {
+                            counts.push((request.roots[0].clone(), count));
+                        }
+                    }
+                    continue;
+                };
+                if let Ok(count) = count.trim().parse::<u64>() {
+                    counts.push((pass.named(PathBuf::from(path)), count));
+                }
             }
         }
         counts.sort();
@@ -590,6 +753,224 @@ mod tests {
             .unwrap_err();
         assert_eq!(error.code(), "search.ripgrep_failed");
         assert!(error.message().contains("unrecognized flag"));
+    }
+
+    /// A root under folders named as globs name them (`target/ProjectCentral/secret/world`), holding a file of its own, its own
+    /// `secret`, `target` and `ProjectCentral` folders, and a `secret` folder deeper of the same name.
+    fn globbed_tree(at: &Path) -> PathBuf {
+        let root = at.join("target/ProjectCentral/secret/world");
+        for relative in [
+            "e.md",
+            "secret/a.md",
+            "src/c.md",
+            "src/secret/b.md",
+            "target/d.md",
+            "ProjectCentral/f.md",
+        ] {
+            let path = root.join(relative);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, "harness gate\n").unwrap();
+        }
+        root
+    }
+
+    /// What one real search over `roots` finds with `exclude`, each path named under its root.
+    fn found(roots: &[&Path], exclude: &[&str]) -> Vec<String> {
+        let mut request = request();
+        request.roots = roots.iter().map(|root| root.to_path_buf()).collect();
+        request.include_globs = vec![];
+        request.exclude_globs = exclude.iter().map(|glob| glob.to_string()).collect();
+        let searcher = RipgrepSearcher::new(
+            SystemRunner::new().with_env_removed("RIPGREP_CONFIG_PATH"),
+            executable(),
+        );
+        let outcome = searcher.search(&request).unwrap();
+        let counted = searcher.count(&request).unwrap();
+        let mut paths: Vec<String> = outcome
+            .matches
+            .iter()
+            .map(|matched| named_under(roots, &matched.path))
+            .collect();
+        paths.sort();
+        let mut counted: Vec<String> = counted
+            .iter()
+            .map(|(path, _)| named_under(roots, path))
+            .collect();
+        counted.sort();
+        assert_eq!(paths, counted, "the count names what the search finds");
+        paths
+    }
+
+    fn named_under(roots: &[&Path], path: &Path) -> String {
+        let (index, root) = roots
+            .iter()
+            .enumerate()
+            .find(|(_, root)| path.starts_with(root))
+            .unwrap_or_else(|| panic!("{} is under no root", path.display()));
+        format!("{index}:{}", path.strip_prefix(root).unwrap().display())
+    }
+
+    /// Round 55 item 8 (DLW build ruling 2026-11-09): a glob is matched against each root-relative path, as the contract says, and
+    /// never against the folders above the root. A root under folders named `ProjectCentral` and `target` is searched whole; only
+    /// its own `ProjectCentral` and `target` folders are withheld.
+    #[test]
+    fn a_root_under_folders_named_like_its_globs_is_searched_whole() {
+        if !available() {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let root = globbed_tree(dir.path());
+        assert_eq!(
+            found(&[&root], &["**/ProjectCentral/**", "**/target/**"]),
+            ["0:e.md", "0:secret/a.md", "0:src/c.md", "0:src/secret/b.md"]
+        );
+        assert_eq!(
+            found(&[&root], &["target/**"]).len(),
+            5,
+            "an anchored target/** names the root's own target alone"
+        );
+    }
+
+    /// The same ruling: an anchored glob withholds the root's own folder, and an unanchored one each folder of that name inside
+    /// the root, and neither anything above it (the root sits under a folder named `secret`). Withholding less than an anchored
+    /// glob names is a privacy fault; withholding the whole root is the other.
+    #[test]
+    fn an_anchored_glob_withholds_the_root_s_own_folder_and_an_unanchored_one_each_namesake_in_it()
+    {
+        if !available() {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let root = globbed_tree(dir.path());
+        let anchored = [
+            "0:ProjectCentral/f.md",
+            "0:e.md",
+            "0:src/c.md",
+            "0:src/secret/b.md",
+            "0:target/d.md",
+        ];
+        assert_eq!(found(&[&root], &["secret/**"]), anchored);
+        assert_eq!(found(&[&root], &["/secret/**"]), anchored);
+        assert_eq!(
+            found(&[&root], &["**/secret/**"]),
+            [
+                "0:ProjectCentral/f.md",
+                "0:e.md",
+                "0:src/c.md",
+                "0:target/d.md"
+            ]
+        );
+    }
+
+    /// The same ruling: two roots of one request are each searched by their own paths, and each answers its own matches under it.
+    /// Neither root's place bleeds into the other's: the second root sits inside a folder the first's glob names.
+    #[test]
+    fn two_roots_are_each_searched_by_their_own_paths() {
+        if !available() {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let first = globbed_tree(&dir.path().join("first"));
+        let second = globbed_tree(&dir.path().join("first/secret/second"));
+        assert_eq!(
+            found(&[&first, &second], &["secret/**", "**/target/**"]),
+            [
+                "0:ProjectCentral/f.md",
+                "0:e.md",
+                "0:src/c.md",
+                "0:src/secret/b.md",
+                "1:ProjectCentral/f.md",
+                "1:e.md",
+                "1:src/c.md",
+                "1:src/secret/b.md",
+            ]
+        );
+    }
+
+    /// Each root that is a folder is searched by its own pass, started in it, over `.`; single files share one pass, as given.
+    #[test]
+    fn a_folder_root_is_searched_from_inside_it_and_single_files_as_named() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("one.md");
+        std::fs::write(&file, "x").unwrap();
+        let mut both = request();
+        both.roots = vec![dir.path().to_path_buf(), file.clone()];
+        let passes = both.passes(Path::new("rg"));
+        assert_eq!(passes.len(), 2, "{passes:?}");
+        assert_eq!(passes[0].root.as_deref(), Some(dir.path()));
+        assert_eq!(passes[0].argv.last().map(String::as_str), Some("."));
+        assert_eq!(passes[1].root, None);
+        assert_eq!(
+            passes[1].argv.last(),
+            Some(&file.to_string_lossy().into_owned())
+        );
+    }
+
+    /// A ripgrep named by a relative path is the same program in a pass started in a root.
+    #[test]
+    fn a_relative_ripgrep_path_runs_the_same_program_in_a_root() {
+        let dir = tempfile::tempdir().unwrap();
+        let tools = dir.path().join("tools");
+        let root = dir.path().join("root");
+        std::fs::create_dir_all(&tools).unwrap();
+        std::fs::create_dir_all(&root).unwrap();
+        let ran = dir.path().join("ran");
+        let program = tools.join("rg");
+        std::fs::write(
+            &program,
+            format!("#!/bin/sh\ntouch '{}'\nexit 1\n", ran.display()),
+        )
+        .unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let here = std::env::current_dir().unwrap();
+        let up = here.components().count() - 1;
+        let relative: PathBuf = std::iter::repeat_n(Path::new(".."), up)
+            .collect::<PathBuf>()
+            .join(program.strip_prefix("/").unwrap());
+        assert!(relative.is_relative() && relative.components().count() > 1);
+        let mut folder = request();
+        folder.roots = vec![root];
+        // Where a relative program is looked up once a command starts in
+        // another folder is the platform's choice (std's `current_dir`), so
+        // the pass names it from here on every platform.
+        let named = &folder.passes(&relative)[0].argv[0];
+        assert_eq!(named, &here.join(&relative).to_string_lossy().into_owned());
+        let hits = RipgrepSearcher::new(SystemRunner::new(), &relative)
+            .search(&folder)
+            .expect("the program named from here runs in the root");
+        assert!(hits.matches.is_empty());
+        assert!(ran.exists(), "the named program ran");
+    }
+
+    /// A runner that cannot start a command in a folder runs no search of one, rather than search wherever it stands.
+    #[test]
+    fn a_runner_that_cannot_start_in_a_root_searches_nothing() {
+        struct Nowhere(std::sync::Mutex<usize>);
+        impl CommandRunner for Nowhere {
+            fn run(&self, _argv: &[String]) -> Result<crate::runner::Output> {
+                *self.0.lock().unwrap() += 1;
+                Ok(crate::runner::Output::success(""))
+            }
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let mut folder = request();
+        folder.roots = vec![dir.path().to_path_buf()];
+        let runner = Nowhere(std::sync::Mutex::new(0));
+        let searcher = RipgrepSearcher::new(&runner, "rg");
+        assert_eq!(
+            searcher.search(&folder).unwrap_err().code(),
+            "mux.command_dir_unsupported"
+        );
+        assert_eq!(
+            searcher.search_bounded(&folder).unwrap_err().code(),
+            "mux.command_dir_unsupported"
+        );
+        assert_eq!(
+            searcher.count(&folder).unwrap_err().code(),
+            "mux.command_dir_unsupported"
+        );
+        assert_eq!(*runner.0.lock().unwrap(), 0, "nothing ran");
     }
 
     #[test]

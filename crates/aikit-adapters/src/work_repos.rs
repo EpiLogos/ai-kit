@@ -706,9 +706,15 @@ fn regex_escape(text: &str) -> String {
 }
 
 /// The `.no-agent-retrieval` subtrees of one project, as ripgrep exclude globs
-/// (`**/<relative>/**`). Marked directories are found by walking the project
-/// before any search runs — the before-processing half of authorisation: a
-/// pruned path is never opened.
+/// (`<relative>/**`, anchored at the project's root). Marked directories are
+/// found by walking the project before any search runs — the before-processing
+/// half of authorisation: a pruned path is never opened. ripgrep matches each
+/// glob against the project-relative path, since each project is searched from
+/// inside it (ripgrep.rs `SearchRequest::passes`), so a marked folder withholds
+/// itself alone: not a folder of the same name deeper in the project, and
+/// nothing above the project (DLW build ruling 2026-11-09, round 55 item 8).
+/// The fixed exclusions below are unanchored on purpose: a `target` or a
+/// `ProjectCentral` at any depth inside the project.
 ///
 /// `ProjectCentral/**` is excluded outright: the register (manifest, human
 /// ground, governance, wiki, now records) is aperture owned by the
@@ -759,7 +765,7 @@ fn marker_exclude_globs(project_root: &Path) -> Vec<String> {
     for relative in marked {
         // Glob metacharacters in a real directory name are escaped so the
         // exclusion names the directory, not a pattern.
-        globs.push(format!("**/{}/**", glob_escape(&relative)));
+        globs.push(format!("{}/**", glob_escape(&relative)));
     }
     globs
 }
@@ -1788,10 +1794,9 @@ mod tests {
     }
 
     fn native_scratch() -> tempfile::TempDir {
-        // The scratch must not sit under a ProjectCentral subtree: the
-        // provider's own fixed exclusions remove every `ProjectCentral/**`
-        // path from a native query, so files there are invisible to the very
-        // search under test.
+        // The provider's fixed exclusions remove every `ProjectCentral/**`
+        // path inside a project from a native query; the folders above the
+        // project are no part of what a glob sees (round 55 item 8).
         tempfile::Builder::new()
             .prefix("work-native-query-")
             .tempdir()
@@ -2152,6 +2157,79 @@ mod tests {
             "the register aperture belongs to the binding lens, not the live pool"
         );
         assert!(globs.iter().any(|glob| glob.ends_with("target/**")));
+    }
+
+    /// The files a real search of `projects` for `needle` surfaces, as `project:member`.
+    fn surfaced(projects: Vec<WorkRepoProject>, runner: SystemRunner) -> Vec<String> {
+        let provider =
+            WorkReposSourcePoolProvider::connect(runner, crate::ripgrep::executable(), projects);
+        let mut found: Vec<String> = provider
+            .search("needle", SourceSearchMode::Fulltext, &[], 50)
+            .unwrap()
+            .iter()
+            .map(|hit| {
+                let address = decode_work_file_source_ref(&hit.source).unwrap().unwrap();
+                format!("{}:{}", address.project_id, address.member.display())
+            })
+            .collect();
+        found.sort();
+        found
+    }
+
+    /// Round 55 item 8 (DLW build ruling 2026-11-09): a project is searched by its own paths, never the folders above it. A
+    /// project under folders named `ProjectCentral`, `target` and `docs/private` (as a World kept under a ProjectCentral's scratch
+    /// is) is searched whole. Inside it, its own `ProjectCentral` and `target` are withheld, and its `.no-agent-retrieval` folder
+    /// `docs/private` withholds that folder alone, not a `docs/private` deeper that carries no marker.
+    #[test]
+    fn a_project_is_searched_by_its_own_paths_never_the_folders_above_it() {
+        let temp = native_scratch();
+        let root = temp
+            .path()
+            .join("ProjectCentral/target/docs/private/World/Work/demo");
+        let runner = native_matches(
+            &root,
+            &[
+                ("src/routine.rs", 1, "needle"),
+                ("docs/private/withheld.md", 1, "needle"),
+                ("src/docs/private/kept.md", 1, "needle"),
+                ("ProjectCentral/user/plan.md", 1, "needle"),
+                ("target/out.md", 1, "needle"),
+            ],
+        );
+        write(&root.join("docs/private/.no-agent-retrieval"), "");
+        assert_eq!(
+            surfaced(vec![project(&root)], runner),
+            ["demo:src/docs/private/kept.md", "demo:src/routine.rs"]
+        );
+    }
+
+    /// The same ruling: two projects each withhold their own marked folders and nothing of the other's. alpha marks `private`
+    /// and keeps `drafts`; beta marks `drafts` and keeps `private`.
+    #[test]
+    fn two_projects_each_withhold_only_their_own_marked_folders() {
+        let temp = native_scratch();
+        let alpha = temp.path().join("Work/alpha");
+        let beta = temp.path().join("Work/beta");
+        let runner = native_matches(
+            &alpha,
+            &[("private/a.md", 1, "needle"), ("drafts/b.md", 1, "needle")],
+        );
+        native_matches(
+            &beta,
+            &[("private/c.md", 1, "needle"), ("drafts/d.md", 1, "needle")],
+        );
+        write(&alpha.join("private/.no-agent-retrieval"), "");
+        write(&beta.join("drafts/.no-agent-retrieval"), "");
+        assert_eq!(
+            surfaced(
+                vec![
+                    independent(&alpha, "alpha", "alpha"),
+                    independent(&beta, "beta", "beta")
+                ],
+                runner
+            ),
+            ["alpha:drafts/b.md", "beta:private/c.md"]
+        );
     }
 
     #[test]

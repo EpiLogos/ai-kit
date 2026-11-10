@@ -138,6 +138,58 @@ pub trait CommandRunner {
         .with("command", argv.join(" "))
         .with("execution_started", "false"))
     }
+
+    /// [`CommandRunner::run_with_timeout`] (or [`CommandRunner::run`], with no budget) with the command started in `dir`. A tool that
+    /// reads its arguments relative to where it runs needs this: ripgrep matches each `--glob` against the path it walks, relative
+    /// to its working directory, so a search of one root runs in that root, over `.` (ripgrep.rs `SearchRequest::passes`).
+    ///
+    /// A runner that cannot start a command in a directory refuses before anything runs (`mux.command_dir_unsupported`), rather than
+    /// run it wherever this process stands: there `.` would name another tree. A runner that spawns real processes starts the child
+    /// in `dir`; a runner that wraps another passes `dir` on.
+    fn run_in(
+        &self,
+        dir: &Path,
+        argv: &[String],
+        timeout: Option<std::time::Duration>,
+    ) -> Result<Output> {
+        let _ = (dir, timeout);
+        Err(dir_unsupported(argv))
+    }
+
+    /// [`CommandRunner::run_with_limits`] with the command started in `dir`, as [`CommandRunner::run_in`] starts it. A runner that
+    /// cannot enforce the limits refuses as [`CommandRunner::run_with_limits`] does (`mux.command_limits_unsupported`), so its caller
+    /// can ask [`CommandRunner::run_in`] instead, which refuses in turn if the runner cannot start a command in a directory either.
+    fn run_in_with_limits(
+        &self,
+        dir: &Path,
+        argv: &[String],
+        remaining_timeout: std::time::Duration,
+        remaining_aggregate_bytes: usize,
+        strict_utf8: bool,
+    ) -> Result<Output> {
+        let _ = (
+            dir,
+            remaining_timeout,
+            remaining_aggregate_bytes,
+            strict_utf8,
+        );
+        Err(AikitError::new(
+            "mux.command_limits_unsupported",
+            "This runner cannot enforce per-invocation capture limits",
+        )
+        .with("command", argv.join(" "))
+        .with("execution_started", "false"))
+    }
+}
+
+/// A runner's refusal to start a command in a directory it cannot start one in ([`CommandRunner::run_in`]).
+fn dir_unsupported(argv: &[String]) -> AikitError {
+    AikitError::new(
+        "mux.command_dir_unsupported",
+        "This runner cannot start a command in a directory, so it runs none rather than run it elsewhere",
+    )
+    .with("command", argv.join(" "))
+    .with("execution_started", "false")
 }
 
 impl<T: CommandRunner + ?Sized> CommandRunner for Box<T> {
@@ -161,6 +213,32 @@ impl<T: CommandRunner + ?Sized> CommandRunner for Box<T> {
         strict_utf8: bool,
     ) -> Result<Output> {
         (**self).run_with_limits(
+            argv,
+            remaining_timeout,
+            remaining_aggregate_bytes,
+            strict_utf8,
+        )
+    }
+
+    fn run_in(
+        &self,
+        dir: &Path,
+        argv: &[String],
+        timeout: Option<std::time::Duration>,
+    ) -> Result<Output> {
+        (**self).run_in(dir, argv, timeout)
+    }
+
+    fn run_in_with_limits(
+        &self,
+        dir: &Path,
+        argv: &[String],
+        remaining_timeout: std::time::Duration,
+        remaining_aggregate_bytes: usize,
+        strict_utf8: bool,
+    ) -> Result<Output> {
+        (**self).run_in_with_limits(
+            dir,
             argv,
             remaining_timeout,
             remaining_aggregate_bytes,
@@ -196,6 +274,32 @@ impl<T: CommandRunner + ?Sized> CommandRunner for &T {
             strict_utf8,
         )
     }
+
+    fn run_in(
+        &self,
+        dir: &Path,
+        argv: &[String],
+        timeout: Option<std::time::Duration>,
+    ) -> Result<Output> {
+        (**self).run_in(dir, argv, timeout)
+    }
+
+    fn run_in_with_limits(
+        &self,
+        dir: &Path,
+        argv: &[String],
+        remaining_timeout: std::time::Duration,
+        remaining_aggregate_bytes: usize,
+        strict_utf8: bool,
+    ) -> Result<Output> {
+        (**self).run_in_with_limits(
+            dir,
+            argv,
+            remaining_timeout,
+            remaining_aggregate_bytes,
+            strict_utf8,
+        )
+    }
 }
 
 /// A shared runner. The stack adapter owns its layers as `Box<dyn MuxAdapter>`,
@@ -222,6 +326,32 @@ impl<T: CommandRunner + ?Sized> CommandRunner for std::sync::Arc<T> {
         strict_utf8: bool,
     ) -> Result<Output> {
         (**self).run_with_limits(
+            argv,
+            remaining_timeout,
+            remaining_aggregate_bytes,
+            strict_utf8,
+        )
+    }
+
+    fn run_in(
+        &self,
+        dir: &Path,
+        argv: &[String],
+        timeout: Option<std::time::Duration>,
+    ) -> Result<Output> {
+        (**self).run_in(dir, argv, timeout)
+    }
+
+    fn run_in_with_limits(
+        &self,
+        dir: &Path,
+        argv: &[String],
+        remaining_timeout: std::time::Duration,
+        remaining_aggregate_bytes: usize,
+        strict_utf8: bool,
+    ) -> Result<Output> {
+        (**self).run_in_with_limits(
+            dir,
             argv,
             remaining_timeout,
             remaining_aggregate_bytes,
@@ -281,6 +411,17 @@ impl SystemRunner {
     pub fn with_cwd(mut self, cwd: impl AsRef<Path>) -> Self {
         self.cwd = Some(cwd.as_ref().to_path_buf());
         self
+    }
+
+    /// This runner, started in `dir`: a relative `dir` is named from the
+    /// folder this runner starts in, so `.` is that folder and not the
+    /// process's own.
+    fn started_in(&self, dir: &Path) -> Self {
+        let dir = match &self.cwd {
+            Some(base) if dir.is_relative() => base.join(dir),
+            _ => dir.to_path_buf(),
+        };
+        self.clone().with_cwd(dir)
     }
 
     #[must_use]
@@ -2221,6 +2362,35 @@ impl CommandRunner for SystemRunner {
         bounded.strict_utf8 |= strict_utf8;
         bounded.run(argv)
     }
+
+    fn run_in(
+        &self,
+        dir: &Path,
+        argv: &[String],
+        timeout: Option<std::time::Duration>,
+    ) -> Result<Output> {
+        let here = self.started_in(dir);
+        match timeout {
+            Some(timeout) => here.run_with_timeout(argv, timeout),
+            None => here.run(argv),
+        }
+    }
+
+    fn run_in_with_limits(
+        &self,
+        dir: &Path,
+        argv: &[String],
+        remaining_timeout: std::time::Duration,
+        remaining_aggregate_bytes: usize,
+        strict_utf8: bool,
+    ) -> Result<Output> {
+        self.started_in(dir).run_with_limits(
+            argv,
+            remaining_timeout,
+            remaining_aggregate_bytes,
+            strict_utf8,
+        )
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -2289,6 +2459,34 @@ impl<R: CommandRunner> CommandRunner for RecordingRunner<R> {
     ) -> Result<Output> {
         record(&self.calls, argv);
         self.inner.run_with_limits(
+            argv,
+            remaining_timeout,
+            remaining_aggregate_bytes,
+            strict_utf8,
+        )
+    }
+
+    fn run_in(
+        &self,
+        dir: &Path,
+        argv: &[String],
+        timeout: Option<std::time::Duration>,
+    ) -> Result<Output> {
+        record(&self.calls, argv);
+        self.inner.run_in(dir, argv, timeout)
+    }
+
+    fn run_in_with_limits(
+        &self,
+        dir: &Path,
+        argv: &[String],
+        remaining_timeout: std::time::Duration,
+        remaining_aggregate_bytes: usize,
+        strict_utf8: bool,
+    ) -> Result<Output> {
+        record(&self.calls, argv);
+        self.inner.run_in_with_limits(
+            dir,
             argv,
             remaining_timeout,
             remaining_aggregate_bytes,
@@ -2388,6 +2586,35 @@ impl CommandRunner for ScriptedRunner {
         Ok(output)
     }
 
+    /// A recorded response has no directory to start in: it answers as [`ScriptedRunner::run`].
+    fn run_in(
+        &self,
+        dir: &Path,
+        argv: &[String],
+        timeout: Option<std::time::Duration>,
+    ) -> Result<Output> {
+        let _ = (dir, timeout);
+        self.run(argv)
+    }
+
+    /// As [`ScriptedRunner::run_with_limits`]: a recorded response has no directory to start in.
+    fn run_in_with_limits(
+        &self,
+        dir: &Path,
+        argv: &[String],
+        remaining_timeout: std::time::Duration,
+        remaining_aggregate_bytes: usize,
+        strict_utf8: bool,
+    ) -> Result<Output> {
+        let _ = dir;
+        self.run_with_limits(
+            argv,
+            remaining_timeout,
+            remaining_aggregate_bytes,
+            strict_utf8,
+        )
+    }
+
     fn run(&self, argv: &[String]) -> Result<Output> {
         record(&self.calls, argv);
         let line = argv.join(" ");
@@ -2443,6 +2670,35 @@ fn recorded(log: &Mutex<Vec<Vec<String>>>) -> Vec<Vec<String>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A command started in a relative folder starts in that folder under the runner's own, as a relative path it runs over would.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn a_relative_folder_is_named_from_the_runners_own_folder() {
+        let base = native_command_tempdir();
+        let base = std::fs::canonicalize(base.path()).unwrap();
+        std::fs::create_dir_all(base.join("sub")).unwrap();
+        let runner = SystemRunner::new().with_cwd(&base);
+        let pwd = vec!["/bin/pwd".to_string(), "-P".to_string()];
+        for (dir, expected) in [(".", base.clone()), ("sub", base.join("sub"))] {
+            let plain = runner.run_in(Path::new(dir), &pwd, None).unwrap();
+            assert_eq!(plain.stdout.trim_end(), expected.to_string_lossy(), "{dir}");
+            let bounded = runner
+                .run_in_with_limits(
+                    Path::new(dir),
+                    &pwd,
+                    std::time::Duration::from_secs(10),
+                    1 << 16,
+                    true,
+                )
+                .unwrap();
+            assert_eq!(
+                bounded.stdout.trim_end(),
+                expected.to_string_lossy(),
+                "{dir}"
+            );
+        }
+    }
 
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     fn native_command_tempdir() -> tempfile::TempDir {
