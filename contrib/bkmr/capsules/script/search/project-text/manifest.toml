@@ -2,7 +2,7 @@ schema = 1
 id = "script/search/project-text"
 kind = "script"
 name = "bkmr text search"
-description = "Full-text and tag search of the bkmr database bound to this context. Offline, no credentials, JSON output. The cheap verb: reach for it first."
+description = "Full-text and tag search of the bkmr database bound to this context. Offline, no credentials, JSON output. Each search first copies the database, about 30 ms more than bkmr's own search on a 64 KB database."
 maturity = "candidate"
 tags = ["bkmr", "search", "fts", "offline", "json"]
 platforms = ["linux", "macos"]
@@ -26,6 +26,11 @@ reason = "`search --json` and BKMR_DB_URL both exist from 6.5.0."
 # class for a run's own temporary folder: a write to any scope but project,
 # worktree and task reads as write:outside, the elevated class. So the write is
 # said here and not declared.
+#
+# Each run also removes this user's own stale copy folders under TMPDIR: the
+# aikit-bkmr-search.* folders more than an hour old, which a run killed
+# outright (SIGKILL, as the runner's timeout kills one) could not remove itself.
+# Those deletions are said here and not declared, for the same reason.
 [effects]
 filesystem = ["read:outside"]
 network = false

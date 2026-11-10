@@ -28,6 +28,15 @@ install_hint = "script/install/bkmr"
 # file byte-identical and creates no sidecars. `write:outside` is not declared
 # here because declaring it would mark every search as an elevated action and
 # train the user to click through the confirmation that should mean something.
+# This capsule's own doctor.sh, and the search capsules, never hand bkmr or
+# sqlite3 the bound database: they read a private copy, written to a folder of
+# the run's own under TMPDIR and removed when it ends, so for the bound database
+# read:outside is exactly true. The vocabulary has no class for that temporary
+# write either, so it too is said and not declared.
+# Each run also removes this user's own stale copy folders under TMPDIR: the
+# aikit-bkmr-search.* folders more than an hour old, which a run killed
+# outright (SIGKILL, as the runner's timeout kills one) could not remove itself.
+# Those deletions are said here and not declared, for the same reason.
 [effects]
 filesystem = ["read:outside"]
 network = false

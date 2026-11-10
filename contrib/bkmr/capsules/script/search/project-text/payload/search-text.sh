@@ -1,7 +1,10 @@
 #!/bin/sh
 # search-text.sh - full-text search of the bkmr database bound to this context.
 #
-# Offline, no credentials, ~30 ms on the databases this was written against.
+# Offline, no credentials. Each search first copies the database (below): with
+# a stub bkmr on a 64 KB database a search took 39 ms, against 8 ms before the
+# copy (medians of 40 runs, macOS, load average 5). A larger database adds the
+# time cp takes to copy it.
 # Uses `bkmr search --json`, which changes no bookmark. `bkmr show --json` is NOT
 # used: it bumps access_count and the update timestamp, so reading with it would
 # rewrite the corpus a search is supposed to observe.
@@ -75,6 +78,9 @@ Declare one in .aikit/project.toml:
 
 AIKit exports it as AIKIT_BKMR_DB/BKMR_DB_URL when the context is applied." 78
 
+# --- the private copy: the same in search-text.sh, search-semantic.sh and
+# doctor.sh. A capsule ships only its own payload, so the three cannot share one
+# file; a test holds them to the same text (bkmr_real.rs). ---
 copies=
 trap '[ -z "$copies" ] || rm -rf "$copies"' EXIT
 trap 'exit 129' HUP
@@ -84,16 +90,23 @@ trap 'exit 141' PIPE
 trap 'exit 143' TERM
 # A run killed outright, as a runner's timeout kills one (SIGKILL), cannot
 # remove its folder. So each run first removes this user's own folders that are
-# more than ten minutes old: no search lasts that long.
+# more than an hour old. The runner stops a run after 30 s; only a run held up
+# for an hour, by a reader that stalled or a process that was stopped, could
+# lose its folder to another run.
 find "${TMPDIR:-/tmp}/." ! -name . -prune -type d -name 'aikit-bkmr-search.*' \
-  -user "$(id -u)" -mmin +10 -exec rm -rf {} + 2>/dev/null || :
+  -user "$(id -u)" -mmin +60 -exec rm -rf {} + 2>/dev/null || :
 
-# look_at FILE: FILE's inode, size and modification time, or "none" where no
-# FILE stands. It fails where no stat this script knows answers.
+# look_at FILE: FILE's inode, size and modification time, and a checksum of its
+# first 32 bytes, or "none" where no FILE stands. It fails where no stat this
+# script knows answers. The checksum sees a rewrite that keeps the size within
+# one tick of a coarse clock, where the time alone cannot: a -wal's header,
+# which a checkpoint or a restart rewrites, and the database's, which holds its
+# change counter and its size.
+head_of() { dd if="$1" bs=32 count=1 2>/dev/null | cksum; }
 if stat -c %i / >/dev/null 2>&1; then
-  look_at() { stat -c '%i %s %y' "$1" 2>/dev/null || echo none; }
+  look_at() { stat -c '%i %s %y' "$1" 2>/dev/null && head_of "$1" || echo none; }
 elif stat -f %i / >/dev/null 2>&1; then
-  look_at() { stat -f '%i %z %Fm' "$1" 2>/dev/null || echo none; }
+  look_at() { stat -f '%i %z %Fm' "$1" 2>/dev/null && head_of "$1" || echo none; }
 else
   look_at() { return 1; }
 fi
@@ -136,7 +149,7 @@ private_copy() {
   tries=0
   while :; do
     tries=$((tries + 1))
-    rm -f "$copy" "$copy-wal" "$copy-journal" "$copy-shm"
+    rm -f "$copy" "$copy-wal" "$copy-journal" "$copy-shm" "$copies"/search_backup_*.db
     if ! before=$(look_at "$real" && look_at "$real-wal" && look_at "$real-journal"); then
       printf '%s: could not look at the database to tell whether it moved while it was copied: %s\n' "$me" "$1" >&2
       return 74
@@ -161,9 +174,23 @@ private_copy() {
   [ ! -f "$copy-journal" ] || chmod u+w "$copy-journal"
 }
 
+# migrated DB: after bkmr searched the copy of DB, says so, once, when bkmr
+# migrated that copy, as it does a database kept in an older schema. bkmr's own
+# words name the backup it made, which is of the copy and goes with it. (The
+# doctor runs no bkmr and does not call it.)
+migrated() {
+  for backup in "$copies"/search_backup_*.db; do
+    [ -f "$backup" ] || continue
+    printf '%s: bkmr migrated the private copy this search made of %s, which is kept in an older schema. The backup bkmr names was made of that copy and is removed with it. Each search migrates its copy again until the database itself is migrated, once: bkmr --db %s search --np --limit 1 ""\n' "$me" "$1" "$1" >&2
+    return 0
+  done
+}
+# --- end of the private copy ---
+
 run_one() {
   # $1 = database path
   private_copy "$1" || return "$?"
+  searched=$1
   BKMR_DB_URL=$copy
   export BKMR_DB_URL
   set -- search --np --limit "$limit"
@@ -173,10 +200,12 @@ run_one() {
     # When its stdout is a pipe, bkmr sends the formatted listing to stderr and
     # only a comma-separated id list to stdout. A wrapper that captures stdout
     # alone therefore gets "31,37" and looks broken. Merge the streams.
-    bkmr "$@" "$query" 2>&1
+    if bkmr "$@" "$query" 2>&1; then found=0; else found=$?; fi
   else
-    bkmr "$@" "$query"
+    if bkmr "$@" "$query"; then found=0; else found=$?; fi
   fi
+  migrated "$searched"
+  return "$found"
 }
 
 if [ "$all" -eq 0 ]; then

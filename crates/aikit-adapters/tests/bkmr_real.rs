@@ -215,7 +215,7 @@ mod project_text_capsule {
     use std::process::Command;
     use std::time::Duration;
 
-    fn runner(root: &Path) -> SystemRunner {
+    pub(super) fn runner(root: &Path) -> SystemRunner {
         SystemRunner::new()
             .with_cwd(root)
             .with_env("HOME", root.to_string_lossy())
@@ -225,7 +225,7 @@ mod project_text_capsule {
             .with_strict_utf8()
     }
 
-    fn fixture() -> Option<TempDir> {
+    pub(super) fn fixture() -> Option<TempDir> {
         let dir = native_tempdir();
         let required = std::env::var_os("AIKIT_REQUIRE_BKMR_REAL").is_some();
         let probe = runner(dir.path()).run(&["bkmr".into(), "--version".into()]);
@@ -281,7 +281,7 @@ mod project_text_capsule {
         path
     }
 
-    fn capture(root: &Path, label: &str, command: &mut Command) -> Output {
+    pub(super) fn capture(root: &Path, label: &str, command: &mut Command) -> Output {
         let output = runner(root)
             .capture_command(command)
             .expect("same finite native capture; timeout/capacity/refusal is not success");
@@ -419,7 +419,7 @@ mod project_text_capsule {
         );
     }
 
-    fn database_bytes(path: &Path) -> Vec<Option<Vec<u8>>> {
+    pub(super) fn database_bytes(path: &Path) -> Vec<Option<Vec<u8>>> {
         ["", "-wal", "-shm", "-journal"]
             .iter()
             .map(|suffix| {
@@ -726,7 +726,7 @@ mod project_text_capsule {
     /// as they were. #611's CI failure had this shape: after a search an empty `-wal` and a `-shm` stood beside the unchanged
     /// database, where none stood before. A `bkmr` first on PATH runs the real one and kills it once the database it was given
     /// is open, so its close never runs. (A runner's timeout kills the whole search, its shell too. The folder that leaves is
-    /// removed by a later search: `a_search_removes_this_users_own_copies_left_more_than_ten_minutes_ago`.)
+    /// removed by a later search: `a_search_removes_this_users_own_copies_left_more_than_an_hour_ago`.)
     #[test]
     fn real_767_capsule_search_cut_short_leaves_the_database_and_its_sidecars_as_they_were() {
         let Some(dir) = fixture() else {
@@ -885,12 +885,16 @@ mod project_text_capsule {
     /// A `cp` first on PATH. It copies as the real one does. After a copy of the watched database it changes that database as a
     /// writer would: it writes `$AIKIT_TEST_CP_NEXT` over it in place, or adds a byte to it where none is named. It does so after
     /// the first copy, or after every one when `$AIKIT_TEST_CP_CHANGE` is `every`, and counts the copies in `$AIKIT_TEST_CP_COUNT`.
+    /// Where `$AIKIT_TEST_CP_TIME` names a file, it puts the watched file's modification time back after the change, as a
+    /// change inside one tick of a coarse clock leaves it.
     const CHANGING_CP: &str = "#!/bin/sh\n\"$AIKIT_TEST_REAL_CP\" \"$@\" || exit \"$?\"\n\
         [ \"$1\" -ef \"$AIKIT_TEST_CP_WATCHED\" ] || exit 0\n\
         n=0\n[ ! -f \"$AIKIT_TEST_CP_COUNT\" ] || n=$(cat \"$AIKIT_TEST_CP_COUNT\")\nn=$((n + 1))\n\
         printf '%s\\n' \"$n\" > \"$AIKIT_TEST_CP_COUNT\"\n\
         [ \"$AIKIT_TEST_CP_CHANGE\" = every ] || [ \"$n\" -eq 1 ] || exit 0\n\
-        if [ -n \"${AIKIT_TEST_CP_NEXT:-}\" ]; then cat \"$AIKIT_TEST_CP_NEXT\" > \"$1\"; else printf x >> \"$1\"; fi\n";
+        [ -z \"${AIKIT_TEST_CP_TIME:-}\" ] || touch -r \"$1\" \"$AIKIT_TEST_CP_TIME\"\n\
+        if [ -n \"${AIKIT_TEST_CP_NEXT:-}\" ]; then cat \"$AIKIT_TEST_CP_NEXT\" > \"$1\"; else printf x >> \"$1\"; fi\n\
+        [ -z \"${AIKIT_TEST_CP_TIME:-}\" ] || touch -r \"$AIKIT_TEST_CP_TIME\" \"$1\"\n";
 
     /// A search the tests that need no real bkmr run: a bound database of a few bytes in a folder of its own, the folder TMPDIR
     /// names, and the recording `bkmr` first on PATH.
@@ -1002,6 +1006,69 @@ mod project_text_capsule {
         assert!(names(&run.copies).is_empty(), "no copy is left");
     }
 
+    /// Round 55 item 9b, item 7 (DLW build ruling 2026-11-10; the re-check of 9.1, R1): a change that keeps the size, and the
+    /// modification time, as a change inside one tick of a coarse clock does, is still seen, and the copy is taken again. A
+    /// writer rewrites the database in place, or restarts its `-wal`, after the first copy, at the same size and with the time
+    /// put back: the first 32 bytes, the header, moved, and the search reads the state after the change.
+    #[test]
+    fn a_change_that_keeps_the_size_and_the_time_is_seen_and_copied_again() {
+        use std::os::unix::fs::MetadataExt;
+        let rows: [(&str, &str, &[u8], &[u8]); 2] = [
+            (
+                "the database",
+                "",
+                b"SQLite format 3\0state one, page 1",
+                b"SQLite format 3\0state two, page 1",
+            ),
+            (
+                "the -wal",
+                "-wal",
+                b"WAL header, salt one: frame 1 and 2",
+                b"WAL header, salt two: frame 1 and 2",
+            ),
+        ];
+        for (row, suffix, first, next) in rows {
+            let run = Offline::new();
+            let watched = PathBuf::from(format!("{}{suffix}", run.db.display()));
+            fs::write(&watched, first).unwrap();
+            let next_file = run.dir.path().join("next");
+            fs::write(&next_file, next).unwrap();
+            let time = run.dir.path().join("time");
+            let count = run.dir.path().join("cp-count");
+            tool(&run.shims, "cp", CHANGING_CP);
+            let before = fs::metadata(&watched).unwrap();
+            let mut env = run.env();
+            env.extend([
+                ("AIKIT_TEST_REAL_CP", on_path("cp").into()),
+                ("AIKIT_TEST_CP_WATCHED", watched.clone().into()),
+                ("AIKIT_TEST_CP_COUNT", count.clone().into()),
+                ("AIKIT_TEST_CP_NEXT", next_file.clone().into()),
+                ("AIKIT_TEST_CP_CHANGE", "once".into()),
+                ("AIKIT_TEST_CP_TIME", time.clone().into()),
+            ]);
+            let output = run.search(&env);
+            assert_eq!(output.status, 0, "{row}: {output:?}");
+            let after = fs::metadata(&watched).unwrap();
+            assert_eq!(
+                fs::read(&watched).unwrap(),
+                next,
+                "{row}: the writer changed it"
+            );
+            assert_eq!(
+                (after.ino(), after.len(), after.modified().unwrap()),
+                (before.ino(), before.len(), before.modified().unwrap()),
+                "{row}: the change kept the inode, the size and the time"
+            );
+            assert_eq!(
+                fs::read_to_string(&count).unwrap(),
+                "2\n",
+                "{row}: the change was seen and the copy taken again"
+            );
+            assert!(run.seen.exists(), "{row}: bkmr searched the copy");
+            assert!(names(&run.copies).is_empty(), "{row}: no copy is left");
+        }
+    }
+
     /// The same item (3): a copy that cannot be made, looked at or read is refused with status 74, in words naming the database.
     #[test]
     fn a_copy_that_cannot_be_made_looked_at_or_read_is_refused_naming_the_database() {
@@ -1063,25 +1130,28 @@ mod project_text_capsule {
     }
 
     /// The same item (4): a search killed outright, as the runner's timeout kills one (SIGKILL), cannot remove its folder. So a
-    /// search first removes this user's own folders that are more than ten minutes old: an old one goes, and a fresh one, a
-    /// folder of another name and a file of the same name stay.
+    /// search first removes this user's own folders that are more than an hour old: an old one goes, and one half an hour old,
+    /// a fresh one, a folder of another name and a file of the same name stay. Round 55 item 9b, item 8 (DLW build ruling
+    /// 2026-11-10; the re-check of 9.1, R2): the age is an hour, not ten minutes, so a live search held up by a stalled reader
+    /// keeps its folder; the runner stops a search after 30 s, so an hour still takes every folder a killed one left.
     #[test]
-    fn a_search_removes_this_users_own_copies_left_more_than_ten_minutes_ago() {
+    fn a_search_removes_this_users_own_copies_left_more_than_an_hour_ago() {
         let run = Offline::new();
         let old = run.copies.join("aikit-bkmr-search.old123");
+        let held = run.copies.join("aikit-bkmr-search.mid123");
         let fresh = run.copies.join("aikit-bkmr-search.new123");
         let other = run.copies.join("other.old123");
         let file = run.copies.join("aikit-bkmr-search.file12");
-        for folder in [&old, &fresh, &other] {
+        for folder in [&old, &held, &fresh, &other] {
             fs::create_dir(folder).unwrap();
             fs::write(folder.join("search.db"), b"left").unwrap();
         }
         fs::write(&file, b"left").unwrap();
-        let hour_ago = std::time::SystemTime::now() - Duration::from_secs(3600);
-        for stale in [&old, &other, &file] {
+        let now = std::time::SystemTime::now();
+        for (stale, ago) in [(&old, 7200), (&held, 1800), (&other, 7200), (&file, 7200)] {
             fs::File::open(stale)
                 .unwrap()
-                .set_modified(hour_ago)
+                .set_modified(now - Duration::from_secs(ago))
                 .unwrap();
         }
         let output = run.search(&run.env());
@@ -1090,6 +1160,7 @@ mod project_text_capsule {
             names(&run.copies),
             [
                 "aikit-bkmr-search.file12",
+                "aikit-bkmr-search.mid123",
                 "aikit-bkmr-search.new123",
                 "other.old123"
             ]
@@ -1265,5 +1336,600 @@ mod project_text_capsule {
         assert_eq!(names(&dir.path().join("link")), ["linked.db"]);
         assert!(names(&copies).is_empty(), "no copy is left");
         drop(writer);
+    }
+
+    /// What a search says, once, when bkmr migrated its copy of `db` (round 55 item 9b, the review of #613's F5).
+    pub(super) fn migrated_words(db: &Path) -> String {
+        format!(
+            "bkmr migrated the private copy this search made of {db}, which is kept in an older schema. The backup bkmr names \
+             was made of that copy and is removed with it. Each search migrates its copy again until the database itself is \
+             migrated, once: bkmr --db {db} search --np --limit 1 \"\"\n",
+            db = db.display()
+        )
+    }
+
+    /// Round 55 item 9b (DLW build ruling 2026-11-10; the review of #613, F5): bkmr migrates the search's copy of a database kept
+    /// in an older schema, never the database, and its words name a backup it made of that copy, which is gone when the search
+    /// ends. The capsule says so, once, naming the database and how to migrate the database itself, and says nothing of it for
+    /// a database that needed no migration, though both are searched in one run. The databases and their folder are as they were.
+    #[test]
+    fn real_767_capsule_search_of_an_older_schema_says_once_that_it_migrated_its_copy() {
+        let Some(dir) = fixture() else {
+            return;
+        };
+        let folder = dir.path().join("older");
+        fs::create_dir(&folder).unwrap();
+        let older = seed(dir.path(), "older/older.db", "older-native");
+        let current = seed(dir.path(), "older/current.db", "current-native");
+        // Revert the 2026-04-03 migration, as bkmr_store_read_only.rs does, so bkmr 7.6.7 migrates the database when it opens it.
+        rusqlite::Connection::open(&older)
+            .unwrap()
+            .execute_batch(
+                "PRAGMA journal_mode=DELETE; ALTER TABLE bookmarks DROP COLUMN accessed_at;
+                DELETE FROM __diesel_schema_migrations WHERE version >= '20260403100000';
+                CREATE TRIGGER UpdateLastTime AFTER UPDATE ON bookmarks FOR EACH ROW
+                  WHEN NEW.last_update_ts <= OLD.last_update_ts BEGIN
+                  UPDATE bookmarks SET last_update_ts=CURRENT_TIMESTAMP WHERE id=OLD.id; END;",
+            )
+            .unwrap();
+        let beside = names(&folder);
+        let before = (database_bytes(&older), database_bytes(&current));
+        let copies = dir.path().join("copies");
+        fs::create_dir(&copies).unwrap();
+        let set = format!("{}:{}", older.display(), current.display());
+        let output = capsule_in(
+            dir.path(),
+            &older,
+            &[("TMPDIR", copies.clone().into())],
+            &["--all", "--set", &set, "capsulequasar"],
+        );
+        assert_eq!(output.status, 0, "{output:?}");
+        assert!(output.stdout.contains("older-native") && output.stdout.contains("current-native"));
+        assert!(
+            output.stderr.contains("Backup created at"),
+            "bkmr migrated the copy: {}",
+            output.stderr
+        );
+        assert_eq!(
+            output.stderr.matches(&migrated_words(&older)).count(),
+            1,
+            "{}",
+            output.stderr
+        );
+        assert!(
+            !output.stderr.contains(&migrated_words(&current)),
+            "{}",
+            output.stderr
+        );
+        assert_eq!((database_bytes(&older), database_bytes(&current)), before);
+        assert_eq!(
+            names(&folder),
+            beside,
+            "no backup is made beside the database"
+        );
+        assert!(names(&copies).is_empty(), "no copy is left");
+    }
+}
+
+/// Round 55 item 9b (DLW build ruling 2026-11-10): the semantic capsule and the bkmr doctor read a private copy of the bound
+/// database, as the text capsule does (item 9). bkmr is never given the bound database, and neither is sqlite3: bkmr 7.x leaves
+/// its databases in WAL mode, which `sqlite3 -readonly` cannot open once their `-shm` is gone, and a reader beside a live writer
+/// rewrites the `-shm`.
+mod project_semantic_capsule {
+    use super::project_text_capsule::{capture, database_bytes, fixture, migrated_words, runner};
+    use super::*;
+    use aikit_adapters::runner::Output;
+    use std::ffi::OsString;
+    use std::fs;
+    use std::os::unix::fs::PermissionsExt;
+    use std::path::{Path, PathBuf};
+    use std::process::Command;
+
+    const TEXT: &str = "script/search/project-text/payload/search-text.sh";
+    const SEMANTIC: &str = "script/search/project-semantic/payload/search-semantic.sh";
+    const DOCTOR: &str = "tool/search/bkmr/payload/doctor.sh";
+
+    fn payload(relative: &str) -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../contrib/bkmr/capsules")
+            .join(relative)
+    }
+
+    /// The payload `script`, run by /bin/sh over `primary`, with `env` set as well.
+    fn run(
+        root: &Path,
+        script: &str,
+        primary: &Path,
+        env: &[(&str, OsString)],
+        args: &[&str],
+    ) -> Output {
+        let mut command = Command::new("/bin/sh");
+        command
+            .env_remove("AIKIT_BKMR_DB_SET")
+            .env_remove("BKMR_DB_URL")
+            .env_remove("FASTEMBED_CACHE_DIR")
+            .env("AIKIT_BKMR_DB", primary)
+            .envs(env.iter().map(|(name, value)| (*name, value)))
+            .arg(payload(script))
+            .args(args);
+        capture(root, script, &mut command)
+    }
+
+    /// A `bkmr` first on PATH. It answers `--version` as 7.6.7. For any other command it keeps, in a folder of its own under
+    /// `$AIKIT_TEST_SHIM_SEEN`, the BKMR_DB_URL it was given, the names beside it and a copy of that database (its `-wal` too);
+    /// then it makes the `-wal` and `-shm` bkmr 7.x makes beside a database it opens, and answers an empty result. Where
+    /// `$AIKIT_TEST_SHIM_BACKUP` is set it also makes, and names, the backup bkmr makes beside a database it migrates.
+    const SHIM: &str = "#!/bin/sh\n\
+        [ \"$1\" != --version ] || { echo 'bkmr 7.6.7'; exit 0; }\n\
+        seen=$(mktemp -d \"$AIKIT_TEST_SHIM_SEEN/run.XXXXXX\")\n\
+        printf '%s\\n' \"$BKMR_DB_URL\" > \"$seen/url\"\n\
+        ls -a \"$(dirname \"$BKMR_DB_URL\")\" > \"$seen/beside\"\n\
+        cp \"$BKMR_DB_URL\" \"$seen/seen.db\"\n\
+        [ ! -f \"$BKMR_DB_URL-wal\" ] || cp \"$BKMR_DB_URL-wal\" \"$seen/seen.db-wal\"\n\
+        [ -e \"$BKMR_DB_URL-wal\" ] || : > \"$BKMR_DB_URL-wal\"\n\
+        [ -e \"$BKMR_DB_URL-shm\" ] || : > \"$BKMR_DB_URL-shm\"\n\
+        if [ -n \"${AIKIT_TEST_SHIM_BACKUP:-}\" ]; then\n\
+        backup=$(dirname \"$BKMR_DB_URL\")/search_backup_20261110.db\n\
+        : > \"$backup\"\nprintf 'Backup created at: %s\\n' \"$backup\" >&2\nfi\n\
+        printf '[]\\n'\n";
+
+    /// The [`SHIM`] in `root`: the PATH that finds it first, and the folder it keeps what it saw in.
+    fn shim(root: &Path) -> (OsString, PathBuf) {
+        let folder = root.join("shim");
+        let seen = root.join("seen");
+        fs::create_dir_all(&folder).unwrap();
+        fs::create_dir_all(&seen).unwrap();
+        fs::write(folder.join("bkmr"), SHIM).unwrap();
+        fs::set_permissions(folder.join("bkmr"), fs::Permissions::from_mode(0o755)).unwrap();
+        let mut path = OsString::from(&folder);
+        path.push(":");
+        path.push(std::env::var_os("PATH").unwrap_or_default());
+        (path, seen)
+    }
+
+    /// What the [`SHIM`] saw at its one run: the database it was given, the names beside that database, and the rows of
+    /// `vec_bookmarks` in it.
+    fn seen_once(seen: &Path) -> (PathBuf, Vec<String>, i64) {
+        let runs: Vec<_> = fs::read_dir(seen)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .collect();
+        assert_eq!(runs.len(), 1, "bkmr ran once: {runs:?}");
+        let run = &runs[0];
+        let url = PathBuf::from(fs::read_to_string(run.join("url")).unwrap().trim_end());
+        let beside = fs::read_to_string(run.join("beside"))
+            .unwrap()
+            .lines()
+            .map(str::to_owned)
+            .collect();
+        let rows = rusqlite::Connection::open(run.join("seen.db"))
+            .unwrap()
+            .query_row("SELECT COUNT(*) FROM vec_bookmarks", [], |row| row.get(0))
+            .unwrap();
+        fs::remove_dir_all(run).unwrap();
+        (url, beside, rows)
+    }
+
+    /// The states a bound database is found in: bkmr 7.x's own once it has closed (WAL mode, no sidecar), bkmr 6.x's (rollback
+    /// journal), and a live writer's (WAL, with what it committed still in the `-wal`).
+    const CLEAN_WAL: &str = "a clean WAL database";
+    const ROLLBACK: &str = "a rollback-journal database";
+    const WRITER: &str = "a writer's change in the -wal";
+
+    /// A database at `root/name` with a `vec_bookmarks` table of one row, in `state`. For [`WRITER`] a second row is committed by
+    /// a writer that is kept open, and answered, so that its change stays in the `-wal`.
+    fn vector_database(
+        root: &Path,
+        name: &str,
+        state: &str,
+    ) -> (PathBuf, Option<rusqlite::Connection>) {
+        let db = root.join(name);
+        let connection = rusqlite::Connection::open(&db).unwrap();
+        let mode = if state == ROLLBACK { "delete" } else { "wal" };
+        let set: String = connection
+            .query_row(&format!("PRAGMA journal_mode = {mode}"), [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(set, mode);
+        connection
+            .execute_batch(
+                "CREATE TABLE vec_bookmarks (id INTEGER); INSERT INTO vec_bookmarks VALUES (1);",
+            )
+            .unwrap();
+        if state == WRITER {
+            connection
+                .execute("INSERT INTO vec_bookmarks VALUES (2)", [])
+                .unwrap();
+            return (db, Some(connection));
+        }
+        drop(connection);
+        (db, None)
+    }
+
+    /// Round 55 item 9b: in either mode and whatever state the bound database is in, the semantic capsule hands bkmr a private
+    /// copy of it, holding what its `-wal` holds, and checks for vectors in that copy. The database and its sidecars are as they
+    /// were after, and no copy is left. Before 9b the capsule gave bkmr the bound database, and its `sqlite3 -readonly` check
+    /// refused a clean WAL database outright, as one with no vectors.
+    #[test]
+    fn the_semantic_capsule_hands_bkmr_a_private_copy_of_the_bound_database() {
+        for state in [CLEAN_WAL, ROLLBACK, WRITER] {
+            for mode in ["hybrid", "semantic"] {
+                let case = format!("{state}, {mode}");
+                let dir = native_tempdir();
+                let (db, writer) = vector_database(dir.path(), "bound.db", state);
+                if state == CLEAN_WAL {
+                    assert_eq!(
+                        database_bytes(&db)[1..],
+                        [None, None, None],
+                        "{case}: no sidecar"
+                    );
+                }
+                let (path, seen) = shim(dir.path());
+                let copies = dir.path().join("copies");
+                fs::create_dir(&copies).unwrap();
+                let before = database_bytes(&db);
+                let output = run(
+                    dir.path(),
+                    SEMANTIC,
+                    &db,
+                    &[
+                        ("PATH", path),
+                        ("TMPDIR", copies.clone().into()),
+                        ("AIKIT_TEST_SHIM_SEEN", seen.clone().into()),
+                    ],
+                    &["--mode", mode, "lighthouse"],
+                );
+                assert_eq!(output.status, 0, "{case}: {}", output.stderr);
+                assert!(
+                    !output.stderr.contains("bkmr migrated"),
+                    "{case}: {}",
+                    output.stderr
+                );
+                let (url, beside, rows) = seen_once(&seen);
+                assert_ne!(url, db, "{case}: bkmr is never given the bound database");
+                assert!(url.starts_with(&copies), "{case}: {url:?}");
+                assert!(
+                    beside.iter().any(|name| name == "search.db"),
+                    "{case}: {beside:?}"
+                );
+                let committed = if writer.is_some() { 2 } else { 1 };
+                assert_eq!(
+                    rows, committed,
+                    "{case}: the copy holds what the -wal holds"
+                );
+                assert_eq!(
+                    database_bytes(&db),
+                    before,
+                    "{case}: the database and its sidecars are as they were"
+                );
+                assert_eq!(
+                    fs::read_dir(&copies).unwrap().count(),
+                    0,
+                    "{case}: no copy is left"
+                );
+                drop(writer);
+            }
+        }
+    }
+
+    /// The same item: a bound database the capsule cannot copy is refused with status 74, in words that name it, and bkmr never
+    /// runs. Before 9b its `sqlite3 -readonly` check failed first, and the capsule said the database had no vectors (78).
+    #[test]
+    fn a_bound_database_the_semantic_capsule_cannot_copy_is_refused_naming_it() {
+        let dir = native_tempdir();
+        let (db, _) = vector_database(dir.path(), "unreadable.db", ROLLBACK);
+        fs::set_permissions(&db, fs::Permissions::from_mode(0o000)).unwrap();
+        if fs::read(&db).is_ok() {
+            eprintln!("skipped: this process reads a file with no permissions (a superuser)");
+            return;
+        }
+        let (path, seen) = shim(dir.path());
+        let copies = dir.path().join("copies");
+        fs::create_dir(&copies).unwrap();
+        let output = run(
+            dir.path(),
+            SEMANTIC,
+            &db,
+            &[
+                ("PATH", path),
+                ("TMPDIR", copies.clone().into()),
+                ("AIKIT_TEST_SHIM_SEEN", seen.clone().into()),
+            ],
+            &["lighthouse"],
+        );
+        fs::set_permissions(&db, fs::Permissions::from_mode(0o644)).unwrap();
+        assert_eq!(output.status, 74, "{}", output.stderr);
+        assert!(
+            output.stderr.contains(&format!(
+                "could not copy the database to search it: {}",
+                db.display()
+            )),
+            "{}",
+            output.stderr
+        );
+        assert_eq!(fs::read_dir(&seen).unwrap().count(), 0, "bkmr never ran");
+        assert_eq!(fs::read_dir(&copies).unwrap().count(), 0, "no copy is left");
+    }
+
+    /// The same item: the bkmr doctor counts a clean WAL database from a private copy, so it reports its rows and its vectors and
+    /// warns of nothing, and leaves the database as it was. Before 9b its `sqlite3 -readonly` reads could not open the database:
+    /// it printed rows "?" and warned that the database was not migrated.
+    #[test]
+    fn the_doctor_reports_a_clean_wal_database_from_a_private_copy() {
+        if Command::new("sqlite3").arg("--version").output().is_err() {
+            eprintln!("skipped: no sqlite3 on PATH, so the doctor counts nothing");
+            return;
+        }
+        let dir = native_tempdir();
+        let db = dir.path().join("doctor.db");
+        let connection = rusqlite::Connection::open(&db).unwrap();
+        let set: String = connection
+            .query_row("PRAGMA journal_mode = wal", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(set, "wal");
+        connection
+            .execute_batch(
+                "CREATE TABLE bookmarks (id INTEGER PRIMARY KEY, embedding BLOB);
+                 INSERT INTO bookmarks (embedding) VALUES (NULL), (NULL), (NULL);
+                 CREATE TABLE vec_bookmarks (id INTEGER);",
+            )
+            .unwrap();
+        drop(connection);
+        let before = database_bytes(&db);
+        assert_eq!(before[1..], [None, None, None], "no sidecar");
+        let (path, seen) = shim(dir.path());
+        let copies = dir.path().join("copies");
+        fs::create_dir(&copies).unwrap();
+        let output = run(
+            dir.path(),
+            DOCTOR,
+            &db,
+            &[
+                ("PATH", path),
+                ("TMPDIR", copies.clone().into()),
+                ("AIKIT_TEST_SHIM_SEEN", seen.clone().into()),
+            ],
+            &[],
+        );
+        assert_eq!(output.status, 0, "{}", output.stderr);
+        assert!(
+            output.stdout.contains("rows          : 3\n"),
+            "{}",
+            output.stdout
+        );
+        assert!(
+            output
+                .stdout
+                .contains("embeddings    : vec_bookmarks present\n"),
+            "{}",
+            output.stdout
+        );
+        assert_eq!(output.stderr, "", "the doctor warns of nothing");
+        assert_eq!(database_bytes(&db), before, "the database is as it was");
+        assert_eq!(fs::read_dir(&copies).unwrap().count(), 0, "no copy is left");
+        assert_eq!(
+            fs::read_dir(&seen).unwrap().count(),
+            0,
+            "bkmr only told its version"
+        );
+    }
+
+    /// The same item: the three payloads hold one private copy, word for word. A capsule ships only its own payload, so they
+    /// cannot share one file.
+    #[test]
+    fn the_text_and_semantic_capsules_and_the_doctor_hold_one_private_copy() {
+        let block = |relative: &str| {
+            let text = fs::read_to_string(payload(relative)).unwrap();
+            let start = text
+                .find("# --- the private copy:")
+                .unwrap_or_else(|| panic!("{relative} holds the private copy"));
+            let end = text[start..]
+                .find("# --- end of the private copy ---")
+                .unwrap_or_else(|| panic!("{relative} ends the private copy"));
+            text[start..start + end].to_owned()
+        };
+        let text = block(TEXT);
+        assert_eq!(block(SEMANTIC), text, "{SEMANTIC}");
+        assert_eq!(block(DOCTOR), text, "{DOCTOR}");
+    }
+
+    /// The model cache to look in: `AIKIT_TEST_BKMR_MODEL_CACHE` where a run names one (so no bkmr the tests start inherits a
+    /// pointer to it), else bkmr 7.6.7's own: `FASTEMBED_CACHE_DIR`, else the platform's cache folder's `bkmr/models` (its
+    /// `FastEmbedProvider::cache_dir`, through `dirs::cache_dir`).
+    fn model_cache() -> Option<PathBuf> {
+        for named in ["AIKIT_TEST_BKMR_MODEL_CACHE", "FASTEMBED_CACHE_DIR"] {
+            if let Some(folder) = std::env::var_os(named) {
+                return Some(folder.into());
+            }
+        }
+        let home = PathBuf::from(std::env::var_os("HOME")?);
+        let cache = if cfg!(target_os = "macos") {
+            home.join("Library/Caches")
+        } else {
+            std::env::var_os("XDG_CACHE_HOME")
+                .map(PathBuf::from)
+                .unwrap_or_else(|| home.join(".cache"))
+        };
+        Some(cache.join("bkmr/models"))
+    }
+
+    /// A model bkmr can load from `cache` with no network: its bkmr name and its folder, when every file fastembed 5.17.2 fetches
+    /// for it (hf-hub 0.5.0 answers a cached file without the network) stands in the snapshot its `refs/main` names.
+    fn cached_model(cache: &Path) -> Option<(&'static str, PathBuf)> {
+        const MODELS: [(&str, &str, &str); 3] = [
+            (
+                "NomicEmbedTextV15",
+                "models--nomic-ai--nomic-embed-text-v1.5",
+                "onnx/model.onnx",
+            ),
+            (
+                "BGESmallENV15",
+                "models--Xenova--bge-small-en-v1.5",
+                "onnx/model.onnx",
+            ),
+            (
+                "AllMiniLML6V2",
+                "models--Qdrant--all-MiniLM-L6-v2-onnx",
+                "model.onnx",
+            ),
+        ];
+        MODELS.iter().find_map(|(name, folder, model)| {
+            let folder = cache.join(folder);
+            let commit = fs::read_to_string(folder.join("refs/main")).ok()?;
+            let snapshot = folder.join("snapshots").join(commit.trim());
+            [
+                *model,
+                "tokenizer.json",
+                "config.json",
+                "special_tokens_map.json",
+                "tokenizer_config.json",
+            ]
+            .iter()
+            .all(|file| snapshot.join(file).is_file())
+            .then_some((*name, folder))
+        })
+    }
+
+    /// `from` made again at `to`: folders and links as they are, each file a copy (a clone on APFS).
+    fn clone_tree(from: &Path, to: &Path) {
+        fs::create_dir_all(to).unwrap();
+        for entry in fs::read_dir(from).unwrap() {
+            let entry = entry.unwrap();
+            let kind = entry.file_type().unwrap();
+            let target = to.join(entry.file_name());
+            if kind.is_symlink() {
+                std::os::unix::fs::symlink(fs::read_link(entry.path()).unwrap(), &target).unwrap();
+            } else if kind.is_dir() {
+                clone_tree(&entry.path(), &target);
+            } else {
+                fs::copy(entry.path(), &target).unwrap();
+            }
+        }
+    }
+
+    /// The same item, on real bkmr 7.6.7 and a real model, where one is already cached: a database embedded on that model is
+    /// found by meaning in both modes, and is left as it was, with no copy left. The cached model is cloned into the test's own
+    /// folder and bkmr is pointed at the clone (`FASTEMBED_CACHE_DIR`, and the model pinned in the test HOME's config), so the
+    /// cache is only read. Without a cached model the test skips, naming why; it never downloads one.
+    #[test]
+    fn real_767_semantic_capsule_search_on_a_cached_model_leaves_the_database_as_it_was() {
+        let Some(cache) = model_cache() else {
+            eprintln!("skipped: no HOME, so no bkmr model cache to look in");
+            return;
+        };
+        let Some((model, folder)) = cached_model(&cache) else {
+            eprintln!(
+                "skipped: no bkmr model is cached whole in {} (bkmr 7.6.7 looks in FASTEMBED_CACHE_DIR, else the platform cache \
+                 folder's bkmr/models), and this test never downloads one",
+                cache.display()
+            );
+            return;
+        };
+        let Some(dir) = fixture() else {
+            return;
+        };
+        let models = dir.path().join("models");
+        clone_tree(&folder, &models.join(folder.file_name().unwrap()));
+        fs::create_dir_all(dir.path().join(".config/bkmr")).unwrap();
+        fs::write(
+            dir.path().join(".config/bkmr/config.toml"),
+            format!("[embeddings]\nmodel = \"{model}\"\n"),
+        )
+        .unwrap();
+        let db = dir.path().join("semantic.db");
+        let item = source(
+            "source:capsule:semantic-native",
+            "semantic-native",
+            "a lighthouse keeper tends the lamp through the storm",
+            &["capsule-proof"],
+            SourceVisibility::Team,
+            &[],
+        );
+        let mut provider = BkmrSourcePoolProvider::new(
+            runner(dir.path()).with_env("FASTEMBED_CACHE_DIR", models.to_string_lossy()),
+            &db,
+            true,
+        );
+        provider
+            .rebuild(&[item])
+            .expect("real native database seed, embedded on the cached model");
+        let before = database_bytes(&db);
+        assert_eq!(
+            before[1..],
+            [None, None, None],
+            "the seed leaves no sidecar"
+        );
+        let copies = dir.path().join("copies");
+        fs::create_dir(&copies).unwrap();
+        for mode in ["hybrid", "semantic"] {
+            let output = run(
+                dir.path(),
+                SEMANTIC,
+                &db,
+                &[
+                    ("TMPDIR", copies.clone().into()),
+                    ("FASTEMBED_CACHE_DIR", models.clone().into()),
+                ],
+                &["--mode", mode, "lighthouse"],
+            );
+            assert_eq!(output.status, 0, "{mode} on {model}: {}", output.stderr);
+            assert!(
+                format!("{}{}", output.stdout, output.stderr).contains("semantic-native"),
+                "{mode}: {}",
+                output.stdout
+            );
+            assert!(
+                !output.stderr.contains("Downloading embedding model"),
+                "{mode}: {}",
+                output.stderr
+            );
+            assert_eq!(
+                database_bytes(&db),
+                before,
+                "{mode}: the database is as it was"
+            );
+            assert_eq!(
+                fs::read_dir(&copies).unwrap().count(),
+                0,
+                "{mode}: no copy is left"
+            );
+        }
+    }
+
+    /// The same item (F5): the semantic capsule says, once, that bkmr migrated its copy, in either mode.
+    #[test]
+    fn the_semantic_capsule_says_once_that_bkmr_migrated_its_copy() {
+        for mode in ["hybrid", "semantic"] {
+            let dir = native_tempdir();
+            let (db, _) = vector_database(dir.path(), "older.db", CLEAN_WAL);
+            let (path, seen) = shim(dir.path());
+            let copies = dir.path().join("copies");
+            fs::create_dir(&copies).unwrap();
+            let output = run(
+                dir.path(),
+                SEMANTIC,
+                &db,
+                &[
+                    ("PATH", path),
+                    ("TMPDIR", copies.clone().into()),
+                    ("AIKIT_TEST_SHIM_SEEN", seen.clone().into()),
+                    ("AIKIT_TEST_SHIM_BACKUP", "1".into()),
+                ],
+                &["--mode", mode, "lighthouse"],
+            );
+            assert_eq!(output.status, 0, "{mode}: {}", output.stderr);
+            assert_eq!(
+                output.stderr.matches(&migrated_words(&db)).count(),
+                1,
+                "{mode}: {}",
+                output.stderr
+            );
+            assert_eq!(
+                fs::read_dir(&copies).unwrap().count(),
+                0,
+                "{mode}: no copy is left"
+            );
+        }
     }
 }
