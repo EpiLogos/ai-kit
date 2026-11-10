@@ -1,6 +1,8 @@
 //! Actual Central file-map and SourcePool boundary exercises. Explicit native
 //! tests require the qualification job's built/pinned owner binary; no fake
 //! owner, generated response, guessed SourceRef or unavailable-as-green skip.
+mod common;
+
 use aikit_adapters::central_file_map::{call, CentralFileMapProvider};
 use aikit_adapters::runner::{CommandRunner, Output, SystemRunner};
 use aikit_core::context_source::{ContextSourcePrivacy, RetrievalTarget};
@@ -83,12 +85,26 @@ fn owner() -> PathBuf {
 }
 
 fn action_envelope(ctrl: &Path, root: &Path, name: &str, input: Value) -> (Output, Value) {
+    action_envelope_as(ctrl, root, name, input, None)
+}
+
+/// `token` is the person's, for one of their own acts (`person_action`); every other Action runs with none.
+fn action_envelope_as(
+    ctrl: &Path,
+    root: &Path,
+    name: &str,
+    input: Value,
+    token: Option<&str>,
+) -> (Output, Value) {
     let mut command = std::process::Command::new(ctrl);
     command
         .args(["--json", "--root"])
         .arg(root)
         .args(["action", "run", name])
         .arg(input.to_string());
+    if let Some(token) = token {
+        command.env("CENTRAL_NATIVE_TOKEN", token);
+    }
     let output = SystemRunner::new()
         .with_timeout(Duration::from_secs(30))
         .with_strict_utf8()
@@ -106,7 +122,18 @@ fn file_map_result(data: &Value, operation: &str) -> Value {
 }
 
 fn action(ctrl: &Path, root: &Path, name: &str, input: Value) -> Value {
-    let (output, value) = action_envelope(ctrl, root, name, input);
+    answered(name, action_envelope(ctrl, root, name, input))
+}
+
+/// One of the person's own acts, on the fixture World's test grant (`common::grant_person_acts`).
+fn person_action(ctrl: &Path, root: &Path, name: &str, input: Value) -> Value {
+    answered(
+        name,
+        action_envelope_as(ctrl, root, name, input, Some(common::PERSON_TEST_TOKEN)),
+    )
+}
+
+fn answered(name: &str, (output, value): (Output, Value)) -> Value {
     assert!(
         output.ok() && value["ok"] == true,
         "{value}; stderr={}",
@@ -345,6 +372,8 @@ fn live_native_identity_revision_withdrawal_and_new_source_survive_one_attachmen
     assert_ne!(current.binding.revision, held.binding.revision);
     let late = root.join("late-source.md");
     fs::write(&late, "# Added after attachment\n").unwrap();
+    // Registering a Source is the person's own act (Central #339): this World holds their test grant for it at the root.
+    common::grant_person_acts(root, &["central.file-map.register"], &["control:root"]);
     let basis = call(
         &SystemRunner::new(),
         &ctrl,
@@ -353,7 +382,7 @@ fn live_native_identity_revision_withdrawal_and_new_source_survive_one_attachmen
         &json!({"resources":false}),
     )
     .unwrap();
-    let registered = action(
+    let registered = person_action(
         &ctrl,
         root,
         "central.file-map.register",
@@ -846,13 +875,20 @@ fn attached_now_preserves_registered_project_identity_current_payload_and_native
         "{\"native-now-query\":\"current selected record\"}\n",
     )
     .unwrap();
+    // Registering a Source is the person's own act (Central #339): this World holds their test grant for it at the project
+    // the register names, whose World is its project_id.
+    common::grant_person_acts(
+        &root,
+        &["central.file-map.register"],
+        &["project:native/now"],
+    );
     let inspected = action(
         &ctrl,
         &root,
         "central.file-map.inspect",
         json!({"project":"native-now", "resources":false}),
     );
-    let registered = action(
+    let registered = person_action(
         &ctrl,
         &root,
         "central.file-map.register",
