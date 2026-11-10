@@ -2,6 +2,8 @@
 //! These are committed repositories and the installed GitNexus CLI, not a
 //! stand-in provider. The test process owns an isolated HOME and AIKit home.
 
+mod common;
+
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -216,17 +218,22 @@ fn real_gitnexus_code_and_project_map_hits_obey_current_and_explicit_scope() {
     let ctrl = std::env::var_os("CENTRAL_CTRL_BIN")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("ctrl"));
-    let action = |action: &str, input: serde_json::Value| {
-        let output = Command::new(&ctrl)
-            .args([
-                "--json",
-                "--root",
-                world.to_str().unwrap(),
-                "action",
-                "run",
-                action,
-                &input.to_string(),
-            ])
+    // `token` is the person's, for one of their own acts (`person_action`); every other Action runs with none.
+    let action_as = |action: &str, input: serde_json::Value, token: Option<&str>| {
+        let mut command = Command::new(&ctrl);
+        command.args([
+            "--json",
+            "--root",
+            world.to_str().unwrap(),
+            "action",
+            "run",
+            action,
+            &input.to_string(),
+        ]);
+        if let Some(token) = token {
+            command.env("CENTRAL_NATIVE_TOKEN", token);
+        }
+        let output = command
             .output()
             .expect("the real ctrl runs the fixture world action");
         let envelope: serde_json::Value =
@@ -236,6 +243,11 @@ fn real_gitnexus_code_and_project_map_hits_obey_current_and_explicit_scope() {
             "fixture world action {action} refused: {envelope}"
         );
         envelope["data"].clone()
+    };
+    let action = |action: &str, input: serde_json::Value| action_as(action, input, None);
+    // One of the person's own acts, on this World's test grant (`common::grant_person_acts`).
+    let person_action = |action: &str, input: serde_json::Value| {
+        action_as(action, input, Some(common::PERSON_TEST_TOKEN))
     };
     action("central.init", serde_json::json!({}));
     // The fixture projects are bound through the real scaffolding (which
@@ -332,6 +344,13 @@ fn real_gitnexus_code_and_project_map_hits_obey_current_and_explicit_scope() {
     // revision of its moment. A common Control record is registered at the
     // root and then LINKED into each Project that asserts it — the declared
     // link is what the owner's project admission reads.
+    // Registering a Source and linking one into a Project are the person's own acts (Central #339): this World holds their
+    // test grant for them at the root and at the two Projects the acts name, whose Worlds are their project_ids.
+    common::grant_person_acts(
+        &world,
+        &["central.file-map.register", "central.file-map.link"],
+        &["control:root", "project:cedar", "project:larch"],
+    );
     let registrations: Vec<(Option<&str>, &str)> = vec![
         (Some("cedar"), "ProjectCentral/now/returns/own.md"),
         (Some("larch"), "ProjectCentral/now/returns/sibling.md"),
@@ -368,7 +387,7 @@ fn real_gitnexus_code_and_project_map_hits_obey_current_and_explicit_scope() {
         if let Some(project) = project {
             register["project"] = serde_json::json!(project);
         }
-        action("central.file-map.register", register);
+        person_action("central.file-map.register", register);
     }
     let flows_ref = {
         let output = Command::new(&ctrl)
@@ -469,6 +488,7 @@ fn real_gitnexus_code_and_project_map_hits_obey_current_and_explicit_scope() {
         });
         let attempt = |link: &serde_json::Value| {
             let output = Command::new(&ctrl)
+                .env("CENTRAL_NATIVE_TOKEN", common::PERSON_TEST_TOKEN)
                 .args([
                     "--json",
                     "--root",

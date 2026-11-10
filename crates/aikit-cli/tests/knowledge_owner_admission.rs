@@ -5,6 +5,8 @@
 //! claim allocation, model execution or Factory worker Return. Unavailable
 //! native/Redis providers fail that selected gate, never a green skip.
 
+mod common;
+
 use aikit_adapters::runner::{Output, SystemRunner};
 use std::fs;
 use std::path::PathBuf;
@@ -264,10 +266,41 @@ fn native_owner_action(
     operation: &str,
     input: serde_json::Value,
 ) -> serde_json::Value {
+    native_action_as(ctrl, root, operation, input, None)
+}
+
+/// One of the person's own acts, on the fixture World's test grant (`common::grant_person_acts`).
+fn native_person_action(
+    ctrl: &std::path::Path,
+    root: &std::path::Path,
+    operation: &str,
+    input: serde_json::Value,
+) -> serde_json::Value {
+    native_action_as(
+        ctrl,
+        root,
+        operation,
+        input,
+        Some(common::PERSON_TEST_TOKEN),
+    )
+}
+
+/// `token` is the person's, for one of their own acts; every other Action runs with none.
+fn native_action_as(
+    ctrl: &std::path::Path,
+    root: &std::path::Path,
+    operation: &str,
+    input: serde_json::Value,
+    token: Option<&str>,
+) -> serde_json::Value {
     use aikit_adapters::runner::CommandRunner;
-    let output = SystemRunner::new()
+    let mut runner = SystemRunner::new()
         .with_timeout(Duration::from_secs(30))
-        .with_output_limit_bytes(CLI_OUTPUT_BUDGET)
+        .with_output_limit_bytes(CLI_OUTPUT_BUDGET);
+    if let Some(token) = token {
+        runner = runner.with_env("CENTRAL_NATIVE_TOKEN", token);
+    }
+    let output = runner
         .run(&[
             ctrl.display().to_string(),
             "--json".into(),
@@ -319,7 +352,11 @@ fn assert_native_withheld(service: &mut Service, address: &KnowledgeAddress, nee
             .hits
             .iter()
             .any(|hit| hit.resource == address.resource_ref()));
-        assert!(!serde_json::to_string(&search).unwrap().contains(needle));
+        // The search answers with the query it was asked, so the needle is looked for in what it found, never in the question
+        // echoed back (round 55 item 0: the whole answer was read, and the echoed query failed the gate against every ctrl).
+        assert!(!serde_json::to_string(&search.hits)
+            .unwrap()
+            .contains(needle));
     }
     if let Ok(frame) = service.knowledge_frame(None, std::slice::from_ref(address)) {
         assert!(!serde_json::to_string(&frame).unwrap().contains(needle));
@@ -367,13 +404,15 @@ fn real_redis_cannot_override_current_now_provider_read_or_withdrawal() {
         serde_json::from_slice::<serde_json::Value>(&fs::read(&file).unwrap()).unwrap(),
         returned["handoff"]
     );
+    // Registering a Source is the person's own act (Central #339): this World holds their test grant for it at the root.
+    common::grant_person_acts(&world, &["central.file-map.register"], &["control:root"]);
     let inspected = native_owner_action(
         &ctrl,
         &world,
         "central.file-map.inspect",
         serde_json::json!({"resources":false}),
     );
-    let registered = native_owner_action(
+    let registered = native_person_action(
         &ctrl,
         &world,
         "central.file-map.register",

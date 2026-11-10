@@ -9,6 +9,8 @@
 //! `AIKIT_REQUIRE_REAL_CTRL` refuses the skip), the same honest gate the
 //! real-detection suites use — never a silent green.
 
+mod common;
+
 use std::fs;
 
 use aikit_cli::app::Service;
@@ -45,25 +47,31 @@ fn knowledge_search_reaches_the_now_field_through_the_one_service() {
     let ctrl = std::env::var_os("CENTRAL_CTRL_BIN")
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|| std::path::PathBuf::from("ctrl"));
-    let run_action =
-        |action: &str, input: &serde_json::Value| -> std::io::Result<std::process::Output> {
-            std::process::Command::new(&ctrl)
-                .args([
-                    "--json",
-                    "--root",
-                    temp.path().to_str().unwrap(),
-                    "action",
-                    "run",
-                    action,
-                    &input.to_string(),
-                ])
-                .output()
-        };
+    // `token` is the person's, for one of their own acts; every other Action runs with none.
+    let run_action = |action: &str,
+                      input: &serde_json::Value,
+                      token: Option<&str>|
+     -> std::io::Result<std::process::Output> {
+        let mut command = std::process::Command::new(&ctrl);
+        command.args([
+            "--json",
+            "--root",
+            temp.path().to_str().unwrap(),
+            "action",
+            "run",
+            action,
+            &input.to_string(),
+        ]);
+        if let Some(token) = token {
+            command.env("CENTRAL_NATIVE_TOKEN", token);
+        }
+        command.output()
+    };
     let envelope = |output: &std::process::Output| {
         serde_json::from_slice::<serde_json::Value>(&output.stdout)
             .expect("native action receipt parses")
     };
-    match run_action("central.init", &serde_json::json!({})) {
+    match run_action("central.init", &serde_json::json!({}), None) {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             assert!(
                 std::env::var_os("AIKIT_REQUIRE_REAL_CTRL").is_none(),
@@ -80,10 +88,17 @@ fn knowledge_search_reaches_the_now_field_through_the_one_service() {
             assert_eq!(init["ok"], true, "fixture map init refused: {init}");
         }
     }
+    // Registering a Source is the person's own act (Central #339): this World holds their test grant for it at the root.
+    common::grant_person_acts(
+        temp.path(),
+        &["central.file-map.register"],
+        &["control:root"],
+    );
     let inspect = envelope(
         &run_action(
             "central.file-map.inspect",
             &serde_json::json!({"resources": false}),
+            None,
         )
         .expect("the running owner answers the fixture map inspect"),
     );
@@ -98,6 +113,7 @@ fn knowledge_search_reaches_the_now_field_through_the_one_service() {
                 "path": "Control/agents/now/clearings/abc/now.json",
                 "expected_revision": basis
             }),
+            Some(common::PERSON_TEST_TOKEN),
         )
         .expect("the running owner answers the fixture map register"),
     );

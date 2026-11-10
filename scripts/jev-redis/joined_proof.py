@@ -12,6 +12,10 @@ import argparse, csv, hashlib, json, os, pathlib, subprocess, sys, tempfile, thr
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 CONTROLLED_KEY = "aikit-controlled-protocol-only"
+# The token of the person's test grant this disposable World holds for registering its Sources, which is the person's own act
+# (Central #339): a controlled test value, never a live secret.
+PERSON_TEST_TOKEN = "aikit-joined-proof-person-grant-controlled-test-not-a-live-secret"
+PERSON_AUTHORITY = "Control/user/joined-proof-person-authority.json"
 MODEL = "jev-1.13.0"
 
 def run(cmd, *, env=None, cwd=None, ok=True, input_text=None):
@@ -254,6 +258,21 @@ def main():
         "required_coverage": ["file-content"],
         "lease_seconds": 300,
     })
+    # Registering a Source is the person's own act: ctrl authenticates it on the token its host hands it in
+    # CENTRAL_NATIVE_TOKEN, against a human grant for that Action in the World's native-action-authority Source. This World
+    # holds that grant, at its root only, and only the registers below carry the token.
+    write_json(central / PERSON_AUTHORITY, {
+        "schema": "central.native-action-authority/v1",
+        "scope_ref": "control:root",
+        "grants": [{
+            "principal_ref": "human:joined-proof-person",
+            "actor_kind": "human",
+            "token_sha256": hashlib.sha256(PERSON_TEST_TOKEN.encode()).hexdigest(),
+            "scope_refs": ["control:root"],
+            "actions": ["central.file-map.register"],
+            "expires_at_unix_seconds": 4_000_000_000,
+        }],
+    })
     relations_dir = central / "Control/relations"
     relations_dir.mkdir(parents=True)
     write_json(relations_dir / "source-relations.json", {
@@ -269,8 +288,18 @@ def main():
             "recognition": "explicit-controlled-cloud-fixture-not-personal-adoption",
             "recorded_at_unix_seconds": 1,
             "agent_retrieval_allowed": True,
+        }, {
+            "ref": "central:source:control:root:" + PERSON_AUTHORITY,
+            "path": PERSON_AUTHORITY,
+            "roles": ["native-action-authority"],
+            "provenance": "human-adopted",
+            "standing": "architecture-contract",
+            "treatment": "control-user",
+            "recognition": "explicit-controlled-cloud-fixture-not-personal-adoption",
+            "recorded_at_unix_seconds": 1,
         }],
     })
+    person_env = dict(env, CENTRAL_NATIVE_TOKEN=PERSON_TEST_TOKEN)
 
     source_path = central / "Control/user/jev-redis-now-source.md"
     source_path.write_text(
@@ -301,7 +330,7 @@ def main():
         registered, _ = ctrl_action(args.ctrl, central, "central.file-map.register", {
             "path": relative,
             "expected_revision": inspect["revision"],
-        }, env)
+        }, person_env)
         registered_sources.append(registered["source_ref"])
         inspect, _ = ctrl_action(args.ctrl, central, "central.file-map.inspect", {}, env)
     source_ref, matrix_manifest_source_ref, matrix_source_ref, account_source_ref = registered_sources
