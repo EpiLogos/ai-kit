@@ -19,6 +19,13 @@ reason = "`search --json` and BKMR_DB_URL both exist from 6.5.0."
 # opens a database it searches for writing (WAL journal mode, migrations, -wal
 # and -shm sidecars), so the payload hands bkmr a private copy and never the
 # bound database: the database and its sidecars are only read.
+#
+# The search writes that one private copy, as large as the database with its
+# -wal and -journal, in a folder of its own under TMPDIR, and removes it when it
+# ends. Each search costs a copy of the database. The effects vocabulary has no
+# class for a run's own temporary folder: a write to any scope but project,
+# worktree and task reads as write:outside, the elevated class. So the write is
+# said here and not declared.
 [effects]
 filesystem = ["read:outside"]
 network = false

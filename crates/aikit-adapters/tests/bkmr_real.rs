@@ -420,7 +420,7 @@ mod project_text_capsule {
     }
 
     fn database_bytes(path: &Path) -> Vec<Option<Vec<u8>>> {
-        ["", "-wal", "-shm"]
+        ["", "-wal", "-shm", "-journal"]
             .iter()
             .map(|suffix| {
                 let name = PathBuf::from(format!("{}{suffix}", path.display()));
@@ -701,7 +701,11 @@ mod project_text_capsule {
         let copies = dir.path().join("copies");
         fs::create_dir(&copies).unwrap();
         let before = database_bytes(&db);
-        assert_eq!(before[1..], [None, None], "the seed leaves no sidecar");
+        assert_eq!(
+            before[1..],
+            [None, None, None],
+            "the seed leaves no sidecar"
+        );
         let output = capsule_in(
             dir.path(),
             &db,
@@ -718,48 +722,72 @@ mod project_text_capsule {
         assert_eq!(fs::read_dir(&copies).unwrap().count(), 0, "no copy is left");
     }
 
-    /// The same item: a search whose bkmr never closes the database, because a harness's timeout kills it, leaves the bound
-    /// database and its sidecars as they were. #611's CI failure had this shape: after a search an empty `-wal` and a `-shm`
-    /// stood beside the unchanged database, where none stood before. A `bkmr` first on PATH runs the real one and kills it once
-    /// the database it was given is open, so its close never runs.
+    /// The same item: a search whose bkmr is killed before it closes the database leaves the bound database and its sidecars
+    /// as they were. #611's CI failure had this shape: after a search an empty `-wal` and a `-shm` stood beside the unchanged
+    /// database, where none stood before. A `bkmr` first on PATH runs the real one and kills it once the database it was given
+    /// is open, so its close never runs. (A runner's timeout kills the whole search, its shell too. The folder that leaves is
+    /// removed by a later search: `a_search_removes_this_users_own_copies_left_more_than_ten_minutes_ago`.)
     #[test]
     fn real_767_capsule_search_cut_short_leaves_the_database_and_its_sidecars_as_they_were() {
         let Some(dir) = fixture() else {
             return;
         };
         let db = seed(dir.path(), "cut.db", "cut-native");
-        let real = std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())
-            .map(|folder| folder.join("bkmr"))
-            .find(|bkmr| bkmr.is_file())
-            .expect("the real bkmr on PATH");
+        let real = on_path("bkmr");
         let shim = dir.path().join("shim");
-        fs::create_dir(&shim).unwrap();
-        fs::write(
-            shim.join("bkmr"),
-            "#!/bin/sh\n\"$AIKIT_TEST_REAL_BKMR\" \"$@\" &\npid=$!\nn=0\n\
-             while [ ! -e \"$BKMR_DB_URL-shm\" ] && [ \"$n\" -lt 1000000 ]; do n=$((n + 1)); done\n\
-             kill -KILL \"$pid\" 2>/dev/null\nwait \"$pid\"\n",
-        )
-        .unwrap();
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(shim.join("bkmr"), fs::Permissions::from_mode(0o755)).unwrap();
-        let mut path = std::ffi::OsString::from(&shim);
-        path.push(":");
-        path.push(std::env::var_os("PATH").unwrap_or_default());
+        // The wait is bounded by time, ten seconds by the clock, and the shim leaves a mark when it saw the database open and
+        // cut bkmr short (round 55 item 9.1, the review's F7). bkmr holds the copy open only briefly, and the shim's poll can
+        // miss it (once in 30 runs here), so a bkmr that finished first is searched again, five tries in all. A whole search
+        // proves nothing here; a wait that ran out, or five bkmrs that all finished first, fail the test.
+        tool(
+            &shim,
+            "bkmr",
+            "#!/bin/sh\n\"$AIKIT_TEST_REAL_BKMR\" \"$@\" &\npid=$!\nend=$(($(date +%s) + 10))\n\
+             while [ ! -e \"$BKMR_DB_URL-shm\" ] && [ \"$(date +%s)\" -lt \"$end\" ]; do\n\
+             n=0\nwhile [ ! -e \"$BKMR_DB_URL-shm\" ] && [ \"$n\" -lt 1000 ]; do n=$((n + 1)); done\ndone\n\
+             if [ -e \"$BKMR_DB_URL-shm\" ] && kill -KILL \"$pid\" 2>/dev/null; then : > \"$AIKIT_TEST_SHIM_CUT\"; fi\n\
+             wait \"$pid\"\n",
+        );
+        let cut = dir.path().join("cut");
+        let path = path_before(&[&shim]);
         let copies = dir.path().join("copies");
         fs::create_dir(&copies).unwrap();
         let before = database_bytes(&db);
-        assert_eq!(before[1..], [None, None], "the seed leaves no sidecar");
-        let output = capsule_in(
-            dir.path(),
-            &db,
-            &[
-                ("PATH", path),
-                ("AIKIT_TEST_REAL_BKMR", real.into()),
-                ("TMPDIR", copies.clone().into()),
-            ],
-            &["capsulequasar"],
+        assert_eq!(
+            before[1..],
+            [None, None, None],
+            "the seed leaves no sidecar"
         );
+        let env = [
+            ("PATH", path),
+            ("AIKIT_TEST_REAL_BKMR", real.into()),
+            ("AIKIT_TEST_SHIM_CUT", cut.clone().into()),
+            ("TMPDIR", copies.clone().into()),
+        ];
+        let mut tries = 0;
+        let output = loop {
+            tries += 1;
+            let output = capsule_in(dir.path(), &db, &env, &["capsulequasar"]);
+            if cut.exists() || tries == 5 {
+                break output;
+            }
+            assert_eq!(
+                output.status, 0,
+                "a bkmr not cut short searched whole: {output:?}"
+            );
+            assert_eq!(
+                database_bytes(&db),
+                before,
+                "a whole search leaves the database as it was"
+            );
+        };
+        assert!(
+            cut.exists(),
+            "the shim saw bkmr open the database and cut it short, in {tries} tries"
+        );
+        if tries > 1 {
+            eprintln!("the shim cut bkmr short on try {tries}");
+        }
         assert_ne!(output.status, 0, "the search was cut short");
         assert_eq!(
             database_bytes(&db),
@@ -811,6 +839,431 @@ mod project_text_capsule {
             "a search must not change the database or the writer's sidecars"
         );
         assert_eq!(fs::read_dir(&copies).unwrap().count(), 0, "no copy is left");
+        drop(writer);
+    }
+
+    /// The real `name` on PATH, which a shim of the same name stands in front of.
+    fn on_path(name: &str) -> PathBuf {
+        std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())
+            .map(|folder| folder.join(name))
+            .find(|tool| tool.is_file())
+            .unwrap_or_else(|| panic!("the real {name} on PATH"))
+    }
+
+    /// An executable `name` in `folder`, holding `text`.
+    fn tool(folder: &Path, name: &str, text: &str) {
+        use std::os::unix::fs::PermissionsExt;
+        fs::create_dir_all(folder).unwrap();
+        fs::write(folder.join(name), text).unwrap();
+        fs::set_permissions(folder.join(name), fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    /// PATH with `folders` first.
+    fn path_before(folders: &[&Path]) -> std::ffi::OsString {
+        let mut all: Vec<PathBuf> = folders.iter().map(|folder| folder.to_path_buf()).collect();
+        all.extend(std::env::split_paths(
+            &std::env::var_os("PATH").unwrap_or_default(),
+        ));
+        std::env::join_paths(all).unwrap()
+    }
+
+    /// The names in `folder`, sorted.
+    fn names(folder: &Path) -> Vec<String> {
+        let mut names: Vec<_> = fs::read_dir(folder)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        names
+    }
+
+    /// A `bkmr` first on PATH for the tests that need no real one: it keeps the `BKMR_DB_URL` it was given in
+    /// `$AIKIT_TEST_SHIM_SEEN` and answers an empty search.
+    const RECORDING_BKMR: &str =
+        "#!/bin/sh\nprintf '%s\\n' \"$BKMR_DB_URL\" >> \"$AIKIT_TEST_SHIM_SEEN\"\nprintf '[]\\n'\n";
+
+    /// A `cp` first on PATH. It copies as the real one does. After a copy of the watched database it changes that database as a
+    /// writer would: it writes `$AIKIT_TEST_CP_NEXT` over it in place, or adds a byte to it where none is named. It does so after
+    /// the first copy, or after every one when `$AIKIT_TEST_CP_CHANGE` is `every`, and counts the copies in `$AIKIT_TEST_CP_COUNT`.
+    const CHANGING_CP: &str = "#!/bin/sh\n\"$AIKIT_TEST_REAL_CP\" \"$@\" || exit \"$?\"\n\
+        [ \"$1\" -ef \"$AIKIT_TEST_CP_WATCHED\" ] || exit 0\n\
+        n=0\n[ ! -f \"$AIKIT_TEST_CP_COUNT\" ] || n=$(cat \"$AIKIT_TEST_CP_COUNT\")\nn=$((n + 1))\n\
+        printf '%s\\n' \"$n\" > \"$AIKIT_TEST_CP_COUNT\"\n\
+        [ \"$AIKIT_TEST_CP_CHANGE\" = every ] || [ \"$n\" -eq 1 ] || exit 0\n\
+        if [ -n \"${AIKIT_TEST_CP_NEXT:-}\" ]; then cat \"$AIKIT_TEST_CP_NEXT\" > \"$1\"; else printf x >> \"$1\"; fi\n";
+
+    /// A search the tests that need no real bkmr run: a bound database of a few bytes in a folder of its own, the folder TMPDIR
+    /// names, and the recording `bkmr` first on PATH.
+    struct Offline {
+        dir: TempDir,
+        db: PathBuf,
+        copies: PathBuf,
+        shims: PathBuf,
+        seen: PathBuf,
+    }
+
+    impl Offline {
+        fn new() -> Self {
+            let dir = native_tempdir();
+            let bound = dir.path().join("bound");
+            fs::create_dir(&bound).unwrap();
+            let db = bound.join("bound.db");
+            fs::write(&db, b"state").unwrap();
+            fs::create_dir(dir.path().join("copies")).unwrap();
+            let copies = fs::canonicalize(dir.path().join("copies")).unwrap();
+            let shims = dir.path().join("shims");
+            tool(&shims, "bkmr", RECORDING_BKMR);
+            let seen = dir.path().join("seen");
+            Self {
+                dir,
+                db,
+                copies,
+                shims,
+                seen,
+            }
+        }
+
+        fn env(&self) -> Vec<(&'static str, std::ffi::OsString)> {
+            vec![
+                ("PATH", path_before(&[&self.shims])),
+                ("TMPDIR", self.copies.clone().into()),
+                ("AIKIT_TEST_SHIM_SEEN", self.seen.clone().into()),
+            ]
+        }
+
+        fn search(&self, env: &[(&'static str, std::ffi::OsString)]) -> Output {
+            capsule_in(self.dir.path(), &self.db, env, &["capsulequasar"])
+        }
+    }
+
+    /// Round 55 item 9.1 (DLW build ruling 2026-11-10; the review of #613, F6): bkmr is handed a copy in a folder of the search's
+    /// own under TMPDIR, never one beside the bound database, and nothing is written beside the database.
+    #[test]
+    fn the_capsule_hands_bkmr_a_copy_in_a_folder_of_its_own_under_tmpdir() {
+        let run = Offline::new();
+        let beside = run.db.parent().unwrap();
+        let before = names(beside);
+        let output = run.search(&run.env());
+        assert_eq!(output.status, 0, "{output:?}");
+        let seen = fs::read_to_string(&run.seen).unwrap();
+        let url = Path::new(seen.trim_end());
+        let folder = url.parent().unwrap();
+        assert_eq!(
+            folder.parent(),
+            Some(run.copies.as_path()),
+            "the copy lies in a folder under TMPDIR: {seen}"
+        );
+        assert!(
+            folder
+                .file_name()
+                .is_some_and(|name| name.to_string_lossy().starts_with("aikit-bkmr-search.")),
+            "{seen}"
+        );
+        assert_eq!(
+            names(beside),
+            before,
+            "nothing is written beside the database"
+        );
+        assert!(names(&run.copies).is_empty(), "no copy is left");
+    }
+
+    /// The same item (F1): a database that moves on every one of three copies is refused with status 75, in words naming it, and
+    /// is never searched. The bound database is changed only by the test's own writer, and no copy is left.
+    #[test]
+    fn a_database_that_moves_on_every_copy_is_refused_and_never_searched() {
+        let run = Offline::new();
+        tool(&run.shims, "cp", CHANGING_CP);
+        let count = run.dir.path().join("cp-count");
+        let mut env = run.env();
+        env.extend([
+            ("AIKIT_TEST_REAL_CP", on_path("cp").into()),
+            ("AIKIT_TEST_CP_WATCHED", run.db.clone().into()),
+            ("AIKIT_TEST_CP_COUNT", count.clone().into()),
+            ("AIKIT_TEST_CP_CHANGE", "every".into()),
+        ]);
+        let output = run.search(&env);
+        assert_eq!(output.status, 75, "{output:?}");
+        assert!(
+            output.stderr.contains(&format!(
+                "the database changed on every try while it was copied (3 tries): {}\n",
+                run.db.display()
+            )),
+            "{}",
+            output.stderr
+        );
+        assert_eq!(fs::read_to_string(&count).unwrap(), "3\n");
+        assert_eq!(
+            fs::read(&run.db).unwrap(),
+            b"statexxx",
+            "only the writer changed it"
+        );
+        assert_eq!(database_bytes(&run.db)[1..], [None, None, None]);
+        assert!(!run.seen.exists(), "bkmr never ran");
+        assert!(names(&run.copies).is_empty(), "no copy is left");
+    }
+
+    /// The same item (3): a copy that cannot be made, looked at or read is refused with status 74, in words naming the database.
+    #[test]
+    fn a_copy_that_cannot_be_made_looked_at_or_read_is_refused_naming_the_database() {
+        let refused = |run: &Offline, env: &[(&'static str, std::ffi::OsString)], words: &str| {
+            let output = run.search(env);
+            assert_eq!(output.status, 74, "{words}: {output:?}");
+            assert!(
+                output
+                    .stderr
+                    .contains(&format!("{words}: {}\n", run.db.display())),
+                "{}",
+                output.stderr
+            );
+            assert!(!run.seen.exists(), "{words}: bkmr never ran");
+            assert!(names(&run.copies).is_empty(), "{words}: no copy is left");
+        };
+        let run = Offline::new();
+        let mut env = run.env();
+        env.retain(|(name, _)| *name != "TMPDIR");
+        env.push(("TMPDIR", run.dir.path().join("missing").into()));
+        refused(
+            &run,
+            &env,
+            "could not make a private folder to search a copy of the database in",
+        );
+        let run = Offline::new();
+        tool(&run.shims, "stat", "#!/bin/sh\nexit 1\n");
+        refused(
+            &run,
+            &run.env(),
+            "could not look at the database to tell whether it moved while it was copied",
+        );
+        let run = Offline::new();
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&run.db, fs::Permissions::from_mode(0o000)).unwrap();
+        if fs::read(&run.db).is_ok() {
+            eprintln!("skipped the unreadable case: this user reads a file of mode 000");
+        } else {
+            refused(&run, &run.env(), "could not copy the database to search it");
+        }
+        fs::set_permissions(&run.db, fs::Permissions::from_mode(0o644)).unwrap();
+    }
+
+    /// The same item (4, the review's F3): a search stopped by SIGQUIT, or by SIGPIPE when what reads it has gone, removes its
+    /// copy as it ends.
+    #[test]
+    fn a_search_stopped_by_quit_or_a_closed_pipe_removes_its_copy() {
+        for (signal, status) in [("QUIT", 131), ("PIPE", 141)] {
+            let run = Offline::new();
+            tool(
+                &run.shims,
+                "bkmr",
+                &format!("#!/bin/sh\nkill -{signal} \"$PPID\"\n"),
+            );
+            let output = run.search(&run.env());
+            assert_eq!(output.status, status, "{signal}: {output:?}");
+            assert!(names(&run.copies).is_empty(), "{signal}: no copy is left");
+        }
+    }
+
+    /// The same item (4): a search killed outright, as the runner's timeout kills one (SIGKILL), cannot remove its folder. So a
+    /// search first removes this user's own folders that are more than ten minutes old: an old one goes, and a fresh one, a
+    /// folder of another name and a file of the same name stay.
+    #[test]
+    fn a_search_removes_this_users_own_copies_left_more_than_ten_minutes_ago() {
+        let run = Offline::new();
+        let old = run.copies.join("aikit-bkmr-search.old123");
+        let fresh = run.copies.join("aikit-bkmr-search.new123");
+        let other = run.copies.join("other.old123");
+        let file = run.copies.join("aikit-bkmr-search.file12");
+        for folder in [&old, &fresh, &other] {
+            fs::create_dir(folder).unwrap();
+            fs::write(folder.join("search.db"), b"left").unwrap();
+        }
+        fs::write(&file, b"left").unwrap();
+        let hour_ago = std::time::SystemTime::now() - Duration::from_secs(3600);
+        for stale in [&old, &other, &file] {
+            fs::File::open(stale)
+                .unwrap()
+                .set_modified(hour_ago)
+                .unwrap();
+        }
+        let output = run.search(&run.env());
+        assert_eq!(output.status, 0, "{output:?}");
+        assert_eq!(
+            names(&run.copies),
+            [
+                "aikit-bkmr-search.file12",
+                "aikit-bkmr-search.new123",
+                "other.old123"
+            ]
+        );
+    }
+
+    /// The same item (F1): a database that moved while it was copied is copied again, and the search reads it as it stands
+    /// after the move: a bookmark the writer changed is found by its new words.
+    #[test]
+    fn real_767_capsule_search_copies_again_a_database_that_moved_while_it_was_copied() {
+        let Some(dir) = fixture() else {
+            return;
+        };
+        let db = seed(dir.path(), "moved.db", "moved-native");
+        let next = dir.path().join("next.db");
+        fs::copy(&db, &next).unwrap();
+        let writer = rusqlite::Connection::open(&next).unwrap();
+        writer
+            .execute(
+                "UPDATE bookmarks SET \"desc\" = \"desc\" || ' movedquasar'",
+                [],
+            )
+            .unwrap();
+        drop(writer);
+        assert_eq!(database_bytes(&next)[1..], [None, None, None]);
+        let shims = dir.path().join("shims");
+        tool(&shims, "cp", CHANGING_CP);
+        let count = dir.path().join("cp-count");
+        let copies = dir.path().join("copies");
+        fs::create_dir(&copies).unwrap();
+        let output = capsule_in(
+            dir.path(),
+            &db,
+            &[
+                ("PATH", path_before(&[&shims])),
+                ("AIKIT_TEST_REAL_CP", on_path("cp").into()),
+                ("AIKIT_TEST_CP_WATCHED", db.clone().into()),
+                ("AIKIT_TEST_CP_COUNT", count.clone().into()),
+                ("AIKIT_TEST_CP_NEXT", next.clone().into()),
+                ("AIKIT_TEST_CP_CHANGE", "once".into()),
+                ("TMPDIR", copies.clone().into()),
+            ],
+            &["movedquasar"],
+        );
+        assert_eq!(output.status, 0);
+        assert!(output.stdout.contains("moved-native"), "{}", output.stdout);
+        assert_eq!(fs::read_to_string(&count).unwrap(), "2\n", "copied twice");
+        assert_eq!(
+            database_bytes(&db),
+            database_bytes(&next),
+            "only the writer changed it"
+        );
+        assert!(names(&copies).is_empty(), "no copy is left");
+    }
+
+    /// The same item (F1): a database kept in rollback-journal mode whose writer crashed mid-transaction keeps its `-journal`,
+    /// and the half-written pages stand in the database file. The copy takes the journal too, so bkmr rolls the transaction back
+    /// in the copy, as it would have in the database: the search sees none of the half-written rows, and the database and its
+    /// journal are left as they were.
+    #[test]
+    fn real_767_capsule_search_rolls_back_a_crashed_writers_journal_in_its_copy() {
+        let Some(dir) = fixture() else {
+            return;
+        };
+        let live = seed(dir.path(), "live.db", "crashed-native");
+        let connection = rusqlite::Connection::open(&live).unwrap();
+        let mode: String = connection
+            .query_row("PRAGMA journal_mode = DELETE", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(mode, "delete");
+        connection
+            .execute_batch("CREATE TABLE ballast(b BLOB)")
+            .unwrap();
+        // A cache of two pages spills the changed bookmark to the database file before the ballast is written, as a crash
+        // mid-transaction leaves it; the -journal keeps the pages as they were.
+        connection
+            .execute_batch(
+                "PRAGMA cache_size = 2; BEGIN; \
+                 UPDATE bookmarks SET \"desc\" = \"desc\" || ' halfquasar'; \
+                 INSERT INTO ballast VALUES (randomblob(4000000));",
+            )
+            .unwrap();
+        let db = dir.path().join("crashed.db");
+        fs::copy(&live, &db).unwrap();
+        fs::copy(
+            format!("{}-journal", live.display()),
+            format!("{}-journal", db.display()),
+        )
+        .unwrap();
+        drop(connection);
+        let bare = dir.path().join("bare.db");
+        fs::copy(&db, &bare).unwrap();
+        let half: i64 = rusqlite::Connection::open(&bare)
+            .unwrap()
+            .query_row(
+                "SELECT count(*) FROM bookmarks WHERE \"desc\" LIKE '%halfquasar%'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            half, 1,
+            "the half-written bookmark stands in the database file"
+        );
+        let before = database_bytes(&db);
+        assert!(before[3].is_some(), "the crashed writer's -journal stands");
+        let copies = dir.path().join("copies");
+        fs::create_dir(&copies).unwrap();
+        let output = capsule_in(
+            dir.path(),
+            &db,
+            &[("TMPDIR", copies.clone().into())],
+            &["capsulequasar"],
+        );
+        assert_eq!(output.status, 0, "{output:?}");
+        assert!(
+            output.stdout.contains("crashed-native"),
+            "{}",
+            output.stdout
+        );
+        assert!(!output.stdout.contains("halfquasar"), "{}", output.stdout);
+        assert_eq!(
+            database_bytes(&db),
+            before,
+            "a search must not roll back the database itself"
+        );
+        assert!(names(&copies).is_empty(), "no copy is left");
+    }
+
+    /// The same item (F2): SQLite keeps a database's `-wal` beside the file its path leads to, every link followed. A search of a
+    /// database bound through two links, one relative and one absolute, reads the `-wal` beside the real file, where a writer
+    /// keeps a commit it has not checkpointed, and finds the bookmark by its new words.
+    #[test]
+    fn real_767_capsule_search_through_links_reads_the_wal_beside_the_real_file() {
+        let Some(dir) = fixture() else {
+            return;
+        };
+        for folder in ["real", "middle", "link"] {
+            fs::create_dir(dir.path().join(folder)).unwrap();
+        }
+        let db = seed(dir.path(), "real/linked.db", "linked-native");
+        let writer = rusqlite::Connection::open(&db).unwrap();
+        let mode: String = writer
+            .query_row("PRAGMA journal_mode = WAL", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(mode, "wal");
+        writer
+            .execute(
+                "UPDATE bookmarks SET \"desc\" = \"desc\" || ' linkquasar'",
+                [],
+            )
+            .unwrap();
+        let middle = dir.path().join("middle/linked.db");
+        std::os::unix::fs::symlink("../real/linked.db", &middle).unwrap();
+        let bound = dir.path().join("link/linked.db");
+        std::os::unix::fs::symlink(&middle, &bound).unwrap();
+        let before = database_bytes(&db);
+        assert!(
+            before[1].as_ref().is_some_and(|wal| !wal.is_empty()),
+            "the change stands in the -wal"
+        );
+        let copies = dir.path().join("copies");
+        fs::create_dir(&copies).unwrap();
+        let output = capsule_in(
+            dir.path(),
+            &bound,
+            &[("TMPDIR", copies.clone().into())],
+            &["linkquasar"],
+        );
+        assert_eq!(output.status, 0);
+        assert!(output.stdout.contains("linked-native"), "{}", output.stdout);
+        assert_eq!(database_bytes(&db), before);
+        assert_eq!(names(&dir.path().join("link")), ["linked.db"]);
+        assert!(names(&copies).is_empty(), "no copy is left");
         drop(writer);
     }
 }
