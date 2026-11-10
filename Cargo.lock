@@ -89,6 +89,7 @@ dependencies = [
  "jsonschema",
  "predicates",
  "ratatui",
+ "regex",
  "serde",
  "serde_json",
  "sha1",
