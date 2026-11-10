@@ -2935,7 +2935,7 @@ pub struct GatewayDiscloseArgs {
     /// right against it when it goes live.
     #[arg(
         long,
-        conflicts_with_all = ["part_ref", "star_ref", "to_field", "kind", "label", "text", "withdraw", "from_position"]
+        conflicts_with_all = ["part_ref", "star_ref", "to_field", "kind", "label", "text", "withdraw", "from_position", "by"]
     )]
     pub list: bool,
     /// The part shown.
@@ -2958,12 +2958,19 @@ pub struct GatewayDiscloseArgs {
     #[arg(long, value_name = "TEXT")]
     pub label: Option<String>,
     /// What the World shows of it, in words (at most 4000 characters): the
-    /// answer turn is given it, quoted.
+    /// answer turn is given it, quoted. Told again without it, a part keeps
+    /// the text it has.
     #[arg(long, value_name = "TEXT")]
     pub text: Option<String>,
     /// Withdraw it (at --star, from the whole field with --field, or everywhere).
     #[arg(long)]
     pub withdraw: bool,
+    /// Who tells it (an agent ref; the person's window: `field-window`),
+    /// kept with the part and listed. Only a part's own teller tells it
+    /// again, and a withdrawal with --by takes back only its parts; without
+    /// it, the part is told by hand (F11, DLW build ruling 2026-11-09).
+    #[arg(long, value_name = "WHO")]
+    pub by: Option<String>,
     #[arg(long = "from-position", value_name = "POSITION")]
     pub from_position: Option<String>,
     #[command(flatten)]

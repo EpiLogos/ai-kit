@@ -1994,6 +1994,7 @@ fn cmd_gateway_dispatch(command: GatewayCmd, cwd: &std::path::Path) -> Result<Re
                     text: a.text.as_deref(),
                     withdraw: a.withdraw,
                     from_position: a.from_position.as_deref(),
+                    teller: a.by.as_deref(),
                 },
             )?)
         }

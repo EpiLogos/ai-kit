@@ -3701,6 +3701,277 @@ fn the_window_lists_what_aikit_holds_a_world_shows_and_the_list_changes_nothing(
     assert_eq!(list("project:O-I"), listed);
 }
 
+/// F11 (DLW build ruling 2026-11-09): the field owns only the parts it tells.
+/// AIKit records who told each part (`--by`, the window telling as
+/// `field-window`) and lists it; a part told by hand, as one told before
+/// AIKit kept tellers, lists none and is not the window's. A re-tell that
+/// sends no text keeps the part's text. Only a part's own teller tells it
+/// again: another, or the hand over the window's part, is refused in words
+/// and nothing is recorded, so the window never takes a part over by telling
+/// it again. A withdrawal with --by takes back only its teller's parts; one
+/// without takes back any.
+#[test]
+fn aikit_records_who_told_each_part_and_only_its_own_teller_tells_it_again_or_withdraws_it_by_name()
+{
+    let world = World::new();
+    let window = body(&world, "a", "workcell:a", "agency-gateway/a");
+    let _service = Gateway::serve(&window, None);
+    let list = || window.ok(&["gateway", "disclose", "--list", "--world", "project:O-I"]);
+    let part = |listed: &Value, part_ref: &str| -> Value {
+        listed["disclosure"]["parts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|part| part["part_ref"] == part_ref)
+            .cloned()
+            .unwrap_or(Value::Null)
+    };
+    let refused = |args: &[&str]| {
+        let mut all = vec!["gateway", "disclose", "--world", "project:O-I"];
+        all.extend_from_slice(args);
+        window.refused(&all)
+    };
+    // Told by the window, a part lists its teller; told by hand, none.
+    disclose(
+        &window,
+        &[
+            "--part",
+            "part:told",
+            "--star",
+            "star:rosarium",
+            "--kind",
+            "page",
+            "--label",
+            "Told",
+            "--text",
+            "What the window told.",
+            "--by",
+            "field-window",
+        ],
+    );
+    disclose(
+        &window,
+        &[
+            "--part",
+            "part:hand",
+            "--field",
+            "--label",
+            "By hand",
+            "--text",
+            "What the person wrote.",
+        ],
+    );
+    let listed = list();
+    assert_eq!(
+        part(&listed, "part:told")["teller"],
+        "field-window",
+        "{listed}"
+    );
+    assert_eq!(part(&listed, "part:hand").get("teller"), None, "{listed}");
+
+    // A re-tell that sends no text keeps it, whoever tells it.
+    disclose(
+        &window,
+        &[
+            "--part",
+            "part:told",
+            "--star",
+            "star:rosarium",
+            "--kind",
+            "page",
+            "--label",
+            "Told again",
+            "--by",
+            "field-window",
+        ],
+    );
+    disclose(
+        &window,
+        &[
+            "--part",
+            "part:hand",
+            "--field",
+            "--label",
+            "By hand, again",
+        ],
+    );
+    let listed = list();
+    let told = part(&listed, "part:told");
+    assert_eq!(told["label"], "Told again", "{listed}");
+    assert_eq!(told["text"], "What the window told.", "{listed}");
+    assert_eq!(told["teller"], "field-window", "{listed}");
+    let hand = part(&listed, "part:hand");
+    assert_eq!(hand["label"], "By hand, again", "{listed}");
+    assert_eq!(hand["text"], "What the person wrote.", "{listed}");
+    assert_eq!(hand.get("teller"), None, "{listed}");
+
+    // A re-tell by another teller than the part's own is refused in words,
+    // and nothing is recorded: the window never takes up a part told by
+    // hand, nor the hand, or another window, one the window told.
+    for (args, fact) in [
+        (
+            &[
+                "--part",
+                "part:hand",
+                "--field",
+                "--label",
+                "Taken",
+                "--by",
+                "field-window",
+            ][..],
+            "part:hand is shown to the whole field as told by hand, not by field-window.",
+        ),
+        (
+            &[
+                "--part",
+                "part:told",
+                "--star",
+                "star:rosarium",
+                "--label",
+                "Taken",
+            ][..],
+            "part:told is shown at star:rosarium as told by field-window, not by hand.",
+        ),
+        (
+            &[
+                "--part",
+                "part:told",
+                "--star",
+                "star:rosarium",
+                "--label",
+                "Taken",
+                "--by",
+                "another-window",
+            ][..],
+            "part:told is shown at star:rosarium as told by field-window, not by another-window.",
+        ),
+    ] {
+        let refusal = refused(args);
+        assert_eq!(
+            refusal["code"], "gateway.disclose_not_its_teller",
+            "{refusal}"
+        );
+        assert_eq!(refusal["details"]["fact"], fact, "{refusal}");
+        assert_eq!(refusal["details"]["consequence"], "Nothing was recorded.");
+        assert_eq!(list(), listed, "{args:?}");
+    }
+    // Shown in another place it is another showing, and anyone tells it; the
+    // text it has in one place is never carried to another.
+    let read = disclose(
+        &window,
+        &[
+            "--part",
+            "part:hand",
+            "--star",
+            "star:rosarium",
+            "--by",
+            "field-window",
+        ],
+    );
+    let elsewhere = read["disclosure"]["parts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|part| part["part_ref"] == "part:hand" && part["star_ref"] == "star:rosarium")
+        .cloned()
+        .unwrap();
+    assert_eq!(elsewhere["teller"], "field-window", "{read}");
+    assert_eq!(elsewhere.get("text"), None, "{read}");
+    let listed = list();
+
+    // A withdrawal by name takes back only its teller's parts: one another
+    // told, or no one, is refused and nothing is withdrawn, at a star, from
+    // the whole field, or everywhere.
+    for (args, fact) in [
+        (
+            &[
+                "--part",
+                "part:hand",
+                "--field",
+                "--withdraw",
+                "--by",
+                "field-window",
+            ][..],
+            "part:hand is shown to the whole field as told by hand, not by field-window.",
+        ),
+        (
+            &["--part", "part:hand", "--withdraw", "--by", "field-window"][..],
+            "part:hand is shown to the whole field as told by hand, not by field-window.",
+        ),
+        (
+            &[
+                "--part",
+                "part:told",
+                "--star",
+                "star:rosarium",
+                "--withdraw",
+                "--by",
+                "another-window",
+            ][..],
+            "part:told is shown at star:rosarium as told by field-window, not by another-window.",
+        ),
+    ] {
+        let refusal = refused(args);
+        assert_eq!(
+            refusal["code"], "gateway.disclose_not_its_teller",
+            "{refusal}"
+        );
+        assert_eq!(refusal["details"]["fact"], fact, "{refusal}");
+        assert_eq!(refusal["details"]["consequence"], "Nothing was withdrawn.");
+        assert_eq!(list(), listed, "{args:?}");
+    }
+    // Its own teller takes its part back; without --by, any part goes.
+    let shows = |read: &Value| -> Vec<(String, Value)> {
+        read["disclosure"]["parts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|part| {
+                (
+                    part["part_ref"].as_str().unwrap().to_owned(),
+                    part["star_ref"].clone(),
+                )
+            })
+            .collect()
+    };
+    let read = disclose(
+        &window,
+        &["--part", "part:told", "--withdraw", "--by", "field-window"],
+    );
+    assert_eq!(
+        shows(&read),
+        [
+            ("part:hand".to_owned(), Value::Null),
+            ("part:hand".to_owned(), json!("star:rosarium"))
+        ],
+        "{read}"
+    );
+    let read = disclose(&window, &["--part", "part:hand", "--withdraw"]);
+    assert_eq!(shows(&read), Vec::<(String, Value)>::new(), "{read}");
+
+    // A teller is a plain ref, and a list names no teller.
+    let refusal = refused(&["--part", "part:x", "--field", "--by", "field window"]);
+    assert_eq!(refusal["code"], "gateway.disclose_invalid", "{refusal}");
+    assert_eq!(
+        refusal["details"]["fact"],
+        "field window is not a plain teller."
+    );
+    let usage = |args: &[&str]| window.command(args).output().unwrap().status.code();
+    assert_eq!(
+        usage(&[
+            "gateway",
+            "disclose",
+            "--list",
+            "--world",
+            "project:O-I",
+            "--by",
+            "field-window"
+        ]),
+        Some(2)
+    );
+    assert_eq!(list()["disclosure"]["parts"], json!([]));
+}
+
 /// 601c ruling 3 (DLW build ruling 2026-11-09): every refusal of a send says
 /// in data whether it kept anything (`details.recorded`), so the person's
 /// window never reads it from the words. An ask past the bound is refused
