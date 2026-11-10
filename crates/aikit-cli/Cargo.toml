@@ -24,6 +24,8 @@ aikit-adapters = { workspace = true }
 aikit-tui = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+# The format characters (Cf) a run's record leaves out (day_move_runner.rs invisible).
+regex = { workspace = true }
 toml = { workspace = true }
 toml_edit = { workspace = true }
 thiserror = { workspace = true }
