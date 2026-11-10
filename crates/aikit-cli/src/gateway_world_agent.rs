@@ -278,7 +278,8 @@ pub struct DisclosedPart {
     /// Who told it (`disclose --by`): the person's window tells as
     /// `field-window`. Absent, it was told by hand, or before AIKit kept
     /// tellers, and it is not the window's (F11, DLW build ruling 2026-11-09).
-    /// Never given to the answer turn.
+    /// A part the person tells again by hand is theirs, whoever told it
+    /// (be2h). Never given to the answer turn.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub teller: Option<String>,
 }
@@ -451,9 +452,12 @@ fn told_by(teller: Option<&str>) -> String {
 /// withdraw it. The gateway runtime takes it only from the person's own
 /// connection; this is what an ask of that World's agent at that star may
 /// draw on. Each part keeps who told it (F11, DLW build ruling 2026-11-09):
-/// only its own teller tells it again, never taking over another's (the hand
-/// is a teller too), and a re-tell with no text keeps its text; a withdrawal
-/// with a teller takes back only that teller's parts.
+/// a teller tells again only its own parts, never taking over another's, and
+/// a withdrawal with a teller takes back only that teller's parts. The
+/// person's hand (no teller) outranks any teller (be2h): it tells any part
+/// again, which is then the person's, and the answer says once whom it was
+/// taken over from, as it takes any part back. A re-tell with no text keeps
+/// its text.
 pub fn disclose(
     home: &AikitHome,
     gateway: &dyn GatewayAccess,
@@ -516,9 +520,10 @@ pub fn disclose(
         part.part_ref == request.part_ref && (everywhere || part.star_ref == star)
     };
     // A show is a withdrawal too, of the same part shown in the same place,
-    // so both meet the teller the same way; a withdrawal with no teller takes
-    // back any part (F11).
-    if !request.withdraw || request.teller.is_some() {
+    // so both meet the teller the same way (F11). The person's hand, with no
+    // teller, tells again or takes back any part: a delegate never locks its
+    // principal out (be2h).
+    if request.teller.is_some() {
         if let Some(other) = record
             .parts
             .iter()
@@ -541,15 +546,20 @@ pub fn disclose(
                 } else {
                     "Nothing was recorded."
                 },
-                "Only the one that told a part tells it again or takes it back by name; withdrawn by hand (--withdraw, no --by), it can be told anew.",
+                "Only the one that told a part tells it again or takes it back by name; the person tells any part again, or takes it back, by hand (no --by).",
             ));
         }
     }
-    let kept_text = record
-        .parts
-        .iter()
-        .find(|part| same(part))
-        .and_then(|part| part.text.clone());
+    let shown = record.parts.iter().find(|part| same(part));
+    let kept_text = shown.and_then(|part| part.text.clone());
+    // Told again by hand, a part another told is taken over from its teller.
+    let taken_from = shown
+        .filter(|_| !request.withdraw && request.teller.is_none())
+        .and_then(|part| part.teller.clone());
+    let at = star.as_deref().map_or_else(
+        || "to the whole field".to_owned(),
+        |star| format!("at {star}"),
+    );
     let before = record.parts.len();
     record.parts.retain(|part| !same(part));
     if !request.withdraw {
@@ -568,12 +578,20 @@ pub fn disclose(
         &disclosure_key(request.world_ref),
         Some(value.clone()),
     )?;
-    Ok(json!({
+    let mut answer = json!({
         "schema": WORLD_DISCLOSURE_SCHEMA,
         "act": if request.withdraw { "withdrawn" } else { "shown" },
         "changed": request.withdraw && record.parts.len() != before || !request.withdraw,
         "disclosure": value,
-    }))
+    });
+    if let Some(teller) = taken_from {
+        answer["words"] = json!(format!(
+            "{} is shown {at} as told by hand now, taken over from {teller}.",
+            request.part_ref
+        ));
+        answer["taken_over_from"] = json!(teller);
+    }
+    Ok(answer)
 }
 
 // ---- the answer harness -----------------------------------------------------------
