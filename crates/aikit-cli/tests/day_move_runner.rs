@@ -611,6 +611,7 @@ impl CentralPort for Dying<'_> {
             code: "day_move.central_unavailable".into(),
             message: format!("injected: the runner died before {what}"),
             unavailable: true,
+            details: Value::Null,
         };
         if action == "central.receiving.submit" {
             let n = self.submits.fetch_add(1, Ordering::SeqCst);
@@ -934,6 +935,8 @@ struct Watched<'a> {
     inner: &'a CtrlCentral,
     stopped_first: bool,
     ends: Mutex<Vec<String>>,
+    /// How often the Day's moves were read after the runner's first end.
+    reads_after_an_end: AtomicUsize,
 }
 
 const STOPPED_ELSEWHERE: &str = "Stopped from the Day's page.";
@@ -944,6 +947,7 @@ impl<'a> Watched<'a> {
             inner,
             stopped_first,
             ends: Mutex::new(vec![]),
+            reads_after_an_end: AtomicUsize::new(0),
         }
     }
     fn ends(&self) -> Vec<String> {
@@ -953,6 +957,9 @@ impl<'a> Watched<'a> {
 
 impl CentralPort for Watched<'_> {
     fn call(&self, action: &str, input: &Value) -> Result<Value, CentralError> {
+        if action == "central.day.moves.read" && !self.ends.lock().unwrap().is_empty() {
+            self.reads_after_an_end.fetch_add(1, Ordering::SeqCst);
+        }
         if action != "central.day.move.record" || input["event"] != "end" {
             return self.inner.call(action, input);
         }
@@ -1050,11 +1057,19 @@ fn a_run_stopped_from_elsewhere_stays_stopped_and_the_runner_records_no_further_
     )
     .unwrap();
 
-    // The run's own end met the stop, by Central's code, and nothing was sent after it.
-    assert_eq!(
-        watched.ends(),
-        ["done+gave: stale_basis_or_identity_conflict"]
-    );
+    // The run's own end met the stop, by Central's code, and nothing was sent after it. A Central with be2j.c3 names an
+    // ended run by a code of its own and carries the run, so the Day's moves are not read again (be2j.a3 item 6); one
+    // before it gives the conflict's code, and the run is read once to tell an ended run from a changed Day.
+    let reads = watched.reads_after_an_end.load(Ordering::SeqCst);
+    match watched.ends().as_slice() {
+        [end] if end == "done+gave: run_ended_already" => {
+            assert_eq!(reads, 0, "the refusal carries the run")
+        }
+        [end] if end == "done+gave: stale_basis_or_identity_conflict" => {
+            assert_eq!(reads, 1, "read once to tell the two apart")
+        }
+        ends => panic!("one end, refused as ended or as a conflict: {ends:?}"),
+    }
     assert_eq!(report["state"], "stopped", "{report}");
     assert_eq!(report["reason"], STOPPED_ELSEWHERE, "{report}");
     let moves = world.moves(&day_ref);
