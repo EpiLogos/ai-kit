@@ -917,14 +917,15 @@ mod project_text_capsule {
 
     /// A `cp` first on PATH. It copies as the real one does. After a copy of the watched database it changes that database as a
     /// writer would: it writes `$AIKIT_TEST_CP_NEXT` over it in place, or adds a byte to it where none is named. It does so after
-    /// the first copy, or after every one when `$AIKIT_TEST_CP_CHANGE` is `every`, and counts the copies in `$AIKIT_TEST_CP_COUNT`.
+    /// the first copy (after the first `$AIKIT_TEST_CP_CHANGES` copies, where that is set), or after every one when
+    /// `$AIKIT_TEST_CP_CHANGE` is `every`, and counts the copies in `$AIKIT_TEST_CP_COUNT`.
     /// Where `$AIKIT_TEST_CP_TIME` names a file, it puts the watched file's modification time back after the change, as a
     /// change inside one tick of a coarse clock leaves it.
     const CHANGING_CP: &str = "#!/bin/sh\n\"$AIKIT_TEST_REAL_CP\" \"$@\" || exit \"$?\"\n\
         [ \"$1\" -ef \"$AIKIT_TEST_CP_WATCHED\" ] || exit 0\n\
         n=0\n[ ! -f \"$AIKIT_TEST_CP_COUNT\" ] || n=$(cat \"$AIKIT_TEST_CP_COUNT\")\nn=$((n + 1))\n\
         printf '%s\\n' \"$n\" > \"$AIKIT_TEST_CP_COUNT\"\n\
-        [ \"$AIKIT_TEST_CP_CHANGE\" = every ] || [ \"$n\" -eq 1 ] || exit 0\n\
+        [ \"$AIKIT_TEST_CP_CHANGE\" = every ] || [ \"$n\" -le \"${AIKIT_TEST_CP_CHANGES:-1}\" ] || exit 0\n\
         [ -z \"${AIKIT_TEST_CP_TIME:-}\" ] || touch -r \"$1\" \"$AIKIT_TEST_CP_TIME\"\n\
         if [ -n \"${AIKIT_TEST_CP_NEXT:-}\" ]; then cat \"$AIKIT_TEST_CP_NEXT\" > \"$1\"; else printf x >> \"$1\"; fi\n\
         [ -z \"${AIKIT_TEST_CP_TIME:-}\" ] || touch -r \"$AIKIT_TEST_CP_TIME\" \"$1\"\n";
@@ -1004,8 +1005,9 @@ mod project_text_capsule {
         assert!(names(&run.copies).is_empty(), "no copy is left");
     }
 
-    /// The same item (F1): a database that moves on every one of three copies is refused with status 75, in words naming it, and
-    /// is never searched. The bound database is changed only by the test's own writer, and no copy is left.
+    /// The same item (F1): a database that moves on every one of its copies is refused with status 75, in words naming it, and
+    /// is never searched. The bound database is changed only by the test's own writer, and no copy is left. Five copies are
+    /// tried since round 55 item 9e (DLW build ruling 2026-11-11; the review of #615, B1), three before.
     #[test]
     fn a_database_that_moves_on_every_copy_is_refused_and_never_searched() {
         let run = Offline::new();
@@ -1022,16 +1024,16 @@ mod project_text_capsule {
         assert_eq!(output.status, 75, "{output:?}");
         assert!(
             output.stderr.contains(&format!(
-                "the database changed on every try while it was copied (3 tries): {}\n",
+                "the database changed on every try while it was copied (5 tries): {}\n",
                 run.db.display()
             )),
             "{}",
             output.stderr
         );
-        assert_eq!(fs::read_to_string(&count).unwrap(), "3\n");
+        assert_eq!(fs::read_to_string(&count).unwrap(), "5\n");
         assert_eq!(
             fs::read(&run.db).unwrap(),
-            b"statexxx",
+            b"statexxxxx",
             "only the writer changed it"
         );
         assert_eq!(database_bytes(&run.db)[1..], [None, None, None]);
@@ -1039,14 +1041,39 @@ mod project_text_capsule {
         assert!(names(&run.copies).is_empty(), "no copy is left");
     }
 
+    /// Round 55 item 9e, item 1 (DLW build ruling 2026-11-11; the review of #615, B1): a writer that changes the database during
+    /// the first four copies and then rests does not starve the search. The fifth copy is of a database at rest, and the search
+    /// answers from it. (The tries wait a short, growing time between them; that wait is not timed here.)
+    #[test]
+    fn a_database_that_rests_after_four_changes_is_searched_on_the_fifth_copy() {
+        let run = Offline::new();
+        tool(&run.shims, "cp", CHANGING_CP);
+        let count = run.dir.path().join("cp-count");
+        let mut env = run.env();
+        env.extend([
+            ("AIKIT_TEST_REAL_CP", on_path("cp").into()),
+            ("AIKIT_TEST_CP_WATCHED", run.db.clone().into()),
+            ("AIKIT_TEST_CP_COUNT", count.clone().into()),
+            ("AIKIT_TEST_CP_CHANGE", "some".into()),
+            ("AIKIT_TEST_CP_CHANGES", "4".into()),
+        ]);
+        let output = run.search(&env);
+        assert_eq!(output.status, 0, "{output:?}");
+        assert_eq!(fs::read_to_string(&count).unwrap(), "5\n");
+        assert_eq!(fs::read(&run.db).unwrap(), b"statexxxx");
+        assert!(run.seen.exists(), "bkmr searched the fifth copy");
+        assert!(names(&run.copies).is_empty(), "no copy is left");
+    }
+
     /// Round 55 item 9b, item 7 (DLW build ruling 2026-11-10; the re-check of 9.1, R1): a change that keeps the size, and the
     /// modification time, as a change inside one tick of a coarse clock does, is still seen, and the copy is taken again. A
     /// writer rewrites the database in place, or restarts its `-wal`, after the first copy, at the same size and with the time
-    /// put back: the first 32 bytes, the header, moved, and the search reads the state after the change.
+    /// put back: the header moved, and the search reads the state after the change. Since round 55 item 9e (the review of #615,
+    /// B4) the look covers the first 4096 bytes of each file, so a change past the first 32 bytes is seen as well: the third row.
     #[test]
     fn a_change_that_keeps_the_size_and_the_time_is_seen_and_copied_again() {
         use std::os::unix::fs::MetadataExt;
-        let rows: [(&str, &str, &[u8], &[u8]); 2] = [
+        let rows: [(&str, &str, &[u8], &[u8]); 3] = [
             (
                 "the database",
                 "",
@@ -1058,6 +1085,12 @@ mod project_text_capsule {
                 "-wal",
                 b"WAL header, salt one: frame 1 and 2",
                 b"WAL header, salt two: frame 1 and 2",
+            ),
+            (
+                "the database, past its first 32 bytes",
+                "",
+                b"SQLite format 3\0the same sixteen and the same sixteen after: state one, in the first page",
+                b"SQLite format 3\0the same sixteen and the same sixteen after: state two, in the first page",
             ),
         ];
         for (row, suffix, first, next) in rows {
@@ -1376,8 +1409,9 @@ mod project_text_capsule {
         format!(
             "bkmr migrated the private copy this search made of {db}, which is kept in an older schema. The backup bkmr names \
              was made of that copy and is removed with it. Each search migrates its copy again until the database itself is \
-             migrated, once: bkmr --db {db} search --np --limit 1 \"\"\n",
-            db = db.display()
+             migrated, once: bkmr --db '{quoted}' search --np --limit 1 \"\"\n",
+            db = db.display(),
+            quoted = db.display().to_string().replace('\'', "'\\''")
         )
     }
 
@@ -1491,7 +1525,8 @@ mod project_semantic_capsule {
     /// A `bkmr` first on PATH. It answers `--version` as 7.6.7. For any other command it keeps, in a folder of its own under
     /// `$AIKIT_TEST_SHIM_SEEN`, the BKMR_DB_URL it was given, the names beside it and a copy of that database (its `-wal` too);
     /// then it makes the `-wal` and `-shm` bkmr 7.x makes beside a database it opens, and answers an empty result. Where
-    /// `$AIKIT_TEST_SHIM_BACKUP` is set it also makes, and names, the backup bkmr makes beside a database it migrates.
+    /// `$AIKIT_TEST_SHIM_BACKUP` is set it also makes, and names, the backup bkmr makes beside a database it migrates, and a
+    /// second one of another day where it is `2`. It ends with the status `$AIKIT_TEST_SHIM_STATUS` names, 0 where none is.
     const SHIM: &str = "#!/bin/sh\n\
         [ \"$1\" != --version ] || { echo 'bkmr 7.6.7'; exit 0; }\n\
         seen=$(mktemp -d \"$AIKIT_TEST_SHIM_SEEN/run.XXXXXX\")\n\
@@ -1503,8 +1538,9 @@ mod project_semantic_capsule {
         [ -e \"$BKMR_DB_URL-shm\" ] || : > \"$BKMR_DB_URL-shm\"\n\
         if [ -n \"${AIKIT_TEST_SHIM_BACKUP:-}\" ]; then\n\
         backup=$(dirname \"$BKMR_DB_URL\")/search_backup_20261110.db\n\
-        : > \"$backup\"\nprintf 'Backup created at: %s\\n' \"$backup\" >&2\nfi\n\
-        printf '[]\\n'\n";
+        : > \"$backup\"\nprintf 'Backup created at: %s\\n' \"$backup\" >&2\n\
+        [ \"$AIKIT_TEST_SHIM_BACKUP\" != 2 ] || : > \"$(dirname \"$BKMR_DB_URL\")/search_backup_20261111.db\"\nfi\n\
+        printf '[]\\n'\nexit \"${AIKIT_TEST_SHIM_STATUS:-0}\"\n";
 
     /// The [`SHIM`] in `root`: the PATH that finds it first, and the folder it keeps what it saw in.
     fn shim(root: &Path) -> (OsString, PathBuf) {
@@ -1964,5 +2000,101 @@ mod project_semantic_capsule {
                 "{mode}: no copy is left"
             );
         }
+    }
+
+    /// Round 55 item 9e, items 2 and 3 (DLW build ruling 2026-11-11; the review of #615, F1 and F2): the semantic capsule answers
+    /// with bkmr's own failing status, in each mode, whether or not bkmr migrated its copy. And it says that bkmr migrated the copy
+    /// once, though two backups stand in the copy's folder (bkmr names its backup by the day, so a search across midnight leaves
+    /// two). The command it gives names the database in single quotes, here a path that holds a space and a quote.
+    #[test]
+    fn the_semantic_capsule_keeps_bkmr_s_failing_status_and_says_a_migration_once() {
+        for mode in ["hybrid", "semantic"] {
+            for backups in ["", "1", "2"] {
+                let dir = native_tempdir();
+                let (db, _) = vector_database(dir.path(), "older db's.db", CLEAN_WAL);
+                let (path, seen) = shim(dir.path());
+                let copies = dir.path().join("copies");
+                fs::create_dir(&copies).unwrap();
+                let output = run(
+                    dir.path(),
+                    SEMANTIC,
+                    &db,
+                    &[
+                        ("PATH", path),
+                        ("TMPDIR", copies.clone().into()),
+                        ("AIKIT_TEST_SHIM_SEEN", seen.clone().into()),
+                        ("AIKIT_TEST_SHIM_BACKUP", backups.into()),
+                        ("AIKIT_TEST_SHIM_STATUS", "7".into()),
+                    ],
+                    &["--mode", mode, "lighthouse"],
+                );
+                let case = format!("{mode}, backups {backups:?}");
+                assert_eq!(output.status, 7, "{case}: {}", output.stderr);
+                assert_eq!(
+                    output.stderr.matches(&migrated_words(&db)).count(),
+                    usize::from(!backups.is_empty()),
+                    "{case}: {}",
+                    output.stderr
+                );
+                assert_eq!(
+                    fs::read_dir(&copies).unwrap().count(),
+                    0,
+                    "{case}: no copy is left"
+                );
+            }
+        }
+    }
+
+    /// Round 55 item 9e, item 4 (the review of #615, B3): where the copy cannot be made, the doctor reports and goes on. It says
+    /// why on stderr, naming the database, prints its rows as "?", leaves the embedding counts out, and ends with status 0, as it
+    /// did before it counted from a copy for a database it could not read. (9b made it stop there with 74.)
+    #[test]
+    fn the_doctor_goes_on_where_the_copy_cannot_be_made() {
+        if Command::new("sqlite3").arg("--version").output().is_err() {
+            eprintln!("skipped: no sqlite3 on PATH, so the doctor counts nothing");
+            return;
+        }
+        let dir = native_tempdir();
+        let (db, _) = vector_database(dir.path(), "unreadable.db", ROLLBACK);
+        fs::set_permissions(&db, fs::Permissions::from_mode(0o000)).unwrap();
+        if fs::read(&db).is_ok() {
+            eprintln!("skipped: this process reads a file with no permissions (a superuser)");
+            return;
+        }
+        let (path, seen) = shim(dir.path());
+        let copies = dir.path().join("copies");
+        fs::create_dir(&copies).unwrap();
+        let output = run(
+            dir.path(),
+            DOCTOR,
+            &db,
+            &[
+                ("PATH", path),
+                ("TMPDIR", copies.clone().into()),
+                ("AIKIT_TEST_SHIM_SEEN", seen.clone().into()),
+            ],
+            &[],
+        );
+        fs::set_permissions(&db, fs::Permissions::from_mode(0o644)).unwrap();
+        assert_eq!(output.status, 0, "{}", output.stderr);
+        assert!(
+            output.stdout.contains(
+                "rows          : ? (not counted: the database could not be copied for the count)\n"
+            ),
+            "{}",
+            output.stdout
+        );
+        assert!(!output.stdout.contains("embeddings"), "{}", output.stdout);
+        assert!(
+            output.stderr.contains(&format!(
+                "could not copy the database to search it: {}",
+                db.display()
+            )) && output
+                .stderr
+                .contains("row and embedding counts are skipped; the reason is above."),
+            "{}",
+            output.stderr
+        );
+        assert_eq!(fs::read_dir(&copies).unwrap().count(), 0, "no copy is left");
     }
 }

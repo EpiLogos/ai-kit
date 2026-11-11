@@ -33,6 +33,10 @@ install_hint = "script/install/bkmr"
 # the run's own under TMPDIR and removed when it ends, so for the bound database
 # read:outside is exactly true. The vocabulary has no class for that temporary
 # write either, so it too is said and not declared.
+# The copy is taken again when the database moved while it was copied, told by
+# each file's inode, size, time and a checksum of its first 4096 bytes: a
+# same-size rewrite past those bytes inside one tick of a coarse clock is not
+# seen.
 # Each run also removes this user's own stale copy folders under TMPDIR: the
 # aikit-bkmr-search.* folders more than an hour old, which a run killed
 # outright (SIGKILL, as the runner's timeout kills one) could not remove itself.

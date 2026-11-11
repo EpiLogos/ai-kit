@@ -26,6 +26,10 @@ reason = "Local fastembed embedding is the baseline; it exists from 7.0.0."
 # The effects vocabulary has no class for a run's own temporary folder (any
 # scope but project, worktree and task reads as write:outside, the elevated
 # class), so that write is said here and not declared.
+# The copy is taken again when the database moved while it was copied, told by
+# each file's inode, size, time and a checksum of its first 4096 bytes: a
+# same-size rewrite past those bytes inside one tick of a coarse clock is not
+# seen.
 # Each run also removes this user's own stale copy folders under TMPDIR: the
 # aikit-bkmr-search.* folders more than an hour old, which a run killed
 # outright (SIGKILL, as the runner's timeout kills one) could not remove itself.

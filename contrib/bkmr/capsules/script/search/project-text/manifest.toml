@@ -2,7 +2,7 @@ schema = 1
 id = "script/search/project-text"
 kind = "script"
 name = "bkmr text search"
-description = "Full-text and tag search of the bkmr database bound to this context. Offline, no credentials, JSON output. Each search first copies the database, about 30 ms more than bkmr's own search on a 64 KB database."
+description = "Full-text and tag search of the bkmr database bound to this context. Offline, no credentials, JSON output. Each search first copies the database, which costs tens of milliseconds more than bkmr's own search (on a 64 KB database: about 30 ms measured at load 5, about 50 ms at load 8.6)."
 maturity = "candidate"
 tags = ["bkmr", "search", "fts", "offline", "json"]
 platforms = ["linux", "macos"]
@@ -22,7 +22,10 @@ reason = "`search --json` and BKMR_DB_URL both exist from 6.5.0."
 #
 # The search writes that one private copy, as large as the database with its
 # -wal and -journal, in a folder of its own under TMPDIR, and removes it when it
-# ends. Each search costs a copy of the database. The effects vocabulary has no
+# ends. Each search costs a copy of the database. The copy is taken again when
+# the database moved while it was copied, told by each file's inode, size, time
+# and a checksum of its first 4096 bytes: a same-size rewrite past those bytes
+# inside one tick of a coarse clock is not seen. The effects vocabulary has no
 # class for a run's own temporary folder: a write to any scope but project,
 # worktree and task reads as write:outside, the elevated class. So the write is
 # said here and not declared.
