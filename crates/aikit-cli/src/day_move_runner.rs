@@ -1167,28 +1167,25 @@ impl Submitter<'_> {
     }
 
     /// Submit one proposal; a proposal that Central already holds under this key
-    /// (a retry, or a lost answer) is the same proposal, returned again.
+    /// (a retry, or a lost answer) is the same proposal, returned again. The
+    /// answer is the ref Central named for it, or none when Central took it and
+    /// named none: it is submitted all the same (be2j.a2 item 6).
     fn submit(
         &self,
         producer_key: &str,
         target: &Value,
         brief: &str,
-    ) -> std::result::Result<String, CentralError> {
+    ) -> std::result::Result<Option<String>, CentralError> {
         let input = self.input(producer_key, target, brief);
         let submitted = self.central.call("central.receiving.submit", &input);
         match submitted {
-            Ok(received) => Ok(received["return_ref"]
-                .as_str()
-                .unwrap_or_default()
-                .to_owned()),
+            Ok(received) => Ok(named_ref(&received)),
             Err(error) if !error.unavailable => {
                 match self.central.call(
                     "central.receiving.read",
                     &json!({"producer_key": producer_key}),
                 ) {
-                    Ok(held) if held["return_ref"].is_string() => {
-                        Ok(held["return_ref"].as_str().unwrap_or_default().to_owned())
-                    }
+                    Ok(held) if held["return_ref"].is_string() => Ok(named_ref(&held)),
                     _ => Err(error),
                 }
             }
@@ -1200,7 +1197,7 @@ impl Submitter<'_> {
         &self,
         document: &DayDocument,
         resolved: &Resolved,
-    ) -> std::result::Result<String, CentralError> {
+    ) -> std::result::Result<Option<String>, CentralError> {
         let key = proposal_key(&self.run_ref, &resolved.field_id, &resolved.html);
         let target = json!({
             "source_ref": document.source_ref,
@@ -1212,6 +1209,14 @@ impl Submitter<'_> {
         });
         self.submit(&key, &target, &resolved.brief)
     }
+}
+
+/// The ref Central named for a proposal it took, when it named one.
+fn named_ref(answer: &Value) -> Option<String> {
+    answer["return_ref"]
+        .as_str()
+        .filter(|named| !named.trim().is_empty())
+        .map(str::to_owned)
 }
 
 // ---- a run -------------------------------------------------------------------------
@@ -1261,12 +1266,37 @@ pub fn now_ms() -> i64 {
 struct Gave {
     summary: String,
     proposals: Vec<String>,
+    /// Proposals Central took and named no ref for: counted as proposed, and
+    /// not listed, since there is no ref to list (be2j.a2 item 6).
+    unnamed: usize,
     counts: Map<String, Value>,
 }
 
 impl Gave {
+    /// Every proposal Central took, named or not.
+    fn submitted(&self) -> usize {
+        self.proposals.len() + self.unnamed
+    }
+
+    /// One more proposal Central took, under the ref it named for it.
+    fn take(&mut self, named: Option<String>) {
+        match named {
+            Some(return_ref) => self.proposals.push(return_ref),
+            None => self.unnamed += 1,
+        }
+    }
+
     fn json(&self) -> Value {
-        json!({"summary": self.summary, "proposals": self.proposals, "counts": self.counts})
+        let mut summary = self.summary.clone();
+        if self.unnamed > 0 {
+            summary = format!(
+                "{} Central named no ref for {}, so this record does not list {}.",
+                summary.trim_end(),
+                count_words(self.unnamed, "proposal", "proposals"),
+                if self.unnamed == 1 { "it" } else { "them" }
+            );
+        }
+        json!({"summary": summary, "proposals": self.proposals, "counts": self.counts})
     }
 }
 
@@ -1378,8 +1408,8 @@ fn execute(
             continue;
         }
         match submitter.entry(document, item) {
-            Ok(return_ref) => {
-                gave.proposals.push(return_ref);
+            Ok(named) => {
+                gave.take(named);
                 let held = by_kind.get(item.kind).and_then(Value::as_u64).unwrap_or(0);
                 by_kind.insert(item.kind.to_owned(), json!(held + 1));
             }
@@ -1389,12 +1419,12 @@ fn execute(
                     position + 1,
                     resolved.len(),
                     item.field_id,
-                    count_words(gave.proposals.len(), "proposal", "proposals"),
+                    count_words(gave.submitted(), "proposal", "proposals"),
                 );
                 gave.summary = format!(
                     "{}: {} submitted before Central refused one.",
                     mv.label(),
-                    count_words(gave.proposals.len(), "proposal", "proposals")
+                    count_words(gave.submitted(), "proposal", "proposals")
                 );
                 gave.counts =
                     counts_of(&by_kind, &gave, unmapped.len(), duplicates, answer.learned);
@@ -1414,7 +1444,7 @@ fn execute(
         format!(
             "{}: {} submitted for {}, each waiting for you on its face.",
             mv.label(),
-            count_words(gave.proposals.len(), "proposal", "proposals"),
+            count_words(gave.submitted(), "proposal", "proposals"),
             count_words(entries, "entry", "entries"),
         )
     };
@@ -1449,7 +1479,7 @@ fn counts_of(
     learned: usize,
 ) -> Map<String, Value> {
     let mut counts = by_kind.clone();
-    counts.insert("proposed".into(), json!(gave.proposals.len()));
+    counts.insert("proposed".into(), json!(gave.submitted()));
     counts.insert("unmapped".into(), json!(unmapped));
     if duplicates > 0 {
         counts.insert("duplicates".into(), json!(duplicates));
@@ -1471,6 +1501,7 @@ fn close_step(
     let partial = |gave: &Gave, summary: String| Gave {
         summary,
         proposals: gave.proposals.clone(),
+        unnamed: gave.unnamed,
         counts: gave.counts.clone(),
     };
     let day = read_day(central, &day.day_ref)
@@ -1512,8 +1543,8 @@ fn close_step(
             "proposal": carry["proposal"]["proposal"],
         });
         match submitter.submit(&key, &target, "face 5's proposal for tomorrow's face 0") {
-            Ok(return_ref) => {
-                gave.proposals.push(return_ref);
+            Ok(named) => {
+                gave.take(named);
                 carried.push_str(" (submitted as a proposal for tomorrow's face 0)");
             }
             Err(error) => {
@@ -1534,7 +1565,7 @@ fn close_step(
         carried.push_str(&format!(" ({reason})"));
     }
     gave.counts
-        .insert("proposed".into(), json!(gave.proposals.len()));
+        .insert("proposed".into(), json!(gave.submitted()));
     let knowledge = if learned == 0 {
         "The agent named nothing the person learned.".to_owned()
     } else {
@@ -1551,31 +1582,82 @@ fn close_step(
     Ok(())
 }
 
+/// Central's code for a record that met a newer state than the one it was
+/// made against: the Day's moves changed under it, or the run has ended
+/// already. Both are `conflict` in `ctrl/src/continuous_work/day_moves.rs`,
+/// and `action_result` in `ctrl/src/continuous_work/mod.rs` gives every
+/// conflict this one code (the `AlreadyExists` arm, at Central 63712618), so
+/// the two are told apart by reading the run again, never by Central's words.
+const CENTRAL_CONFLICT: &str = "stale_basis_or_identity_conflict";
+
 /// A begun run is ended even when the runner stops without ending it (a panic,
-/// an early return): it ends `stalled` and says so. `finish` disarms it.
+/// an early return): it ends `stalled` and says so. A recorded end disarms it,
+/// and so does finding the run ended already.
 struct OpenRun<'a> {
     central: &'a dyn CentralPort,
+    mv: Move,
+    day_ref: String,
     run_ref: String,
     begun_at: i64,
     armed: bool,
+    /// The run's own end was tried: what is left to the guard is one try, as
+    /// `stalled`.
+    end_tried: bool,
 }
 
 impl OpenRun<'_> {
-    /// Record how the run ended, in plain text (`plain_record`). A record
-    /// Central still refuses ends the run refused, in Central's words, so a
-    /// begun run is never left unended over what it gave (be2j ruling 19).
+    /// Record how the run ended, in plain text (`plain_record`). What answers
+    /// a record Central refuses goes by the refusal's code, never by its words
+    /// (be2j.a2 item 3):
+    /// - Central could not be reached: nothing more is tried here, and the
+    ///   guard tries `stalled` once as the run is dropped;
+    /// - a conflict (`CENTRAL_CONFLICT`): the Day's moves are read again. A run
+    ///   that has ended already stays as it ended, and no further end is
+    ///   recorded. A run still running had the Day change under it, and the
+    ///   same end, with what the run gave, is recorded once more;
+    /// - any other refusal, and a conflict refused again: the run ends
+    ///   `refused`, in Central's words and without what it gave, so a begun
+    ///   run is never left unended over what it gave (be2j ruling 19).
     fn end(&mut self, state: &str, gave: Option<&Gave>, reason: Option<&str>) -> Result<Value> {
-        match self.record_end(state, gave, reason) {
-            Err(refusal) if !refusal.unavailable => {
-                let words = format!(
-                    "Central refused the record of how this run ended: {}",
-                    refusal.message
-                );
-                self.record_end("refused", None, Some(&words))
+        self.end_tried = true;
+        let mut refusal = match self.record_end(state, gave, reason) {
+            Ok(ended) => return Ok(ended),
+            Err(refusal) => refusal,
+        };
+        if !refusal.unavailable && refusal.code == CENTRAL_CONFLICT {
+            if let Some(run) = self.ended_already() {
+                self.armed = false;
+                return Ok(json!({"run": run}));
             }
-            ended => ended,
+            refusal = match self.record_end(state, gave, reason) {
+                Ok(ended) => return Ok(ended),
+                Err(refusal) => refusal,
+            };
         }
-        .map_err(central_failure)
+        if refusal.unavailable {
+            return Err(central_failure(refusal));
+        }
+        let words = format!(
+            "Central refused the record of how this run ended: {}",
+            refusal.message
+        );
+        self.record_end("refused", None, Some(&words))
+            .map_err(central_failure)
+    }
+
+    /// This run as Central holds it now, when it has ended already.
+    fn ended_already(&self) -> Option<Value> {
+        let moves = self
+            .central
+            .call("central.day.moves.read", &json!({"day_ref": self.day_ref}))
+            .ok()?;
+        moves["moves"][self.mv.name()]["runs"]
+            .as_array()?
+            .iter()
+            .find(|run| {
+                run["run_ref"].as_str() == Some(self.run_ref.as_str()) && !run["end"].is_null()
+            })
+            .cloned()
     }
 
     fn record_end(
@@ -1630,67 +1712,88 @@ fn invisible(c: char) -> bool {
     }
 }
 
-/// Text with each terminal escape sequence left out whole, as a harness's
-/// coloured failure reads as its words (be2j.c2, "For AIKit's half"): a CSI
-/// (ESC `[`, or U+009B) through its final byte, `@` to `~`, and an OSC (ESC
-/// `]`, or U+009D) through BEL or its terminator (ESC `\`, or U+009C). A
-/// sequence cut short ends at the first character it cannot hold, which
-/// stays; every other control is the caller's to clean.
+/// Where the escape that the ESC at `at` opens ends: the place to read on
+/// from. The rules are Central's own for a notification's words
+/// (`ctrl/src/notification.rs` `escape_end`), so both sides read one text
+/// alike, and where a sequence is not whole the words a person would read
+/// stay (be2j.a2 item 4):
+/// - a CSI in its strict form goes whole: ESC `[`, parameter characters
+///   (U+0030–003F), then intermediate ones (U+0020–002F), then one final
+///   character (U+0040–007E). Anything else after ESC `[` is not a CSI, and
+///   only the ESC and the `[` go;
+/// - a string sequence (OSC ESC `]`, DCS ESC `P`, APC ESC `_`, PM ESC `^`,
+///   SOS ESC `X`) goes whole when it is ended on its own line: by ESC `\`, by
+///   a BEL for an OSC, or by another ESC, which is then read as an opening of
+///   its own. Without an end only its two opening characters go;
+/// - ESC, one or more intermediate characters and one final character
+///   (U+0030–007E), a character set selection and the like, goes whole;
+/// - any other ESC goes alone.
+fn escape_end(chars: &[char], at: usize) -> usize {
+    let run = |from: usize, low: char, high: char| {
+        from + chars[from.min(chars.len())..]
+            .iter()
+            .take_while(|c| (low..=high).contains(*c))
+            .count()
+    };
+    let is =
+        |at: usize, low: char, high: char| chars.get(at).is_some_and(|c| (low..=high).contains(c));
+    match chars.get(at + 1) {
+        Some('[') => {
+            let end = run(run(at + 2, '\u{30}', '\u{3f}'), '\u{20}', '\u{2f}');
+            if is(end, '\u{40}', '\u{7e}') {
+                end + 1
+            } else {
+                at + 2
+            }
+        }
+        Some(&form @ (']' | 'P' | '_' | '^' | 'X')) => {
+            for (end, &c) in chars.iter().enumerate().skip(at + 2) {
+                match c {
+                    '\u{07}' if form == ']' => return end + 1,
+                    '\u{1b}' if chars.get(end + 1) == Some(&'\\') => return end + 2,
+                    '\u{1b}' => return end,
+                    '\n' | '\r' | '\u{2028}' | '\u{2029}' => break,
+                    _ => {}
+                }
+            }
+            at + 2
+        }
+        _ => {
+            let end = run(at + 1, '\u{20}', '\u{2f}');
+            if end > at + 1 && is(end, '\u{30}', '\u{7e}') {
+                end + 1
+            } else {
+                at + 1
+            }
+        }
+    }
+}
+
+/// Text with each terminal escape left out, as a harness's coloured failure
+/// reads as its words (`escape_end`). Only an ESC opens one: U+009B and U+009D
+/// alone open nothing, since text decoded from the wrong character set
+/// carries them, and they are controls for the caller to clean like any
+/// other.
 fn without_escapes(text: &str) -> String {
+    let chars: Vec<char> = text.chars().collect();
     let mut plain = String::with_capacity(text.len());
-    let mut chars = text.chars().peekable();
-    while let Some(c) = chars.next() {
-        let next = chars.peek().copied();
-        let opened = match (c, next) {
-            ('\u{1b}', Some('[' | ']')) => chars.next(),
-            ('\u{9b}', _) => Some('['),
-            ('\u{9d}', _) => Some(']'),
-            _ => None,
-        };
-        match opened {
-            Some('[') => {
-                while let Some(&c) = chars.peek() {
-                    if !(' '..='?').contains(&c) {
-                        if ('@'..='~').contains(&c) {
-                            chars.next();
-                        }
-                        break;
-                    }
-                    chars.next();
-                }
-            }
-            Some(_) => {
-                while let Some(&c) = chars.peek() {
-                    match c {
-                        '\u{7}' | '\u{9c}' => {
-                            chars.next();
-                            break;
-                        }
-                        '\u{1b}' => {
-                            chars.next();
-                            if chars.peek() == Some(&'\\') {
-                                chars.next();
-                            }
-                            break;
-                        }
-                        c if c.is_control() => break,
-                        _ => {
-                            chars.next();
-                        }
-                    }
-                }
-            }
-            None => plain.push(c),
+    let mut at = 0;
+    while at < chars.len() {
+        if chars[at] == '\u{1b}' {
+            at = escape_end(&chars, at);
+        } else {
+            plain.push(chars[at]);
+            at += 1;
         }
     }
     plain
 }
 
 /// Text in a block, as Central keeps a run's `reason` and `gave.summary`: its
-/// terminal escapes left out whole (`without_escapes`), its line breaks and
-/// tabs kept (a `\r` only before a `\n`), a line or paragraph separator a
-/// line break, every other control a space, and every other invisible
-/// character left out.
+/// terminal escapes left out (`without_escapes`), its line breaks and tabs
+/// kept (a `\r` only before a `\n`), a line or paragraph separator a line
+/// break, every other control a space, and every other invisible character
+/// left out.
 fn block_plain(text: &str) -> String {
     let text = without_escapes(text);
     let mut plain = String::with_capacity(text.len());
@@ -1708,70 +1811,115 @@ fn block_plain(text: &str) -> String {
     plain
 }
 
-/// Text on one line, as Central keeps a ref a run gave: its terminal escapes
-/// left out whole, every control and separator a space, every other
-/// invisible character left out, trimmed.
-fn line_plain(text: &str) -> String {
-    without_escapes(text)
-        .chars()
-        .filter_map(|c| match c {
-            '\u{2028}' | '\u{2029}' => Some(' '),
-            c if c.is_control() => Some(' '),
-            c if invisible(c) => None,
-            c => Some(c),
-        })
-        .collect::<String>()
-        .trim()
-        .to_owned()
+/// Central's bound on a run's `reason`, in bytes: `!reason.trim().is_empty()
+/// && reason.len() <= 4096` in `ctrl/src/continuous_work/day_moves.rs`, line
+/// 1127 at Central 63712618 (`move_record`, the end's reason).
+const CENTRAL_REASON_BYTES: usize = 4096;
+
+/// What ends a reason cut to Central's bound. It counts inside the bound.
+const CUT_SHORT: &str = " …";
+
+/// A reason within Central's bound. One over it keeps its first words: it is
+/// cut on a character boundary and ends `CUT_SHORT`, the whole inside the
+/// bound, so Central keeps the real reason and does not refuse the record
+/// over its length (be2j.a2 item 2).
+fn within_bound(reason: String) -> String {
+    if reason.len() <= CENTRAL_REASON_BYTES {
+        return reason;
+    }
+    let mut end = CENTRAL_REASON_BYTES - CUT_SHORT.len();
+    while !reason.is_char_boundary(end) {
+        end -= 1;
+    }
+    // A cut may fall after a `\r` whose `\n` is gone, and Central keeps no
+    // `\r` alone: the words end where they end.
+    format!("{}{CUT_SHORT}", reason[..end].trim_end())
 }
 
-/// The end of a run as it is recorded: its `reason` and `gave.summary` in a
-/// block (`block_plain`), and each of `gave.proposals`, `gave.writes` and
-/// `gave.points_at` on one line (`line_plain`). The agent's words reach the
-/// record here, and Central refuses a record that holds a character of the
-/// set, so they are cleaned before they are recorded. A reason left with
-/// nothing visible says so; a ref left with nothing is not recorded.
+/// Whether a ref a run gave is recorded, as it was given. One that is empty,
+/// or holds a control or an invisible character, is left out: cleaned, it
+/// would name something else (be2j.a2 item 5).
+fn ref_kept(given: &str) -> bool {
+    !given.trim().is_empty() && !given.chars().any(|c| c.is_control() || invisible(c))
+}
+
+/// The end of a run as it is recorded. The agent's words reach the record
+/// here, and Central refuses a record that holds a character of the set, so:
+/// - its `reason` and `gave.summary` are cleaned in a block (`block_plain`).
+///   A reason left with nothing visible says so, and one over Central's bound
+///   is cut to it (`within_bound`);
+/// - each ref in `gave.proposals` and `gave.writes`, and `gave.points_at`, is
+///   recorded as given or left out (`ref_kept`; `points_at` holds no white
+///   space either, as Central keeps it), never cleaned into another ref. The
+///   summary then says how many were left out.
 fn plain_record(input: &mut Value) {
     if let Some(reason) = input.get("reason").and_then(Value::as_str) {
         let plain = block_plain(reason);
         input["reason"] = json!(if plain.trim().is_empty() {
             "The run's reason held nothing visible.".to_owned()
         } else {
-            plain
+            within_bound(plain)
         });
     }
     let Some(gave) = input.get_mut("gave").and_then(Value::as_object_mut) else {
         return;
     };
-    if let Some(summary) = gave.get("summary").and_then(Value::as_str) {
-        let plain = block_plain(summary);
-        gave.insert("summary".into(), json!(plain));
-    }
+    let mut left_out = 0;
     for key in ["proposals", "writes"] {
         if let Some(rows) = gave.get(key).and_then(Value::as_array) {
-            let plain: Vec<String> = rows
+            let kept: Vec<&str> = rows
                 .iter()
                 .filter_map(Value::as_str)
-                .map(line_plain)
-                .filter(|row| !row.is_empty())
+                .filter(|row| ref_kept(row))
                 .collect();
-            gave.insert(key.into(), json!(plain));
+            left_out += rows.len() - kept.len();
+            let kept = json!(kept);
+            gave.insert(key.into(), kept);
         }
     }
-    if let Some(points_at) = gave.get("points_at").and_then(Value::as_str) {
-        let plain = line_plain(points_at);
-        gave.insert("points_at".into(), json!(plain));
+    if let Some(points_at) = gave.get("points_at").filter(|given| !given.is_null()) {
+        let kept = points_at
+            .as_str()
+            .is_some_and(|given| ref_kept(given) && !given.chars().any(char::is_whitespace));
+        if !kept {
+            gave.remove("points_at");
+            left_out += 1;
+        }
     }
+    let summary = gave.get("summary").and_then(Value::as_str).map(block_plain);
+    if summary.is_none() && left_out == 0 {
+        return;
+    }
+    let mut summary = summary.unwrap_or_default();
+    if left_out > 0 {
+        let said = format!(
+            "{} left out of this record: Central keeps no ref that is empty or holds a character that does not show.",
+            if left_out == 1 {
+                "1 ref was".to_owned()
+            } else {
+                format!("{left_out} refs were")
+            }
+        );
+        summary = if summary.trim().is_empty() {
+            said
+        } else {
+            format!("{} {said}", summary.trim_end())
+        };
+    }
+    gave.insert("summary".into(), json!(summary));
 }
 
 impl Drop for OpenRun<'_> {
     fn drop(&mut self) {
-        if self.armed {
-            let _ = self.end(
-                "stalled",
-                None,
-                Some("The runner stopped before it recorded how this run ended."),
-            );
+        const WORDS: &str = "The runner stopped before it recorded how this run ended.";
+        if !self.armed {
+            return;
+        }
+        if self.end_tried {
+            // The run's own end was refused or never answered: one try, no more.
+            let _ = self.record_end("stalled", None, Some(WORDS));
+        } else {
+            let _ = self.end("stalled", None, Some(WORDS));
         }
     }
 }
@@ -1795,8 +1943,13 @@ fn report(request: &RunRequest, outcome: &str, run: &Value, created: bool) -> Va
     })
 }
 
-/// Run one move once. An `Err` means the run could not be recorded at all;
-/// every run that was begun comes back as a report with its recorded end.
+/// Run one move once. An `Err` before the run begins means nothing was
+/// recorded. An `Err` after it means the end the run gave was not recorded:
+/// Central could not be reached, or refused the `refused` end as well. The
+/// guard's `stalled` end, tried once as the run is dropped, may still have
+/// been recorded, so the run may read `stalled` in Central. Every other begun
+/// run comes back as a report with its recorded end, which is the end another
+/// gave it when the run was ended elsewhere first.
 pub fn run_move(
     central: &dyn CentralPort,
     agent: &dyn DayAgent,
@@ -1856,9 +2009,12 @@ pub fn run_move(
     }
     let mut open = OpenRun {
         central,
+        mv,
+        day_ref: day_ref.clone(),
         run_ref: run_ref.clone(),
         begun_at: run["begun_at_unix_ms"].as_i64().unwrap_or(begun_at),
         armed: true,
+        end_tried: false,
     };
     let context = RunContext {
         mv,
@@ -2195,37 +2351,161 @@ mod tests {
     /// The words Central gives when it refuses a run's end (`day_moves.rs` move_record).
     const CENTRAL_WORDS: &str = "gave.summary holds no control character but line breaks and tabs (a \\r only before a \\n), and no invisible one (a line or paragraph separator, a format character or a blank filler)";
 
-    /// Central as the runner meets it, kept in memory: a Day whose document maps
-    /// face 1's must, and every end the runner records, kept as it was given.
-    /// With `refuse_first_end` it refuses the first end in Central's words.
+    /// Central's refusal codes as the runner meets them (`action_result` in
+    /// `ctrl/src/continuous_work/mod.rs` at Central 63712618): a request it
+    /// finds invalid, and a record that met a newer state than it was made
+    /// against. Written out here, so a change of the runner's own constant is
+    /// a change these tests see.
+    const INVALID: &str = "invalid_native_source_or_request";
+    const CONFLICT: &str = "stale_basis_or_identity_conflict";
+
+    /// What the test's Central answers one end with, in place of checking it.
+    #[derive(Clone)]
+    enum Answer {
+        /// Refused as invalid, in these words.
+        Invalid(String),
+        /// Refused as a conflict.
+        Conflict,
+        /// Central could not be reached.
+        Unavailable,
+    }
+
+    /// Central as the runner meets it, kept in memory: a Day whose document
+    /// maps face 1's must, and every end the runner records, kept as it was
+    /// given. An end is answered from `script`, then by `rest`; with neither
+    /// it is checked as Central checks it (`central_end`) and recorded or
+    /// refused in Central's words. The Day's moves always hold another run of
+    /// the move that has ended, and this run still running unless
+    /// `ended_elsewhere`.
     #[derive(Default)]
     struct Recording {
         ends: std::sync::Mutex<Vec<Value>>,
-        refuse_first_end: std::sync::atomic::AtomicBool,
+        script: std::sync::Mutex<std::collections::VecDeque<Answer>>,
+        rest: Option<Answer>,
+        /// The run was stopped from elsewhere: every end is a conflict, and the
+        /// Day's moves show the run ended.
+        ended_elsewhere: bool,
+        moves_reads: std::sync::atomic::AtomicUsize,
+        /// What a submit is answered with, by its number; a numbered ref when none.
+        names: Option<fn(usize) -> Value>,
+        /// Central holds the proposal already: a submit is refused, and the
+        /// read of what it holds answers this.
+        held: Option<Value>,
+        submitted: std::sync::atomic::AtomicUsize,
+    }
+
+    impl Recording {
+        fn scripted(script: &[Answer]) -> Recording {
+            Recording {
+                script: std::sync::Mutex::new(script.iter().cloned().collect()),
+                ..Recording::default()
+            }
+        }
+
+        /// Each end the runner sent, in order: its state, and whether it carried
+        /// what the run gave.
+        fn states(&self) -> Vec<String> {
+            self.ends
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|end| {
+                    format!(
+                        "{}{}",
+                        end["state"].as_str().unwrap_or("?"),
+                        if end.get("gave").is_some() {
+                            "+gave"
+                        } else {
+                            ""
+                        }
+                    )
+                })
+                .collect()
+        }
+
+        fn moves_reads(&self) -> usize {
+            self.moves_reads.load(std::sync::atomic::Ordering::SeqCst)
+        }
+
+        fn submitted(&self) -> usize {
+            self.submitted.load(std::sync::atomic::Ordering::SeqCst)
+        }
     }
 
     impl CentralPort for Recording {
         fn call(&self, action: &str, input: &Value) -> std::result::Result<Value, CentralError> {
+            let refuse = |code: &str,
+                          message: &str,
+                          unavailable: bool|
+             -> std::result::Result<Value, CentralError> {
+                Err(CentralError {
+                    code: code.into(),
+                    message: message.into(),
+                    unavailable,
+                })
+            };
             match (action, input["event"].as_str()) {
-                ("central.day.moves.read", _) => Ok(json!({"day_ref": "day:2026-11-10",
-                    "settings": {"scope_ref": "control:root"}})),
+                ("central.day.moves.read", _) => {
+                    self.moves_reads
+                        .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    let ours = if self.ended_elsewhere {
+                        json!({"run_ref": "run:1", "day_ref": "day:2026-11-10", "state": "stopped",
+                            "agent_writes": "propose",
+                            "end": {"state": "stopped", "reason": "Stopped from the Day's page."}})
+                    } else {
+                        json!({"run_ref": "run:1", "day_ref": "day:2026-11-10", "state": "running",
+                            "agent_writes": "propose", "end": null})
+                    };
+                    Ok(json!({"day_ref": "day:2026-11-10",
+                        "settings": {"scope_ref": "control:root"},
+                        "moves": {"tasks": {"runs": [
+                            {"run_ref": "run:0", "day_ref": "day:2026-11-10", "state": "done",
+                                "agent_writes": "propose",
+                                "end": {"state": "done", "gave": {"summary": "Tasks: an earlier run."}}},
+                            ours]}}}))
+                }
                 ("central.day.move.record", Some("begin")) => Ok(json!({"created": true,
                     "run": {"run_ref": "run:1", "state": "running", "prompt": "Plan the day.",
                         "agent_writes": "propose", "begun_at_unix_ms": 1}})),
                 ("central.day.move.record", Some("end")) => {
                     self.ends.lock().unwrap().push(input.clone());
-                    if self
-                        .refuse_first_end
-                        .swap(false, std::sync::atomic::Ordering::SeqCst)
-                    {
-                        return Err(CentralError {
-                            code: "central.invalid_input".into(),
-                            message: CENTRAL_WORDS.into(),
-                            unavailable: false,
-                        });
+                    // Central's words for a run that has ended are the words of every
+                    // conflict here, also for a run that has not ended: what the
+                    // runner does next goes by the run as it reads, never by words.
+                    let ended_already = "run:1 has ended already";
+                    if self.ended_elsewhere {
+                        return refuse(CONFLICT, ended_already, false);
                     }
-                    Ok(json!({"run": {"run_ref": "run:1", "state": input["state"],
-                        "end": {"reason": input["reason"], "gave": input["gave"]}}}))
+                    let scripted = self.script.lock().unwrap().pop_front();
+                    match scripted.or_else(|| self.rest.clone()) {
+                        Some(Answer::Invalid(words)) => refuse(INVALID, &words, false),
+                        Some(Answer::Conflict) => refuse(CONFLICT, ended_already, false),
+                        Some(Answer::Unavailable) => {
+                            refuse("day_move.central_unavailable", "ctrl did not answer", true)
+                        }
+                        None => match central_end(input, "tasks", "propose") {
+                            Ok(()) => {
+                                Ok(json!({"run": {"run_ref": "run:1", "state": input["state"],
+                                "end": {"reason": input["reason"], "gave": input["gave"]}}}))
+                            }
+                            Err(words) => refuse(INVALID, &words, false),
+                        },
+                    }
+                }
+                ("central.receiving.submit", _) => {
+                    let number = self
+                        .submitted
+                        .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    if self.held.is_some() {
+                        return refuse(CONFLICT, "this proposal is held already", false);
+                    }
+                    Ok(match self.names {
+                        Some(names) => names(number),
+                        None => json!({"return_ref": format!("central:return:{number}")}),
+                    })
+                }
+                ("central.receiving.read", _) if self.held.is_some() => {
+                    Ok(self.held.clone().unwrap_or_default())
                 }
                 ("central.day.read", _) => Ok(json!({"day_ref": "day:2026-11-10",
                     "temporal": {"civil_date": "2026-11-10", "lifecycle": "open"},
@@ -2234,11 +2514,11 @@ mod tests {
                         "revision": {"revision": "d1"},
                         "document": {"fields": [{"id": "p1_must", "template_pointer": "/fields/p1_must"}],
                             "template_payload": {"fields": {}, "body": {}}, "contributions": []}}})),
-                _ => Err(CentralError {
-                    code: "test.unexpected".into(),
-                    message: format!("the test's Central does not answer {action}"),
-                    unavailable: true,
-                }),
+                _ => refuse(
+                    "test.unexpected",
+                    &format!("the test's Central does not answer {action}"),
+                    true,
+                ),
             }
         }
     }
@@ -2258,6 +2538,18 @@ mod tests {
         }
     }
 
+    /// The Day's agent, its harness failing in these words.
+    fn fails(words: &str) -> Says {
+        Says(Err(TurnFailure::Failed(words.to_owned())))
+    }
+
+    /// The Day's agent, answering Tasks with these musts.
+    fn proposes(musts: &[&str]) -> Says {
+        Says(Ok(
+            json!({"must": musts, "should": [], "could": []}).to_string()
+        ))
+    }
+
     fn press_tasks() -> RunRequest {
         RunRequest {
             mv: Move::Tasks,
@@ -2267,13 +2559,14 @@ mod tests {
         }
     }
 
+    /// The guard's words for a run the runner left unended.
+    const LEFT_UNENDED: &str = "The runner stopped before it recorded how this run ended.";
+
     #[test]
     fn an_agents_words_holding_an_override_are_recorded_cleaned() {
         // The agent's own words, as its harness gave them back, stall the run.
         let central = Recording::default();
-        let agent = Says(Err(TurnFailure::Failed(
-            "the agent said: Ro\u{202E}sa\u{200B}rium is\u{0007}late\u{2028}again".into(),
-        )));
+        let agent = fails("the agent said: Ro\u{202E}sa\u{200B}rium is\u{0007}late\u{2028}again");
         let report = run_move(&central, &agent, &press_tasks()).unwrap();
         assert_eq!(report["state"], "stalled", "{report}");
         let plain = "the agent said: Rosarium is late\nagain";
@@ -2292,31 +2585,564 @@ mod tests {
         );
     }
 
+    // ---- be2j.a2 item 3: what answers a refused end goes by the refusal's code ----
+
     #[test]
     fn a_record_central_refuses_ends_the_run_refused_in_centrals_words() {
-        let central = Recording {
-            refuse_first_end: true.into(),
-            ..Recording::default()
-        };
-        let agent = Says(Ok(r#"{"must":[],"should":[],"could":[]}"#.into()));
-        let report = run_move(&central, &agent, &press_tasks()).unwrap();
+        let central = Recording::scripted(&[Answer::Invalid(CENTRAL_WORDS.into())]);
+        let report = run_move(&central, &proposes(&[]), &press_tasks()).unwrap();
         let words = format!("Central refused the record of how this run ended: {CENTRAL_WORDS}");
         assert_eq!(report["state"], "refused", "{report}");
         assert_eq!(report["reason"], words.as_str(), "{report}");
-        let ends = central.ends.lock().unwrap();
         assert_eq!(
-            ends.len(),
-            2,
-            "the refused end, then the run ended refused: {ends:?}"
+            central.states(),
+            ["done+gave", "refused"],
+            "the refused end, then the run ended refused, without what Central refused"
         );
-        assert_eq!(ends[0]["state"], "done");
-        assert_eq!(ends[1]["state"], "refused");
-        assert_eq!(ends[1]["reason"], words.as_str());
-        assert!(
-            ends[1].get("gave").is_none(),
-            "what Central refused is not given again"
+        assert_eq!(central.ends.lock().unwrap()[1]["reason"], words.as_str());
+        assert_eq!(
+            central.moves_reads(),
+            1,
+            "a record refused for what it holds is not read again"
         );
     }
+
+    #[test]
+    fn a_conflict_while_the_run_still_runs_records_the_same_end_once_more() {
+        let central = Recording::scripted(&[Answer::Conflict]);
+        let agent = proposes(&["ring the printer"]);
+        let report = run_move(&central, &agent, &press_tasks()).unwrap();
+        assert_eq!(report["state"], "done", "{report}");
+        assert_eq!(report["proposals"], json!(["central:return:0"]), "{report}");
+        assert_eq!(
+            central.states(),
+            ["done+gave", "done+gave"],
+            "the Day changed under the first end, and the same end is recorded once more"
+        );
+        let ends = central.ends.lock().unwrap();
+        assert_eq!(
+            ends[0]["gave"], ends[1]["gave"],
+            "what the run gave is given again, whole"
+        );
+        assert_eq!(ends[1]["gave"]["proposals"], json!(["central:return:0"]));
+        assert!(ends[1].get("reason").is_none(), "{:?}", ends[1]);
+        assert_eq!(
+            central.moves_reads(),
+            2,
+            "read once to begin, and once to tell a changed Day from an ended run"
+        );
+        assert_eq!(central.submitted(), 1, "nothing is proposed again");
+    }
+
+    #[test]
+    fn a_conflict_refused_again_ends_the_run_refused() {
+        let central = Recording::scripted(&[Answer::Conflict, Answer::Conflict]);
+        let agent = proposes(&["ring the printer"]);
+        let report = run_move(&central, &agent, &press_tasks()).unwrap();
+        assert_eq!(report["state"], "refused", "{report}");
+        assert_eq!(
+            report["reason"],
+            "Central refused the record of how this run ended: run:1 has ended already",
+            "{report}"
+        );
+        assert_eq!(central.states(), ["done+gave", "done+gave", "refused"]);
+        assert_eq!(
+            central.moves_reads(),
+            2,
+            "the run is read once, not at each refusal"
+        );
+        // A conflict every time, the run still running: the same end once more,
+        // the refused end, and the guard's one try. Four, and no more.
+        let central = Recording {
+            rest: Some(Answer::Conflict),
+            ..Recording::default()
+        };
+        let error = run_move(&central, &agent, &press_tasks()).unwrap_err();
+        assert_eq!(error.code(), "day_move.central_refused");
+        assert_eq!(
+            central.states(),
+            ["done+gave", "done+gave", "refused", "stalled"]
+        );
+        assert_eq!(central.moves_reads(), 2);
+    }
+
+    #[test]
+    fn a_run_ended_elsewhere_stays_as_it_ended_and_no_further_end_is_sent() {
+        let central = Recording {
+            ended_elsewhere: true,
+            ..Recording::default()
+        };
+        let agent = proposes(&["ring the printer"]);
+        let report = run_move(&central, &agent, &press_tasks()).unwrap();
+        // The report is the run as it ended: this run's own end, never the other
+        // run of the move that the Day's moves also hold ended (`run:0`, done).
+        assert_eq!(report["run_ref"], "run:1", "{report}");
+        assert_eq!(report["state"], "stopped", "{report}");
+        assert_eq!(report["reason"], "Stopped from the Day's page.", "{report}");
+        assert_eq!(
+            central.states(),
+            ["done+gave"],
+            "one end, refused; the run is ended, so no other is sent, by the runner or by its guard"
+        );
+        assert_eq!(central.moves_reads(), 2);
+    }
+
+    #[test]
+    fn central_out_of_reach_at_the_end_is_an_error_and_the_guard_tries_stalled_once() {
+        // Out of reach once, then back: the run's end is not tried again, and the
+        // guard's one try records the run stalled.
+        let central = Recording::scripted(&[Answer::Unavailable]);
+        let error = run_move(&central, &proposes(&[]), &press_tasks()).unwrap_err();
+        assert_eq!(error.code(), "day_move.central_unavailable");
+        assert_eq!(central.states(), ["done+gave", "stalled"]);
+        assert_eq!(central.ends.lock().unwrap()[1]["reason"], LEFT_UNENDED);
+        assert_eq!(central.moves_reads(), 1);
+        // Out of reach for good: the same two tries, and no more.
+        let central = Recording {
+            rest: Some(Answer::Unavailable),
+            ..Recording::default()
+        };
+        let error = run_move(&central, &proposes(&[]), &press_tasks()).unwrap_err();
+        assert_eq!(error.code(), "day_move.central_unavailable");
+        assert_eq!(central.states(), ["done+gave", "stalled"]);
+    }
+
+    #[test]
+    fn a_conflict_and_then_central_out_of_reach_leaves_the_guard_one_try() {
+        let central = Recording::scripted(&[Answer::Conflict, Answer::Unavailable]);
+        let error = run_move(&central, &proposes(&[]), &press_tasks()).unwrap_err();
+        assert_eq!(error.code(), "day_move.central_unavailable");
+        assert_eq!(
+            central.states(),
+            ["done+gave", "done+gave", "stalled"],
+            "the same end once more, out of reach; then only the guard's stalled, never a refused end"
+        );
+        assert_eq!(central.ends.lock().unwrap()[2]["reason"], LEFT_UNENDED);
+    }
+
+    #[test]
+    fn a_record_central_refuses_every_time_is_tried_three_times_and_no_more() {
+        let central = Recording {
+            rest: Some(Answer::Invalid("Central keeps no such record".into())),
+            ..Recording::default()
+        };
+        let error = run_move(&central, &proposes(&[]), &press_tasks()).unwrap_err();
+        assert_eq!(error.code(), "day_move.central_refused");
+        assert_eq!(
+            central.states(),
+            ["done+gave", "refused", "stalled"],
+            "the run's end, the refused end, and the guard's one try"
+        );
+        assert_eq!(central.moves_reads(), 1);
+    }
+
+    /// The Day's agent, its turn panicking.
+    struct Panics;
+
+    impl DayAgent for Panics {
+        fn agent_ref(&self, _: &str) -> String {
+            "agent:the-day:test".into()
+        }
+        fn session_ref(&self, _: &str) -> Option<String> {
+            None
+        }
+        fn turn(&self, _: &str, _: &str) -> std::result::Result<String, TurnFailure> {
+            panic!("the agent's turn panicked (this test's own panic)")
+        }
+    }
+
+    #[test]
+    fn a_run_the_runner_left_unended_is_ended_stalled_by_its_guard_through_a_conflict() {
+        // No end of the run's own was tried, so the guard's end is answered as
+        // any end is: the Day changed under it, and it is recorded once more.
+        let central = Recording::scripted(&[Answer::Conflict]);
+        let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _ = run_move(&central, &Panics, &press_tasks());
+        }));
+        assert!(panicked.is_err());
+        assert_eq!(central.states(), ["stalled", "stalled"]);
+        let ends = central.ends.lock().unwrap();
+        assert_eq!(ends[0]["reason"], LEFT_UNENDED);
+        assert_eq!(ends[1]["reason"], LEFT_UNENDED);
+        assert_eq!(central.moves_reads(), 2);
+    }
+
+    // ---- be2j.a2 item 2: a reason is cut to Central's bound ----
+
+    #[test]
+    fn a_reason_over_centrals_bound_is_cut_to_it_and_the_run_ends_as_the_harness_said() {
+        const HEAD: &str = "The harness failed: ";
+        let ends_as = |given: String| {
+            let central = Recording::default();
+            let report = run_move(&central, &fails(&given), &press_tasks()).unwrap();
+            assert_eq!(report["state"], "stalled", "{} bytes", given.len());
+            assert_eq!(central.states(), ["stalled"], "{} bytes", given.len());
+            report["reason"].as_str().unwrap().to_owned()
+        };
+        // 4097 bytes, one over the bound: the first words stay, and the mark that
+        // it was cut counts inside the bound.
+        let given = format!("{HEAD}{}", "x".repeat(4077));
+        assert_eq!(given.len(), 4097);
+        let kept = ends_as(given);
+        assert_eq!(kept, format!("{HEAD}{} …", "x".repeat(4072)));
+        assert_eq!(kept.len(), 4096);
+        // 20000 bytes of a three-byte character: cut on a character boundary.
+        let given = format!("{HEAD}{}", "€".repeat(6660));
+        assert_eq!(given.len(), 20000);
+        let kept = ends_as(given);
+        assert_eq!(kept, format!("{HEAD}{} …", "€".repeat(1357)));
+        assert_eq!(kept.len(), 4095);
+        // Exactly the bound: kept whole.
+        let given = format!("{HEAD}{}", "x".repeat(4076));
+        assert_eq!(given.len(), 4096);
+        assert_eq!(ends_as(given.clone()), given);
+        // A cut that falls inside a line break leaves no `\r` alone, which
+        // Central would refuse.
+        let given = format!("{}\r\n{}", "a".repeat(4091), "b".repeat(100));
+        assert_eq!(ends_as(given), format!("{} …", "a".repeat(4091)));
+        // The bound is on the cleaned reason: one that is within it once cleaned is not cut.
+        let given = format!("{HEAD}{}{}", "\u{200B}".repeat(100), "x".repeat(4076));
+        assert_eq!(ends_as(given), format!("{HEAD}{}", "x".repeat(4076)));
+    }
+
+    #[test]
+    fn centrals_words_over_the_bound_are_cut_in_the_refused_end_too() {
+        let central = Recording::scripted(&[Answer::Invalid("m".repeat(4100))]);
+        let report = run_move(&central, &proposes(&[]), &press_tasks()).unwrap();
+        assert_eq!(report["state"], "refused", "{report}");
+        assert_eq!(central.states(), ["done+gave", "refused"]);
+        const HEAD: &str = "Central refused the record of how this run ended: ";
+        let kept = report["reason"].as_str().unwrap();
+        assert_eq!(kept.len(), 4096);
+        assert_eq!(
+            kept,
+            format!("{HEAD}{} …", "m".repeat(4096 - HEAD.len() - " …".len()))
+        );
+    }
+
+    // ---- be2j.a2 item 4: taking an escape out keeps the words ----
+
+    #[test]
+    fn an_escape_that_is_not_whole_loses_its_opening_and_keeps_its_words() {
+        // The review's inputs (F6), each with what a person then reads.
+        for (given, read) in [
+            ("\u{1b}[ 12 tests failed", " 12 tests failed"),
+            (
+                "cost \u{9b} 12 345 euros then more",
+                "cost   12 345 euros then more",
+            ),
+            (
+                "note \u{9d} everything after this is gone",
+                "note   everything after this is gone",
+            ),
+            (
+                "\u{1b}]0;the harness died with exit 1",
+                "0;the harness died with exit 1",
+            ),
+            ("boom \u{1b}]0;t\u{1b}[31mred\u{1b}[0m", "boom red"),
+            ("text \u{1b}(B more", "text  more"),
+            // A CSI goes whole in its strict form only: parameter characters
+            // (U+0030–003F), then intermediate ones (U+0020–002F), then one
+            // final character (U+0040–007E).
+            ("a\u{1b}[?25lb\u{1b}[0 qc", "abc"),
+            ("a\u{1b}[0:1;2<=>?mb", "ab"),
+            ("a\u{1b}[ !\"#$%&'()*+,-./mb", "ab"),
+            ("a\u{1b}[@b\u{1b}[~c", "abc"),
+            ("a\u{1b}[1 2mb", "a1 2mb"),
+            ("a\u{1b}[ 1mb", "a 1mb"),
+            ("a\u{1b}[/\u{7f}b", "a/ b"),
+            ("a\u{1b}[1?hb", "ab"),
+            ("a\u{1b}[31", "a31"),
+            ("a\u{1b}[", "a"),
+            // The one-character openings U+009B and U+009D open nothing, whatever
+            // follows them, and U+009C ends nothing: each is a control like any
+            // other, and the words after it stay.
+            ("a\u{9b}[31mred", "a [31mred"),
+            ("a\u{9d}]0;t\u{7}b", "a ]0;t b"),
+            ("x\u{1b}]0;t\u{9c}y", "x0;t y"),
+            // A string sequence goes whole when it is ended on its own line: by
+            // ESC `\`, by a BEL for an OSC only, or by another ESC, read as an
+            // opening of its own.
+            ("\u{1b}]0;window title\u{07}Done", "Done"),
+            (
+                "a\u{1b}]8;;https://example.test\u{1b}\\link\u{9c}b",
+                "alink b",
+            ),
+            (
+                "\u{1b}Pq#0\u{1b}\\Done, \u{1b}Pnot\u{07} ended",
+                "Done, not  ended",
+            ),
+            (
+                "a\u{1b}_hidden\u{1b}\\b\u{1b}^x\u{1b}\\c\u{1b}Xy\u{1b}\\d",
+                "abcd",
+            ),
+            ("a\u{1b}]0;t\u{1b}(Bb", "ab"),
+            ("a\u{1b}]0;t\u{1b}", "a"),
+            // Without an end on its line only its two opening characters go; an
+            // end on a later line is not its end.
+            (
+                "a\u{1b}]0;first line\nsecond\u{07} line",
+                "a0;first line\nsecond  line",
+            ),
+            ("\u{1b}]0;a\r\nb\u{07}c", "0;a\r\nb c"),
+            (
+                "x\u{1b}]0;a\u{2028}b\u{07}c\u{1b}]0;d\u{2029}e\u{07}f",
+                "x0;a\nb c0;d\ne f",
+            ),
+            ("a\u{1b}]", "a"),
+            // ESC, one or more intermediate characters and one final character
+            // (U+0030–007E) goes whole; any other ESC goes alone.
+            ("\u{1b}(0Line", "Line"),
+            ("p\u{1b}#8q\u{1b} Fr\u{1b} !~s", "pqrs"),
+            ("f\u{1b}g, h\u{1b}7i", "fg, h7i"),
+            ("a\u{1b}(\u{7f}b", "a( b"),
+            ("a\u{1b}(/bc", "ac"),
+            ("a\u{1b}(/", "a(/"),
+            ("a\u{1b}( \u{e9}b", "a( \u{e9}b"),
+            ("a\u{1b}\u{1b}[1mb", "ab"),
+            ("a\u{1b}", "a"),
+        ] {
+            assert_eq!(block_plain(given), read, "{given:?}");
+        }
+        // The run ends with the harness's words, and the sentence for a reason
+        // with nothing visible in it is for those alone.
+        let reason = |given: &str| {
+            let central = Recording::default();
+            let report = run_move(&central, &fails(given), &press_tasks()).unwrap();
+            assert_eq!(central.states(), ["stalled"], "{given:?}");
+            report["reason"].as_str().unwrap().to_owned()
+        };
+        assert_eq!(
+            reason("\u{1b}]0;the harness died with exit 1"),
+            "0;the harness died with exit 1"
+        );
+        assert_eq!(reason("\u{1b}[ 12 tests failed"), " 12 tests failed");
+        assert_eq!(reason("boom\r"), "boom ");
+        const NOTHING_VISIBLE: &str = "The run's reason held nothing visible.";
+        assert_eq!(reason(" \u{7} "), NOTHING_VISIBLE);
+        assert_eq!(
+            reason("\u{1b}[31m\u{1b}]0;title\u{7}\u{200B}"),
+            NOTHING_VISIBLE
+        );
+        assert_eq!(reason(""), NOTHING_VISIBLE);
+        assert_eq!(reason("\t\n"), NOTHING_VISIBLE);
+    }
+
+    // ---- be2j.a2 item 5: a ref is recorded as given or left out, never changed into another ----
+
+    /// What a record says when it leaves refs out.
+    fn left_out(count: usize) -> String {
+        format!(
+            "{} left out of this record: Central keeps no ref that is empty or holds a character that does not show.",
+            if count == 1 {
+                "1 ref was".to_owned()
+            } else {
+                format!("{count} refs were")
+            }
+        )
+    }
+
+    #[test]
+    fn a_ref_central_would_not_keep_is_left_out_and_the_summary_says_how_many() {
+        // "return:" with a zero-width space before the 1 is not "return:1".
+        let mut input = json!({"event": "end", "state": "done",
+            "gave": {"summary": "Tasks: 2 proposals submitted.", "counts": {"proposed": 2},
+                "proposals": ["return:\u{200B}1", "return:2", "\u{200B}", "", " ", 7, null, " return:3 ", "return:se\u{f1}al"],
+                "writes": ["write:\u{202E}2", "write:\u{1b}[2Kx", "write:a\nb", "write:a\tb", "write:3"]}});
+        plain_record(&mut input);
+        assert_eq!(
+            input["gave"]["proposals"],
+            json!(["return:2", " return:3 ", "return:se\u{f1}al"]),
+            "a ref is recorded as it was given, or not at all"
+        );
+        assert_eq!(input["gave"]["writes"], json!(["write:3"]));
+        assert_eq!(
+            input["gave"]["summary"],
+            format!("Tasks: 2 proposals submitted. {}", left_out(10)).as_str()
+        );
+        assert_eq!(
+            input["gave"]["counts"],
+            json!({"proposed": 2}),
+            "the counts are the run's own: no key is added"
+        );
+        assert!(input["gave"].get("points_at").is_none());
+        // The review's four inputs (F2), and what else Central keeps no
+        // `points_at` of: white space of any kind, and what is not text.
+        for given in [
+            json!("skill:\u{7}x"),
+            json!("skill:\u{2028}x"),
+            json!("skill:\tx"),
+            json!("\u{200B}"),
+            json!("skill:\u{2060}x"),
+            json!("skill:\u{1b}[1mx"),
+            json!("skill: x"),
+            json!("skill:\u{a0}x"),
+            json!(" skill:x"),
+            json!(""),
+            json!(7),
+            json!(["skill:x"]),
+        ] {
+            let mut input = json!({"event": "end", "state": "done",
+                "gave": {"summary": "Patterns: 1 proposal submitted.\n", "points_at": given}});
+            plain_record(&mut input);
+            assert!(
+                input["gave"].get("points_at").is_none(),
+                "{given:?} is left out, not cleaned into another ref: {input}"
+            );
+            assert_eq!(
+                input["gave"]["summary"],
+                format!("Patterns: 1 proposal submitted. {}", left_out(1)).as_str(),
+                "{given:?}"
+            );
+        }
+        // One Central keeps stays as it was given, and nothing is said.
+        for given in [
+            json!("skill:x"),
+            json!("skill:se\u{f1}al/\u{4e00}"),
+            Value::Null,
+        ] {
+            let mut input = json!({"event": "end", "state": "done",
+                "gave": {"summary": "Patterns: 1 proposal submitted.", "points_at": given,
+                    "proposals": ["return:1"], "writes": []}});
+            let before = input.clone();
+            plain_record(&mut input);
+            assert_eq!(input, before, "{given:?}");
+        }
+        // With no summary of its own to follow, the sentence stands alone.
+        for summary in [json!("\u{200B} "), Value::Null] {
+            let mut input = json!({"event": "end", "state": "stalled", "reason": "r",
+                "gave": {"summary": summary, "proposals": ["\u{200B}"]}});
+            plain_record(&mut input);
+            assert_eq!(input["gave"]["summary"], left_out(1).as_str());
+            assert_eq!(input["gave"]["proposals"], json!([]));
+        }
+        // A record with no summary and nothing left out gains none.
+        let mut input = json!({"event": "end", "state": "stalled", "reason": "r",
+            "gave": {"proposals": ["return:1"]}});
+        plain_record(&mut input);
+        assert!(input["gave"].get("summary").is_none(), "{input}");
+    }
+
+    #[test]
+    fn a_ref_central_named_with_an_invisible_character_is_left_out_of_the_runs_record() {
+        let central = Recording {
+            names: Some(|number| json!({"return_ref": format!("central:return:\u{200B}{number}")})),
+            ..Recording::default()
+        };
+        let agent = proposes(&["ring the printer"]);
+        let report = run_move(&central, &agent, &press_tasks()).unwrap();
+        assert_eq!(report["state"], "done", "{report}");
+        assert_eq!(central.states(), ["done+gave"]);
+        assert_eq!(report["gave"]["proposals"], json!([]), "{report}");
+        assert_eq!(report["gave"]["counts"]["proposed"], 1, "{report}");
+        assert_eq!(
+            report["gave"]["summary"],
+            format!(
+                "Tasks: 1 proposal submitted for 1 entry, each waiting for you on its face. {}",
+                left_out(1)
+            )
+            .as_str()
+        );
+    }
+
+    // ---- be2j.a2 item 6: what a run counts as proposed and what its record lists agree ----
+
+    #[test]
+    fn a_proposal_central_took_and_named_no_ref_for_is_counted_and_the_summary_says_so() {
+        const SUBMITTED_ONE: &str =
+            "Tasks: 1 proposal submitted for 1 entry, each waiting for you on its face.";
+        const SUBMITTED_TWO: &str =
+            "Tasks: 2 proposals submitted for 2 entries, each waiting for you on its face.";
+        const ONE_UNNAMED: &str =
+            "Central named no ref for 1 proposal, so this record does not list it.";
+        const TWO_UNNAMED: &str =
+            "Central named no ref for 2 proposals, so this record does not list them.";
+        let gave = |central: Recording, musts: &[&str]| {
+            let report = run_move(&central, &proposes(musts), &press_tasks()).unwrap();
+            assert_eq!(report["state"], "done", "{report}");
+            assert_eq!(central.states(), ["done+gave"], "{report}");
+            assert_eq!(central.submitted(), musts.len());
+            report["gave"].clone()
+        };
+        // The review's scripted answer: a submit answered `{}`.
+        let unnamed = || Recording {
+            names: Some(|_| json!({})),
+            ..Recording::default()
+        };
+        let one = gave(unnamed(), &["ring the printer"]);
+        assert_eq!(one["proposals"], json!([]));
+        assert_eq!(
+            one["counts"],
+            json!({"must": 1, "proposed": 1, "unmapped": 0})
+        );
+        assert_eq!(
+            one["summary"],
+            format!("{SUBMITTED_ONE} {ONE_UNNAMED}").as_str()
+        );
+        let two = gave(unnamed(), &["ring the printer", "post the letter"]);
+        assert_eq!(two["proposals"], json!([]));
+        assert_eq!(
+            two["counts"],
+            json!({"must": 2, "proposed": 2, "unmapped": 0})
+        );
+        assert_eq!(
+            two["summary"],
+            format!("{SUBMITTED_TWO} {TWO_UNNAMED}").as_str()
+        );
+        // One named and one not: the named one is listed, both are counted.
+        let mixed = gave(
+            Recording {
+                names: Some(|number| match number {
+                    0 => json!({"return_ref": "central:return:0"}),
+                    _ => json!({"return_ref": " "}),
+                }),
+                ..Recording::default()
+            },
+            &["ring the printer", "post the letter"],
+        );
+        assert_eq!(mixed["proposals"], json!(["central:return:0"]));
+        assert_eq!(mixed["counts"]["proposed"], 2);
+        assert_eq!(
+            mixed["summary"],
+            format!("{SUBMITTED_TWO} {ONE_UNNAMED}").as_str()
+        );
+        // A proposal Central holds already is the same proposal, under the ref
+        // it holds it by; held with no ref named, it is counted and not listed.
+        let held = gave(
+            Recording {
+                held: Some(json!({"return_ref": "central:return:held"})),
+                ..Recording::default()
+            },
+            &["ring the printer"],
+        );
+        assert_eq!(held["proposals"], json!(["central:return:held"]));
+        assert_eq!(held["summary"], SUBMITTED_ONE);
+        let held = gave(
+            Recording {
+                held: Some(json!({"return_ref": ""})),
+                ..Recording::default()
+            },
+            &["ring the printer"],
+        );
+        assert_eq!(held["proposals"], json!([]));
+        assert_eq!(held["counts"]["proposed"], 1);
+        assert_eq!(
+            held["summary"],
+            format!("{SUBMITTED_ONE} {ONE_UNNAMED}").as_str()
+        );
+        // Every proposal named: the summary is the run's own, and no more.
+        let named = gave(
+            Recording::default(),
+            &["ring the printer", "post the letter"],
+        );
+        assert_eq!(
+            named["proposals"],
+            json!(["central:return:0", "central:return:1"])
+        );
+        assert_eq!(named["summary"], SUBMITTED_TWO);
+    }
+
+    // ---- what a record holds is what Central keeps ----
 
     #[test]
     fn a_harness_failure_in_colour_ends_the_run_with_its_words_cleaned() {
@@ -2324,15 +3150,159 @@ mod tests {
         // (be2j.c2): the colour codes go whole, so the run ends with the
         // harness's words, never with the guard's sentence for a run left unended.
         let central = Recording::default();
-        let agent = Says(Err(TurnFailure::Failed(
-            "The harness said \u{1b}[31mboom\u{1b}[0m".into(),
-        )));
+        let agent = fails("The harness said \u{1b}[31mboom\u{1b}[0m");
         let report = run_move(&central, &agent, &press_tasks()).unwrap();
         assert_eq!(report["state"], "stalled", "{report}");
         assert_eq!(report["reason"], "The harness said boom", "{report}");
         let ends = central.ends.lock().unwrap();
         assert_eq!(ends.len(), 1, "one end, the run's own: {ends:?}");
         assert_eq!(ends[0]["reason"], "The harness said boom");
+    }
+
+    /// The list Central, O-I and AIKit keep byte for byte: every control and
+    /// every invisible character (its sha256 is checked below).
+    fn listed() -> &'static BTreeSet<u32> {
+        static LISTED: OnceLock<BTreeSet<u32>> = OnceLock::new();
+        LISTED.get_or_init(|| {
+            include_str!("invisible-code-points.txt")
+                .trim()
+                .lines()
+                .map(|line| u32::from_str_radix(line, 16).unwrap())
+                .collect()
+        })
+    }
+
+    /// Central's `plain_characters` (`ctrl/src/continuous_work/day_moves.rs` at
+    /// Central 63712618), transcribed: whether Central keeps this text, in a
+    /// block (`lines`) or on one line.
+    fn central_plain(text: &str, lines: bool) -> bool {
+        let listed = listed();
+        let mut chars = text.chars().peekable();
+        while let Some(c) = chars.next() {
+            let kept = match c {
+                '\n' | '\t' => lines,
+                '\r' => lines && chars.peek() == Some(&'\n'),
+                c => !listed.contains(&u32::from(c)),
+            };
+            if !kept {
+                return false;
+            }
+        }
+        true
+    }
+
+    fn central_list(gave: &Value, key: &str) -> std::result::Result<Vec<String>, String> {
+        match gave.get(key) {
+            None | Some(Value::Null) => Ok(vec![]),
+            Some(Value::Array(rows)) if rows.len() <= 256 => rows
+                .iter()
+                .map(|row| -> std::result::Result<String, String> {
+                    let row = row
+                        .as_str()
+                        .filter(|row| !row.trim().is_empty() && row.len() <= 4096)
+                        .ok_or_else(|| format!("gave.{key} is a list of refs"))?;
+                    if !central_plain(row, false) {
+                        return Err(format!(
+                            "gave.{key} is a list of refs, each on one line, with no control character and no invisible one"
+                        ));
+                    }
+                    Ok(row.to_owned())
+                })
+                .collect(),
+            _ => Err(format!("gave.{key} is a list of refs")),
+        }
+    }
+
+    /// Central's checks on a run's end (`move_record`, the "end" arm, at
+    /// Central 63712618), transcribed from the state check on, so a record the
+    /// runner makes is judged here as Central judges it. `mv` is the run's
+    /// move and `agent_writes` what it began with.
+    fn central_end(input: &Value, mv: &str, agent_writes: &str) -> std::result::Result<(), String> {
+        let state = input["state"]
+            .as_str()
+            .filter(|state| !state.trim().is_empty() && state.len() <= 4096)
+            .ok_or_else(|| "state requires non-empty text of at most 4096 bytes".to_owned())?;
+        if !matches!(state, "done" | "refused" | "stalled" | "stopped") {
+            return Err("state is done, refused, stalled or stopped".into());
+        }
+        let reason = match input.get("reason") {
+            None | Some(Value::Null) => None,
+            Some(Value::String(reason)) if !reason.trim().is_empty() && reason.len() <= 4096 => {
+                if !central_plain(reason, true) {
+                    return Err("reason holds no control character but line breaks and tabs (a \\r only before a \\n), and no invisible one (a line or paragraph separator, a format character or a blank filler)".into());
+                }
+                Some(reason.clone())
+            }
+            _ => return Err("reason is text, or absent".into()),
+        };
+        if matches!(state, "refused" | "stalled") && reason.is_none() {
+            return Err(format!(
+                "a run that {state} says why in a reason: nothing runs where you cannot see it"
+            ));
+        }
+        let gave = match input.get("gave") {
+            None | Some(Value::Null) => None,
+            Some(gave) => {
+                let object = gave.as_object().ok_or_else(|| {
+                    "gave is {summary, proposals?, writes?, counts?, points_at?}".to_owned()
+                })?;
+                if let Some(key) = object.keys().find(|key| {
+                    !matches!(
+                        key.as_str(),
+                        "summary" | "proposals" | "writes" | "counts" | "points_at"
+                    )
+                }) {
+                    return Err(format!("gave has no `{key}`"));
+                }
+                match object.get("points_at") {
+                    None | Some(Value::Null) => {}
+                    Some(_) if mv != "patterns" => {
+                        return Err(
+                            "only the Patterns move names what its pattern's items point at".into(),
+                        )
+                    }
+                    Some(Value::String(points_at))
+                        if !points_at.is_empty()
+                            && points_at.len() <= 512
+                            && !points_at
+                                .chars()
+                                .any(|c| c.is_whitespace() || listed().contains(&u32::from(c))) => {
+                    }
+                    Some(_) => {
+                        return Err("gave.points_at names one skill or method by its ref".into())
+                    }
+                }
+                let summary = gave["summary"]
+                    .as_str()
+                    .filter(|summary| !summary.trim().is_empty() && summary.len() <= 4096)
+                    .ok_or_else(|| {
+                        "summary requires non-empty text of at most 4096 bytes".to_owned()
+                    })?;
+                if !central_plain(summary, true) {
+                    return Err("gave.summary holds no control character but line breaks and tabs (a \\r only before a \\n), and no invisible one (a line or paragraph separator, a format character or a blank filler)".into());
+                }
+                let proposals = central_list(gave, "proposals")?;
+                let writes = central_list(gave, "writes")?;
+                match agent_writes {
+                    "off" if !proposals.is_empty() || !writes.is_empty() => {
+                        return Err("Agent writes was Off when this run began, so it gave no proposals or writes".into())
+                    }
+                    "propose" if !writes.is_empty() => {
+                        return Err("Agent writes was Propose when this run began, so it wrote nothing directly".into())
+                    }
+                    _ => {}
+                }
+                match object.get("counts") {
+                    None | Some(Value::Null) | Some(Value::Object(_)) => {}
+                    _ => return Err("gave.counts is an object".into()),
+                }
+                Some(())
+            }
+        };
+        if state == "done" && gave.is_none() {
+            return Err("a run that is done says what it gave".into());
+        }
+        Ok(())
     }
 
     /// The list's sha256, the same in Central (`ctrl/src/continuous_work/day_moves_tests.rs`)
@@ -2343,55 +3313,202 @@ mod tests {
     #[test]
     fn what_a_record_leaves_out_is_the_list_central_and_o_i_keep_and_each_field_is_cleaned() {
         use sha2::{Digest, Sha256};
-        let listed = include_str!("invisible-code-points.txt");
+        let list = include_str!("invisible-code-points.txt");
         assert_eq!(
-            format!("{:x}", Sha256::digest(listed.as_bytes())),
+            format!("{:x}", Sha256::digest(list.as_bytes())),
             INVISIBLE_LIST_SHA256,
             "the list is the one Central and O-I keep"
         );
-        let points: Vec<u32> = listed
-            .trim()
-            .lines()
-            .map(|line| u32::from_str_radix(line, 16).unwrap())
-            .collect();
-        let derived: Vec<u32> = (0..=0x10_FFFF)
+        let derived: BTreeSet<u32> = (0..=0x10_FFFF)
             .filter_map(char::from_u32)
             .filter(|c| c.is_control() || invisible(*c))
             .map(u32::from)
             .collect();
         assert_eq!(
-            derived, points,
+            &derived,
+            listed(),
             "derived from Unicode, the set reads as the list"
         );
-        // Each field of an end Central keeps plain: a block for the reason and the
-        // summary, one line for each ref.
+        // Each field of an end Central keeps plain: a block for the reason and
+        // the summary; a ref as it was given, or left out.
         let mut input = json!({"event": "end", "reason": "\u{200B}\u{3164}",
-            "gave": {"summary": "Tasks\u{2028}done\u{200B}, \u{0600}1\r\nnext\rthen\u{E0041}", "counts": {"proposed": 1},
+            "gave": {"summary": "Tasks\u{2028}done\u{200B}, \u{0600}1\r\nnext\rthen\u{E0041}\ta\u{2029}b", "counts": {"proposed": 1},
                 "proposals": ["return:\u{200B}1", "\u{200B}"], "writes": ["write:\u{202E}2"], "points_at": "skill:\u{2060}x\u{0009}"}});
         plain_record(&mut input);
         assert_eq!(input["reason"], "The run's reason held nothing visible.");
         assert_eq!(
             input["gave"]["summary"],
-            "Tasks\ndone, \u{0600}1\r\nnext then"
+            format!("Tasks\ndone, \u{0600}1\r\nnext then\ta\nb {}", left_out(4)).as_str()
         );
-        assert_eq!(input["gave"]["proposals"], json!(["return:1"]));
-        assert_eq!(input["gave"]["writes"], json!(["write:2"]));
-        assert_eq!(input["gave"]["points_at"], "skill:x");
+        assert_eq!(input["gave"]["proposals"], json!([]));
+        assert_eq!(input["gave"]["writes"], json!([]));
+        assert!(input["gave"].get("points_at").is_none(), "{input}");
         assert_eq!(input["gave"]["counts"], json!({"proposed": 1}));
-        // A terminal's escapes go whole (be2j.c2): a CSI by ESC `[` or U+009B to
-        // its final byte, an OSC by ESC `]` or U+009D to BEL or ESC `\`.
+        // A terminal's escapes go whole when they are whole (be2j.a2 item 4);
+        // U+009B, U+009C and U+009D alone are controls like any other.
         assert_eq!(
             block_plain("\u{1b}[1;31mred\u{1b}[0m \u{9b}4mline\u{9b}0m"),
-            "red line"
+            "red  4mline 0m"
         );
         assert_eq!(
             block_plain("see \u{1b}]8;;https://ci.test/7\u{7}the log\u{1b}]8;;\u{1b}\\ now"),
             "see the log now"
         );
-        assert_eq!(block_plain("a \u{9d}0;title\u{9c}b"), "a b");
-        assert_eq!(line_plain("skill:\u{1b}[2Kx"), "skill:x");
-        // One cut short ends where it cannot go on, and what follows stays.
-        assert_eq!(block_plain("cut \u{1b}[31\nnext"), "cut \nnext");
-        assert_eq!(block_plain("cut \u{1b}]0;t\nnext"), "cut \nnext");
+        assert_eq!(block_plain("a \u{9d}0;title\u{9c}b"), "a  0;title b");
+        // One cut short loses its opening, and its words and what follows stay.
+        assert_eq!(block_plain("cut \u{1b}[31\nnext"), "cut 31\nnext");
+        assert_eq!(block_plain("cut \u{1b}]0;t\nnext"), "cut 0;t\nnext");
+        // A block keeps its line breaks and tabs, a `\r` only before a `\n`.
+        assert_eq!(block_plain("a\tb\r\nc\rd\r"), "a\tb\r\nc d ");
+        assert_eq!(block_plain("a\r\r\nb\u{85}c\u{0}d"), "a \r\nb c d");
+    }
+
+    /// What is wrong, if anything, with one text as an end records it: the
+    /// text in every field an agent's words reach, cleaned, and then checked
+    /// as Central checks an end.
+    fn recorded_wrong(text: &str) -> Option<String> {
+        let show = |text: &str| text.escape_default().to_string();
+        let block = block_plain(text);
+        if !central_plain(&block, true) {
+            return Some(format!(
+                "block not plain: {} -> {}",
+                show(text),
+                show(&block)
+            ));
+        }
+        if block.len() > text.len() {
+            return Some(format!("cleaning grew the text: {}", show(text)));
+        }
+        if block_plain(&block) != block {
+            return Some(format!("cleaning twice differs: {}", show(text)));
+        }
+        let mut input = json!({"event": "end", "state": "stalled", "reason": text,
+            "gave": {"summary": format!("Patterns: {text}"), "proposals": [text],
+                "writes": [text], "points_at": text}});
+        plain_record(&mut input);
+        if let Err(refusal) = central_end(&input, "patterns", "write") {
+            return Some(format!(
+                "Central refuses the record of {}: {refusal}",
+                show(text)
+            ));
+        }
+        let gave = &input["gave"];
+        let as_given = |rows: &Value| rows == &json!([]) || rows == &json!([text]);
+        if !as_given(&gave["proposals"]) || !as_given(&gave["writes"]) {
+            return Some(format!("a ref of {} was changed: {gave}", show(text)));
+        }
+        if gave.get("points_at").is_some_and(|kept| kept != text) {
+            return Some(format!("points_at of {} was changed: {gave}", show(text)));
+        }
+        let once = input.clone();
+        plain_record(&mut input);
+        if input != once {
+            return Some(format!("recording twice differs: {}", show(text)));
+        }
+        None
+    }
+
+    /// The review's probe p01 (review of ai-kit #614), with each text checked
+    /// as a whole record.
+    #[test]
+    fn every_code_point_is_recorded_as_central_keeps_it() {
+        let mut wrong = Vec::new();
+        for c in (0..=0x10_FFFFu32).filter_map(char::from_u32) {
+            let special = listed().contains(&u32::from(c))
+                || c.is_whitespace()
+                || matches!(c, '[' | ']' | '\\' | '@' | '~' | '?' | '0' | 'm');
+            if !special {
+                // A character that shows, in no escape: it is kept, and a record of it is as given.
+                let text = c.to_string();
+                if block_plain(&text) != text {
+                    wrong.push(format!(
+                        "a character that shows was changed: {}",
+                        c.escape_default()
+                    ));
+                }
+                continue;
+            }
+            for context in [
+                "{}",
+                "a{}b",
+                "{}{}",
+                "\r{}",
+                "{}\n",
+                "{}\r",
+                "a\r{}\nb",
+                "\u{1b}{}x",
+                "\u{1b}[{}x",
+                "\u{1b}[1{}x",
+                "\u{1b}]{}x",
+                "\u{1b}]0;{}x\u{7}y",
+                "\u{9b}{}x",
+                "\u{9d}{}x",
+                "{}\u{1b}",
+                "{}\u{1b}[",
+                "{}\u{1b}]",
+                " {} ",
+            ] {
+                wrong.extend(recorded_wrong(&context.replace("{}", &c.to_string())));
+            }
+        }
+        assert!(
+            wrong.is_empty(),
+            "{} texts are not recorded as Central keeps them, the first: {:?}",
+            wrong.len(),
+            wrong.iter().take(20).collect::<Vec<_>>()
+        );
+    }
+
+    fn every_text(alphabet: &[char], longest: usize, each: &mut dyn FnMut(&str)) {
+        let mut indexes: Vec<usize> = Vec::new();
+        let mut text = String::new();
+        loop {
+            // The next text, counting in base `alphabet.len()` with a growing length.
+            let mut place = 0;
+            loop {
+                if place == indexes.len() {
+                    indexes.push(0);
+                    break;
+                }
+                indexes[place] += 1;
+                if indexes[place] < alphabet.len() {
+                    break;
+                }
+                indexes[place] = 0;
+                place += 1;
+            }
+            if indexes.len() > longest {
+                return;
+            }
+            text.clear();
+            text.extend(indexes.iter().map(|index| alphabet[*index]));
+            each(&text);
+        }
+    }
+
+    /// The review's probe p02: every short text over the characters an escape
+    /// and a line end are made of.
+    #[test]
+    fn every_short_text_is_recorded_as_central_keeps_it() {
+        let mut wrong = Vec::new();
+        let wide = [
+            '\u{1b}', '[', ']', '\\', '\u{7}', '\u{9b}', '\u{9c}', '\u{9d}', '\r', '\n', '\t',
+            '\u{2028}', '\u{200b}', 'a', '1', ';', ' ', 'm',
+        ];
+        every_text(&wide, 4, &mut |text: &str| {
+            wrong.extend(recorded_wrong(text))
+        });
+        let narrow = [
+            '\u{1b}', '[', ']', '\\', '\u{7}', '\u{9c}', '\r', '\n', 'a', '\u{2029}',
+        ];
+        every_text(&narrow, 5, &mut |text: &str| {
+            wrong.extend(recorded_wrong(text))
+        });
+        assert!(
+            wrong.is_empty(),
+            "{} texts are not recorded as Central keeps them, the first: {:?}",
+            wrong.len(),
+            wrong.iter().take(20).collect::<Vec<_>>()
+        );
     }
 }

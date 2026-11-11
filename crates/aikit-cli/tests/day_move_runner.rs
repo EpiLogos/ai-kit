@@ -926,6 +926,149 @@ fn close_calls_close_carry_and_gives_its_state_and_the_carry_proposal() {
     );
 }
 
+// ---- be2j.a2: Central's bound on a reason, and a run ended from elsewhere ---------------------------
+
+/// The real Central with every end the runner records written down, and, when
+/// asked, the run stopped from elsewhere just before the runner's first end.
+struct Watched<'a> {
+    inner: &'a CtrlCentral,
+    stopped_first: bool,
+    ends: Mutex<Vec<String>>,
+}
+
+const STOPPED_ELSEWHERE: &str = "Stopped from the Day's page.";
+
+impl<'a> Watched<'a> {
+    fn new(inner: &'a CtrlCentral, stopped_first: bool) -> Watched<'a> {
+        Watched {
+            inner,
+            stopped_first,
+            ends: Mutex::new(vec![]),
+        }
+    }
+    fn ends(&self) -> Vec<String> {
+        self.ends.lock().unwrap().clone()
+    }
+}
+
+impl CentralPort for Watched<'_> {
+    fn call(&self, action: &str, input: &Value) -> Result<Value, CentralError> {
+        if action != "central.day.move.record" || input["event"] != "end" {
+            return self.inner.call(action, input);
+        }
+        if self.stopped_first && self.ends.lock().unwrap().is_empty() {
+            self.inner
+                .call(
+                    action,
+                    &json!({"event": "end", "run_ref": input["run_ref"], "at_unix_ms": input["at_unix_ms"],
+                        "state": "stopped", "reason": STOPPED_ELSEWHERE}),
+                )
+                .expect("Central records the stop from elsewhere");
+        }
+        let answer = self.inner.call(action, input);
+        self.ends.lock().unwrap().push(format!(
+            "{}{}: {}",
+            input["state"].as_str().unwrap_or("?"),
+            if input.get("gave").is_some() {
+                "+gave"
+            } else {
+                ""
+            },
+            match &answer {
+                Ok(_) => "recorded",
+                Err(error) => error.code.as_str(),
+            }
+        ));
+        answer
+    }
+}
+
+#[test]
+fn a_failure_over_centrals_bound_is_cut_to_it_and_the_run_stalls_as_the_harness_said() {
+    let Some(ctrl) = native_ctrl() else { return };
+    let world = World::new(&ctrl, 0);
+    let day_ref = world.ensure_day();
+    world.day_document(&day_ref, "day:bound", "Plan the week.", "");
+    let central = world.central();
+
+    let trace = "error: the harness wrote a long trace\n".repeat(540)[..20000].to_owned();
+    for (label, words, kept) in [
+        // At the bound a reason is kept whole.
+        ("4096 bytes", "x".repeat(4096), "x".repeat(4096)),
+        (
+            "4097 bytes",
+            "x".repeat(4097),
+            format!("{} \u{2026}", "x".repeat(4092)),
+        ),
+        (
+            "20000 bytes",
+            trace.clone(),
+            format!("{} \u{2026}", &trace[..4092]),
+        ),
+        // Cut between characters, never inside one.
+        (
+            "4098 bytes of two-byte letters",
+            "\u{e9}".repeat(2049),
+            format!("{} \u{2026}", "\u{e9}".repeat(2046)),
+        ),
+    ] {
+        let watched = Watched::new(&central, false);
+        let agent = Scripted::new(vec![Err(TurnFailure::Failed(words))]);
+        let report = run_move(&watched, &agent, &press(Move::Tasks, &day_ref)).unwrap();
+        assert_eq!(report["state"], "stalled", "{label}");
+        assert_eq!(watched.ends(), ["stalled: recorded"], "{label}");
+        let reason = report["reason"].as_str().unwrap();
+        assert!(reason.len() <= 4096, "{label}: {} bytes", reason.len());
+        assert!(reason == kept, "{label}: {} bytes recorded", reason.len());
+        let moves = world.moves(&day_ref);
+        assert_eq!(moves["moves"]["tasks"]["running"], Value::Null, "{label}");
+        assert_eq!(
+            moves["moves"]["tasks"]["last"]["state"], "stalled",
+            "{label}"
+        );
+        assert!(
+            moves["moves"]["tasks"]["last"]["end"]["reason"] == kept.as_str(),
+            "{label}: Central keeps the reason the runner reports"
+        );
+    }
+    assert!(world.returns().is_empty());
+}
+
+#[test]
+fn a_run_stopped_from_elsewhere_stays_stopped_and_the_runner_records_no_further_end() {
+    let Some(ctrl) = native_ctrl() else { return };
+    let world = World::new(&ctrl, 0);
+    let day_ref = world.ensure_day();
+    world.day_document(&day_ref, "day:stopped", "Plan the week.", "");
+    let central = world.central();
+    let watched = Watched::new(&central, true);
+
+    let report = run_move(
+        &watched,
+        &Scripted::says(TASKS),
+        &press(Move::Tasks, &day_ref),
+    )
+    .unwrap();
+
+    // The run's own end met the stop, by Central's code, and nothing was sent after it.
+    assert_eq!(
+        watched.ends(),
+        ["done+gave: stale_basis_or_identity_conflict"]
+    );
+    assert_eq!(report["state"], "stopped", "{report}");
+    assert_eq!(report["reason"], STOPPED_ELSEWHERE, "{report}");
+    let moves = world.moves(&day_ref);
+    assert_eq!(moves["moves"]["tasks"]["running"], Value::Null);
+    assert_eq!(moves["moves"]["tasks"]["last"]["state"], "stopped");
+    assert_eq!(
+        moves["moves"]["tasks"]["last"]["end"]["reason"],
+        STOPPED_ELSEWHERE
+    );
+    assert_eq!(moves["moves"]["tasks"]["runs"].as_array().unwrap().len(), 1);
+    // What the run proposed before the stop stands in receiving, each on its own face.
+    assert_eq!(world.returns().len(), 3);
+}
+
 // ---- the command line ----------------------------------------------------------------------------------------------------
 
 #[test]
