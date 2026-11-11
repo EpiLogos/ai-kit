@@ -729,3 +729,78 @@ fn original_world_alias_ancestry_withholds_for_absolute_and_relative_selected_ro
     }
     assert_eq!(fs::read(wiki).unwrap(), before);
 }
+
+/// Round 55 item 8b (DLW build ruling 2026-11-09): a domain's path patterns are matched against the file's path in its project
+/// alone. A `docs/**` or `**/docs/**` guidance block is not chosen for a file of a project that stands under a folder called
+/// docs. In the project, `docs/**` is chosen for a file in its own docs folder, and `**/docs/**` for a file in a docs folder
+/// below one of its folders: `**/` asks for a folder before it, as `glob_matches` reads it (so a domain names a direct child
+/// by its own pattern, as `wiki-inhabitation.toml` does).
+#[test]
+fn a_domain_is_chosen_by_the_file_s_path_in_its_project_alone() {
+    let tmp = tempfile::tempdir().unwrap();
+    let domains = tmp.path().join("domains/.aikit/domains");
+    fs::create_dir_all(&domains).unwrap();
+    for (name, pattern) in [("docs-tree", "docs/**"), ("any-docs", "**/docs/**")] {
+        fs::write(
+            domains.join(format!("{name}.toml")),
+            format!(
+                r#"
+schema = "aikit.knowledge-domain/v1"
+id = "domain/{name}"
+title = "Docs discipline"
+revision = "r1"
+source = "central:source:project:demo:.aikit/domains/{name}.toml"
+path_patterns = ["{pattern}"]
+
+[[guidance]]
+rule = "Write the docs plainly"
+provenance = "central:source:project:demo:ProjectCentral/user/docs.md"
+"#
+            ),
+        )
+        .unwrap();
+    }
+    let (domains, warnings) = load_domains(&tmp.path().join("domains"));
+    assert!(warnings.is_empty(), "{warnings:?}");
+    assert_eq!(domains.len(), 2);
+    let project = tmp.path().join("docs/proj");
+    let index = Index::open(&tmp.path().join("state/aikit.sqlite3")).unwrap();
+    let chosen = |project_root: &std::path::Path, path: &str| -> Vec<String> {
+        let (blocks, _) = rendered(run(
+            &index,
+            &format!("scope-{path}"),
+            project_root,
+            path,
+            &domains,
+            Vec::new(),
+        ));
+        let mut ids: Vec<String> = ["domain/docs-tree", "domain/any-docs"]
+            .into_iter()
+            .filter(|id| {
+                blocks
+                    .iter()
+                    .any(|block| block.contains(&format!("domain {id} armed")))
+            })
+            .map(str::to_string)
+            .collect();
+        ids.sort();
+        ids
+    };
+    let source = project.join("src/lib.rs").to_string_lossy().into_owned();
+    let under_docs = (
+        chosen(&project, &source),
+        chosen(std::path::Path::new("docs/proj"), "docs/proj/src/lib.rs"),
+    );
+    assert_eq!(
+        under_docs,
+        (Vec::<String>::new(), Vec::<String>::new()),
+        "by an absolute route, and by a route relative to where the operation runs"
+    );
+    let guide = project.join("docs/guide.md").to_string_lossy().into_owned();
+    assert_eq!(chosen(&project, &guide), ["domain/docs-tree"]);
+    let nested = project
+        .join("src/docs/guide.md")
+        .to_string_lossy()
+        .into_owned();
+    assert_eq!(chosen(&project, &nested), ["domain/any-docs"]);
+}
