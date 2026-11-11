@@ -97,12 +97,15 @@ find "${TMPDIR:-/tmp}/." ! -name . -prune -type d -name 'aikit-bkmr-search.*' \
   -user "$(id -u)" -mmin +60 -exec rm -rf {} + 2>/dev/null || :
 
 # look_at FILE: FILE's inode, size and modification time, and a checksum of its
-# first 32 bytes, or "none" where no FILE stands. It fails where no stat this
+# first 4096 bytes, or "none" where no FILE stands. It fails where no stat this
 # script knows answers. The checksum sees a rewrite that keeps the size within
-# one tick of a coarse clock, where the time alone cannot: a -wal's header,
-# which a checkpoint or a restart rewrites, and the database's, which holds its
-# change counter and its size.
-head_of() { dd if="$1" bs=32 count=1 2>/dev/null | cksum; }
+# one tick of a coarse clock, where the time alone cannot. Of the database it
+# covers the header and the rest of the first page, where the schema's root
+# stands. Of a -wal it covers the header, which a restart rewrites (the first
+# write after a complete checkpoint; a checkpoint alone does not), and the first
+# frame's header. A same-size rewrite past the first 4096 bytes inside one tick
+# of a coarse clock is not seen.
+head_of() { dd if="$1" bs=4096 count=1 2>/dev/null | cksum; }
 if stat -c %i / >/dev/null 2>&1; then
   look_at() { stat -c '%i %s %y' "$1" 2>/dev/null && head_of "$1" || echo none; }
 elif stat -f %i / >/dev/null 2>&1; then
@@ -132,8 +135,10 @@ real_file() {
 # private_copy DB: copies DB, and its -wal and -journal where they stand, into
 # this run's own folder, made at the first copy and removed when the run ends,
 # and leaves the copy's path in $copy. The three are looked at before and after
-# they are copied. When any of them moved, they are copied again, three tries
-# in all.
+# they are copied. When any of them moved, they are copied again, five tries
+# in all, with a short and growing pause before each new try (20, 60, 180 and
+# 540 ms), so that a writer that commits often leaves a gap. Where this sleep
+# takes no fraction of a second the pause is none and the try follows at once.
 private_copy() {
   if [ -z "$copies" ]; then
     copies=$(mktemp -d "${TMPDIR:-/tmp}/aikit-bkmr-search.XXXXXX") || {
@@ -164,10 +169,16 @@ private_copy() {
       printf '%s: could not copy the database to search it: %s\n' "$me" "$1" >&2
       return 74
     fi
-    if [ "$tries" -ge 3 ]; then
+    if [ "$tries" -ge 5 ]; then
       printf '%s: the database changed on every try while it was copied (%s tries): %s\n' "$me" "$tries" "$1" >&2
       return 75
     fi
+    case $tries in
+      1) sleep 0.02 2>/dev/null || : ;;
+      2) sleep 0.06 2>/dev/null || : ;;
+      3) sleep 0.18 2>/dev/null || : ;;
+      *) sleep 0.54 2>/dev/null || : ;;
+    esac
   done
   chmod u+w "$copy"
   [ ! -f "$copy-wal" ] || chmod u+w "$copy-wal"
@@ -176,12 +187,15 @@ private_copy() {
 
 # migrated DB: after bkmr searched the copy of DB, says so, once, when bkmr
 # migrated that copy, as it does a database kept in an older schema. bkmr's own
-# words name the backup it made, which is of the copy and goes with it. (The
-# doctor runs no bkmr and does not call it.)
+# words name the backup it made, which is of the copy and goes with it. Once,
+# however many backups stand in the copy's folder. The command it gives names
+# the database in single quotes, so that it can be pasted whatever the path
+# holds. (The doctor runs no bkmr and does not call it.)
 migrated() {
   for backup in "$copies"/search_backup_*.db; do
     [ -f "$backup" ] || continue
-    printf '%s: bkmr migrated the private copy this search made of %s, which is kept in an older schema. The backup bkmr names was made of that copy and is removed with it. Each search migrates its copy again until the database itself is migrated, once: bkmr --db %s search --np --limit 1 ""\n' "$me" "$1" "$1" >&2
+    quoted=$(printf '%s' "$1" | sed "s/'/'\\\\''/g")
+    printf '%s: bkmr migrated the private copy this search made of %s, which is kept in an older schema. The backup bkmr names was made of that copy and is removed with it. Each search migrates its copy again until the database itself is migrated, once: bkmr --db '"'%s'"' search --np --limit 1 ""\n' "$me" "$1" "$quoted" >&2
     return 0
   done
 }
