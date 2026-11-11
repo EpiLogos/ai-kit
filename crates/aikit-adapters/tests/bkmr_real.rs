@@ -265,11 +265,21 @@ mod project_text_capsule {
     }
 
     fn seed(root: &Path, name: &str, label: &str) -> PathBuf {
+        seed_with(
+            root,
+            name,
+            label,
+            &format!("capsulequasar {label} native selected content"),
+        )
+    }
+
+    /// [`seed`] whose one bookmark holds `body`.
+    fn seed_with(root: &Path, name: &str, label: &str, body: &str) -> PathBuf {
         let path = root.join(name);
         let item = source(
             &format!("source:capsule:{label}"),
             label,
-            &format!("capsulequasar {label} native selected content"),
+            body,
             &["capsule-proof"],
             SourceVisibility::Team,
             &[],
@@ -724,29 +734,56 @@ mod project_text_capsule {
 
     /// The same item: a search whose bkmr is killed before it closes the database leaves the bound database and its sidecars
     /// as they were. #611's CI failure had this shape: after a search an empty `-wal` and a `-shm` stood beside the unchanged
-    /// database, where none stood before. A `bkmr` first on PATH runs the real one and kills it once the database it was given
+    /// database, where none stood before. A `bkmr` first on PATH runs the real one and kills it while the database it was given
     /// is open, so its close never runs. (A runner's timeout kills the whole search, its shell too. The folder that leaves is
     /// removed by a later search: `a_search_removes_this_users_own_copies_left_more_than_an_hour_ago`.)
+    ///
+    /// The real bkmr is held at its open database, not caught there (round 55 item 9c, DLW build ruling 2026-11-11). Its one
+    /// result is larger than any pipe holds, and the shim gives it a pipe nobody reads for its output: bkmr opens the database,
+    /// finds the bookmark and blocks writing it, with the database still open, for as long as the shim leaves it. The shim then
+    /// sees the `-shm` bkmr made beside its database, kills bkmr and leaves a mark. Before, the shim polled for the `-shm` of a
+    /// bkmr that ran free. A small search opens and closes its database between two polls, and a shim that missed it could not
+    /// tell that bkmr had already finished, so it polled on to its ten-second bound and the try was spent: five such misses
+    /// failed the test on Linux twice in three runs. Nothing here waits on a moment that passes, so there is one try. A whole
+    /// search still proves nothing: without the mark the test fails.
     #[test]
     fn real_767_capsule_search_cut_short_leaves_the_database_and_its_sidecars_as_they_were() {
         let Some(dir) = fixture() else {
             return;
         };
-        let db = seed(dir.path(), "cut.db", "cut-native");
+        // 400 KB in one bookmark: a pipe holds 64 KB on Linux and no more on macOS, so bkmr cannot finish writing it.
+        let body = format!(
+            "capsulequasar cut-native native selected content {}",
+            "held at its output ".repeat(20_000)
+        );
+        let db = seed_with(dir.path(), "cut.db", "cut-native", &body);
         let real = on_path("bkmr");
         let shim = dir.path().join("shim");
-        // The wait is bounded by time, ten seconds by the clock, and the shim leaves a mark when it saw the database open and
-        // cut bkmr short (round 55 item 9.1, the review's F7). bkmr holds the copy open only briefly, and the shim's poll can
-        // miss it (once in 30 runs here), so a bkmr that finished first is searched again, five tries in all. A whole search
-        // proves nothing here; a wait that ran out, or five bkmrs that all finished first, fail the test.
+        // The shim's wait is for a state that stays (bkmr blocked with its database open), bounded at ten seconds by the clock
+        // so a bkmr that never opens one cannot hang the test. The pipe is opened for reading and writing by the shim itself,
+        // which never reads it: bkmr's write has a reader, so it blocks once the pipe is full and is not refused.
         tool(
             &shim,
             "bkmr",
-            "#!/bin/sh\n\"$AIKIT_TEST_REAL_BKMR\" \"$@\" &\npid=$!\nend=$(($(date +%s) + 10))\n\
-             while [ ! -e \"$BKMR_DB_URL-shm\" ] && [ \"$(date +%s)\" -lt \"$end\" ]; do\n\
-             n=0\nwhile [ ! -e \"$BKMR_DB_URL-shm\" ] && [ \"$n\" -lt 1000 ]; do n=$((n + 1)); done\ndone\n\
-             if [ -e \"$BKMR_DB_URL-shm\" ] && kill -KILL \"$pid\" 2>/dev/null; then : > \"$AIKIT_TEST_SHIM_CUT\"; fi\n\
-             wait \"$pid\"\n",
+            "#!/bin/sh
+hold=\"$AIKIT_TEST_SHIM_CUT.hold\"
+mkfifo \"$hold\" || exit 97
+exec 3<>\"$hold\"
+\
+             \"$AIKIT_TEST_REAL_BKMR\" \"$@\" >&3 &
+pid=$!
+end=$(($(date +%s) + 10))
+\
+             while [ ! -e \"$BKMR_DB_URL-shm\" ] && [ \"$(date +%s)\" -lt \"$end\" ]; do
+\
+             n=0
+while [ ! -e \"$BKMR_DB_URL-shm\" ] && [ \"$n\" -lt 1000 ]; do n=$((n + 1)); done
+done
+\
+             if [ -e \"$BKMR_DB_URL-shm\" ] && kill -KILL \"$pid\" 2>/dev/null; then : > \"$AIKIT_TEST_SHIM_CUT\"; fi
+\
+             wait \"$pid\"
+",
         );
         let cut = dir.path().join("cut");
         let path = path_before(&[&shim]);
@@ -764,31 +801,16 @@ mod project_text_capsule {
             ("AIKIT_TEST_SHIM_CUT", cut.clone().into()),
             ("TMPDIR", copies.clone().into()),
         ];
-        let mut tries = 0;
-        let output = loop {
-            tries += 1;
-            let output = capsule_in(dir.path(), &db, &env, &["capsulequasar"]);
-            if cut.exists() || tries == 5 {
-                break output;
-            }
-            assert_eq!(
-                output.status, 0,
-                "a bkmr not cut short searched whole: {output:?}"
-            );
-            assert_eq!(
-                database_bytes(&db),
-                before,
-                "a whole search leaves the database as it was"
-            );
-        };
+        let output = capsule_in(dir.path(), &db, &env, &["capsulequasar"]);
         assert!(
             cut.exists(),
-            "the shim saw bkmr open the database and cut it short, in {tries} tries"
+            "the shim held bkmr at its open database and cut it short: {output:?}"
         );
-        if tries > 1 {
-            eprintln!("the shim cut bkmr short on try {tries}");
-        }
         assert_ne!(output.status, 0, "the search was cut short");
+        assert!(
+            !output.stdout.contains("cut-native"),
+            "bkmr was killed before any of its result was read"
+        );
         assert_eq!(
             database_bytes(&db),
             before,
