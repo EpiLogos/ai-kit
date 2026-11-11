@@ -12,11 +12,12 @@
 //! separate from the native Project-root Source role. Legacy delimiter-based
 //! file refs are retained history, never guessed live routing from survivors.
 //!
-//! Search still delegates to ripgrep. Its existing ranking/limits, ignore
-//! behavior and marker-glob snapshot remain; selected material additionally
-//! uses current native aperture/physical admission. The depth-eight marker
-//! snapshot and broad rg traversal do not establish atomic current exclusion
-//! of every file before rg processing, or total memory/horizon completeness.
+//! Search still delegates to ripgrep. Its existing ranking/limits and ignore
+//! behavior remain; the marked folders are read as each search starts, at any
+//! depth, and selected material additionally uses current native
+//! aperture/physical admission. The walk and rg traversal do not establish
+//! atomic current exclusion of every file before rg processing, or total
+//! memory/horizon completeness.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Component, Path, PathBuf};
@@ -163,10 +164,6 @@ pub fn decode_work_file_source_ref(source: &SourceRef) -> Result<Option<WorkFile
 /// ceiling (16 MiB, shared with wiki publication). It mirrored the NOW-field
 /// budget at 1 MiB, which refused ordinary generated and data sources.
 pub const WORK_REPOS_MAX_READ_BYTES: u64 = 16 * 1024 * 1024;
-
-/// Depth cap for the marker walk that prunes `.no-agent-retrieval` subtrees
-/// per project (the NOW-field walk's discipline).
-const MARKER_WALK_DEPTH: usize = 8;
 
 /// Matches retained per repo before grouping, and what the match pass may
 /// read: the stream is stopped past this many matches' worth of events
@@ -654,9 +651,10 @@ fn provider() -> ProviderRef {
 /// own two threads).
 const MAX_PARALLEL_REPO_SEARCHES: usize = 4;
 
-/// Glob class for a pattern letter that is special inside a ripgrep glob.
+/// Glob class for a pattern letter that is special inside a ripgrep glob. A
+/// backslash is ripgrep's escape, so a backslash in a name is escaped too.
 fn is_glob_metachar(ch: char) -> bool {
-    matches!(ch, '*' | '?' | '[' | ']' | '{' | '}')
+    matches!(ch, '*' | '?' | '[' | ']' | '{' | '}' | '\\')
 }
 
 fn glob_escape(text: &str) -> String {
@@ -720,6 +718,12 @@ fn regex_escape(text: &str) -> String {
 /// ground, governance, wiki, now records) is aperture owned by the
 /// ProjectCentral binding, the Central file map and the NOW-field pool — the
 /// live pool covers everything else in the repo (addendum A-4's join order).
+///
+/// The project is walked each time a search of it starts, at whatever depth a
+/// marked folder stands (DLW build ruling 2026-11-09, round 55 item 8b), so a
+/// folder marked after the provider attached withholds itself from the next
+/// search. A marked folder's names are each escaped and joined by `/` on every
+/// platform: a backslash in a name is a letter of it, not a separator.
 fn marker_exclude_globs(project_root: &Path) -> Vec<String> {
     let mut globs = vec![
         format!("**/{NO_AGENT_RETRIEVAL_MARKER}"),
@@ -729,12 +733,25 @@ fn marker_exclude_globs(project_root: &Path) -> Vec<String> {
     for name in IGNORED_DIR_NAMES {
         globs.push(format!("**/{name}/**"));
     }
+    for relative in marked_folders(project_root) {
+        // Glob metacharacters in a real directory name are escaped so the
+        // exclusion names the directory, not a pattern.
+        let named: Vec<String> = relative
+            .components()
+            .map(|name| glob_escape(&name.as_os_str().to_string_lossy()))
+            .collect();
+        globs.push(format!("{}/**", named.join("/")));
+    }
+    globs
+}
+
+/// The project's `.no-agent-retrieval` folders, each by its path in the project.
+/// The walk enters every folder but the fixed exclusions' and links, and stops
+/// at a marked folder, which withholds all it holds.
+fn marked_folders(project_root: &Path) -> BTreeSet<PathBuf> {
     let mut marked = BTreeSet::new();
-    let mut stack = vec![(project_root.to_path_buf(), 0usize)];
-    while let Some((dir, depth)) = stack.pop() {
-        if depth > MARKER_WALK_DEPTH {
-            continue;
-        }
+    let mut stack = vec![project_root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
         let Ok(entries) = std::fs::read_dir(&dir) else {
             continue;
         };
@@ -755,19 +772,31 @@ fn marker_exclude_globs(project_root: &Path) -> Vec<String> {
             }
             if child.join(NO_AGENT_RETRIEVAL_MARKER).is_file() {
                 if let Ok(relative) = child.strip_prefix(project_root) {
-                    marked.insert(relative.to_string_lossy().replace('\\', "/"));
+                    marked.insert(relative.to_path_buf());
                 }
                 continue;
             }
-            stack.push((child, depth + 1));
+            stack.push(child);
         }
     }
-    for relative in marked {
-        // Glob metacharacters in a real directory name are escaped so the
-        // exclusion names the directory, not a pattern.
-        globs.push(format!("{}/**", glob_escape(&relative)));
+    marked
+}
+
+/// Whether `relative`'s folder, or a folder above it in the project, the
+/// project's own included, holds the `.no-agent-retrieval` marker now.
+fn in_marked_folder(project_root: &Path, relative: &Path) -> Result<bool> {
+    let mut folder = relative.parent();
+    while let Some(at) = folder {
+        let marker = project_root.join(at).join(NO_AGENT_RETRIEVAL_MARKER);
+        match std::fs::metadata(&marker) {
+            Ok(metadata) if metadata.is_file() => return Ok(true),
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(work_io(&marker, error)),
+        }
+        folder = at.parent();
     }
-    globs
+    Ok(false)
 }
 
 // The native-basis variant legitimately carries the whole inspected project
@@ -880,7 +909,6 @@ pub struct WorkReposSourcePoolProvider<R> {
     projects: Vec<WorkRepoProject>,
     attachments: Vec<WorkAttachment>,
     attachment_error: Option<AikitError>,
-    marker_globs: BTreeMap<String, Vec<String>>,
     version: Option<String>,
 }
 
@@ -947,10 +975,6 @@ impl<R: CommandRunner> WorkReposSourcePoolProvider<R> {
             .iter()
             .map(|attached| attached.project.clone())
             .collect();
-        let marker_globs = projects
-            .iter()
-            .map(|project| (project.name.clone(), marker_exclude_globs(&project.root)))
-            .collect();
         let searcher = RipgrepSearcher::new(runner, executable);
         let version = if attachment_error.is_none() {
             searcher.probe().ok()
@@ -962,7 +986,6 @@ impl<R: CommandRunner> WorkReposSourcePoolProvider<R> {
             projects,
             attachments,
             attachment_error,
-            marker_globs,
             version,
         }
     }
@@ -1144,11 +1167,6 @@ impl<R: CommandRunner> WorkReposSourcePoolProvider<R> {
             .map(|term| regex_escape(term))
             .collect::<Vec<_>>()
             .join("|");
-        let exclude_globs = self
-            .marker_globs
-            .get(&project.name)
-            .cloned()
-            .unwrap_or_default();
         for tag_term in tags {
             // A tag term that names a project narrows the sweep to it; a tag
             // this pool never minted answers nothing.
@@ -1156,6 +1174,8 @@ impl<R: CommandRunner> WorkReposSourcePoolProvider<R> {
                 return Ok(Vec::new());
             }
         }
+        // What the project marks is read now, as this search starts.
+        let exclude_globs = marker_exclude_globs(&project.root);
         let request = SearchRequest {
             pattern,
             // An alternation of escaped literals: per-term OR, still literal
@@ -1289,7 +1309,19 @@ impl<R: CommandRunner> WorkReposSourcePoolProvider<R> {
                 .total_cmp(&left.0)
                 .then_with(|| left.1.cmp(&right.1))
         });
-        let selected: Vec<(f64, PathBuf, FileEvidence)> = scored.into_iter().take(limit).collect();
+        // A file in a folder marked now is withheld here, before the check over
+        // the selected files names it to ripgrep: no glob applies to a file a
+        // search names, and a folder marked since the first pass began is
+        // honoured (round 55 item 8b).
+        let mut selected: Vec<(f64, PathBuf, FileEvidence)> = Vec::new();
+        for candidate in scored {
+            if selected.len() == limit {
+                break;
+            }
+            if !in_marked_folder(&project.root, &candidate.1)? {
+                selected.push(candidate);
+            }
+        }
         // The surfaced files are verified together: one match pass and, when
         // the first pass was truncated, one count pass per term, each over all
         // of the files, instead of a process per file. Each file is still
@@ -1640,15 +1672,11 @@ impl<R: CommandRunner + Sync> SourcePoolProvider for WorkReposSourcePoolProvider
     fn status(&self) -> SourceProviderStatus {
         let capabilities = self.capabilities();
         let version = capabilities.version.clone();
-        // Each per-project glob list is the three fixed exclusions (marker
-        // file, .DS_Store, ProjectCentral aperture), the five ignored
-        // directory names, then one glob per marked subtree — anything beyond
-        // eight names a marked subtree.
-        const FIXED_GLOBS: usize = 8;
+        // The marked subtrees as they stand now, as a search would read them.
         let marked: usize = self
-            .marker_globs
-            .values()
-            .map(|globs| globs.len().saturating_sub(FIXED_GLOBS))
+            .projects
+            .iter()
+            .map(|project| marked_folders(&project.root).len())
             .sum();
         SourceProviderStatus {
             provider: provider(),
@@ -2847,5 +2875,274 @@ mod tests {
             std::fs::read_to_string(root.join("README.md")).unwrap(),
             "retained bytes\n"
         );
+    }
+
+    /// What ripgrep itself returns for `needle` under a project's exclusions, before any later gate sees it, each path relative
+    /// to the project.
+    fn rg_finds(root: &Path) -> Vec<String> {
+        assert!(
+            crate::ripgrep::available(),
+            "real ripgrep is required for this test"
+        );
+        let mut request = SearchRequest::new("needle", vec![root.to_path_buf()]);
+        request.exclude_globs = marker_exclude_globs(root);
+        let outcome = RipgrepSearcher::new(
+            SystemRunner::new().with_env_removed("RIPGREP_CONFIG_PATH"),
+            crate::ripgrep::executable(),
+        )
+        .search(&request)
+        .unwrap();
+        let mut found: Vec<String> = outcome
+            .matches
+            .iter()
+            .map(|matched| {
+                matched
+                    .path
+                    .strip_prefix(root)
+                    .unwrap()
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .collect();
+        found.sort();
+        found
+    }
+
+    /// Round 55 item 8b (DLW build ruling 2026-11-09): a marked folder is withheld by its own name, whatever letters it holds.
+    /// A glob letter in its name is escaped, so the glob names that folder and not a pattern that names another, and a
+    /// backslash is a letter of the name, not a separator.
+    #[test]
+    fn a_marked_folder_is_withheld_by_its_own_name_whatever_letters_it_holds() {
+        let temp = native_scratch();
+        let root = temp.path();
+        let pairs = [
+            ("a[1]", "a1"),
+            ("b{x,y}", "bx"),
+            ("c*d", "cxd"),
+            ("e?f", "exf"),
+            ("we\\ird", "we/ird"),
+        ];
+        for (marked, kept) in pairs {
+            write(&root.join(marked).join("withheld.md"), "needle\n");
+            write(&root.join(marked).join(NO_AGENT_RETRIEVAL_MARKER), "");
+            write(&root.join(kept).join("kept.md"), "needle\n");
+        }
+        let mut expected: Vec<String> = pairs
+            .iter()
+            .map(|(_, kept)| format!("{kept}/kept.md"))
+            .collect();
+        expected.sort();
+        assert_eq!(rg_finds(root), expected);
+    }
+
+    /// The same ruling: a marked folder is withheld at whatever depth it stands, twelve folders down as at one.
+    #[test]
+    fn a_marked_folder_is_withheld_at_any_depth() {
+        let temp = native_scratch();
+        let root = temp.path();
+        let deep: PathBuf = (1..=12).map(|level| format!("d{level}")).collect();
+        write(&root.join(&deep).join("withheld.md"), "needle\n");
+        write(&root.join(&deep).join(NO_AGENT_RETRIEVAL_MARKER), "");
+        let above = deep.parent().unwrap().join("kept.md");
+        write(&root.join(&above), "needle\n");
+        assert_eq!(rg_finds(root), [above.display().to_string()]);
+    }
+
+    /// The same ruling: the fixed exclusions withhold their folders at any depth inside the project, not at its top alone.
+    #[test]
+    fn the_fixed_exclusions_withhold_their_folders_at_any_depth_in_the_project() {
+        let temp = native_scratch();
+        let root = temp.path();
+        for path in [
+            "src/target/a.md",
+            "pkg/dist/b.md",
+            "web/node_modules/c.md",
+            "lib/ProjectCentral/d.md",
+            "target/e.md",
+            "kept.md",
+        ] {
+            write(&root.join(path), "needle\n");
+        }
+        assert_eq!(rg_finds(root), ["kept.md"]);
+    }
+
+    /// The members `hits` name, in order.
+    fn members(hits: &[SourceHit]) -> Vec<String> {
+        hits.iter()
+            .map(|hit| {
+                decode_work_file_source_ref(&hit.source)
+                    .unwrap()
+                    .unwrap()
+                    .member
+                    .display()
+                    .to_string()
+            })
+            .collect()
+    }
+
+    /// The same ruling: the folders a project marks are read as each search starts, so a folder marked after the provider
+    /// attached is withheld from the next search by the match pass itself.
+    #[test]
+    fn a_folder_marked_after_the_provider_attached_is_withheld_from_the_next_search() {
+        let temp = native_scratch();
+        let root = temp.path();
+        let runner = RecordingRunner::new(native_matches(
+            root,
+            &[
+                ("src/kept.rs", 1, "needle"),
+                ("sealed/withheld.md", 1, "needle"),
+            ],
+        ));
+        let provider = WorkReposSourcePoolProvider::connect(
+            &runner,
+            crate::ripgrep::executable(),
+            vec![project(root)],
+        );
+        assert!(
+            provider.status().available,
+            "real ripgrep is required for this test"
+        );
+        write(&root.join("sealed").join(NO_AGENT_RETRIEVAL_MARKER), "");
+        let hits = provider
+            .search("needle", SourceSearchMode::Fulltext, &[], 50)
+            .unwrap();
+        assert_eq!(members(&hits), ["src/kept.rs"]);
+        let first = runner
+            .calls()
+            .into_iter()
+            .find(|argv| argv.iter().any(|arg| arg == "--json"))
+            .expect("a match pass ran");
+        assert!(
+            first.iter().any(|arg| arg == "!sealed/**"),
+            "the match pass withholds the folder marked since the provider attached: {first:?}"
+        );
+    }
+
+    /// A runner that marks `folder` once a bounded pass (the match pass) has run, as a person marking a folder while a search
+    /// is under way would, and records every command.
+    struct MarksMidSearch {
+        inner: SystemRunner,
+        folder: PathBuf,
+        calls: std::sync::Mutex<Vec<Vec<String>>>,
+    }
+
+    impl MarksMidSearch {
+        fn record(&self, argv: &[String]) {
+            self.calls.lock().unwrap().push(argv.to_vec());
+        }
+    }
+
+    impl CommandRunner for MarksMidSearch {
+        fn run(&self, argv: &[String]) -> Result<crate::runner::Output> {
+            self.record(argv);
+            self.inner.run(argv)
+        }
+
+        fn run_with_timeout(
+            &self,
+            argv: &[String],
+            timeout: std::time::Duration,
+        ) -> Result<crate::runner::Output> {
+            self.record(argv);
+            self.inner.run_with_timeout(argv, timeout)
+        }
+
+        fn run_in(
+            &self,
+            dir: &Path,
+            argv: &[String],
+            timeout: Option<std::time::Duration>,
+        ) -> Result<crate::runner::Output> {
+            self.record(argv);
+            self.inner.run_in(dir, argv, timeout)
+        }
+
+        fn run_in_with_limits(
+            &self,
+            dir: &Path,
+            argv: &[String],
+            remaining_timeout: std::time::Duration,
+            remaining_aggregate_bytes: usize,
+            strict_utf8: bool,
+        ) -> Result<crate::runner::Output> {
+            self.record(argv);
+            let output = self.inner.run_in_with_limits(
+                dir,
+                argv,
+                remaining_timeout,
+                remaining_aggregate_bytes,
+                strict_utf8,
+            );
+            write(&self.folder.join(NO_AGENT_RETRIEVAL_MARKER), "");
+            output
+        }
+    }
+
+    /// The same ruling: a file in a folder marked while a search is under way is withheld before the check over the selected
+    /// files names it to ripgrep, which applies no glob to a file it is named. The search answers what stays readable.
+    #[test]
+    fn a_file_in_a_folder_marked_during_a_search_is_withheld_before_it_is_checked() {
+        let temp = native_scratch();
+        let root = temp.path();
+        let inner = native_matches(
+            root,
+            &[
+                ("src/kept.rs", 1, "needle"),
+                ("sealed/withheld.md", 1, "needle"),
+            ],
+        );
+        let runner = MarksMidSearch {
+            inner,
+            folder: root.join("sealed"),
+            calls: std::sync::Mutex::new(Vec::new()),
+        };
+        let provider = WorkReposSourcePoolProvider::connect(
+            &runner,
+            crate::ripgrep::executable(),
+            vec![project(root)],
+        );
+        assert!(
+            provider.status().available,
+            "real ripgrep is required for this test"
+        );
+        let hits = provider
+            .search("needle", SourceSearchMode::Fulltext, &[], 50)
+            .unwrap();
+        assert_eq!(members(&hits), ["src/kept.rs"]);
+        let withheld = root.join("sealed/withheld.md").display().to_string();
+        let calls = runner.calls.lock().unwrap().clone();
+        assert!(
+            calls.iter().all(|argv| !argv.contains(&withheld)),
+            "no command names the withheld file: {calls:?}"
+        );
+    }
+
+    /// The same ruling: a file whose name holds a newline leaves a truncated search its exact counts. Each file is counted
+    /// under its own name, so no part of that name is read as a file of its own.
+    #[test]
+    fn a_file_named_with_a_newline_leaves_a_truncated_search_its_exact_counts() {
+        let temp = native_scratch();
+        let root = temp.path();
+        for index in 0..(PER_REPO_MATCH_BUDGET + 1) {
+            write(&root.join(format!("src/noise{index}.rs")), "common\n");
+        }
+        write(&root.join("src/a\nb/x.rs"), "common\n");
+        write(
+            &root.join("docs/answer.md"),
+            "rareword\nrareword\nrareword\ncommon\n",
+        );
+        let provider = WorkReposSourcePoolProvider::connect(
+            native_matches(root, &[]),
+            crate::ripgrep::executable(),
+            vec![project(root)],
+        );
+        assert!(
+            provider.status().available,
+            "real ripgrep is required for this test"
+        );
+        let hits = provider
+            .search("rareword common", SourceSearchMode::Fulltext, &[], 5)
+            .unwrap();
+        assert_eq!(members(&hits)[0], "docs/answer.md", "{hits:?}");
     }
 }

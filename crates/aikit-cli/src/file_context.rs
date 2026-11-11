@@ -432,11 +432,13 @@ pub fn run(
     }
 
     // File-addressed domain guidance: per-domain blocks under the same laws.
+    // A pattern is matched against the project-relative path alone, so the
+    // folders above the project never choose its guidance (round 55 item 8b).
     for domain in domains {
         let matched = domain
             .path_patterns
             .iter()
-            .any(|pattern| glob_matches(pattern, &relative_path) || glob_matches(pattern, path));
+            .any(|pattern| glob_matches(pattern, &relative_path));
         if !matched {
             continue;
         }

@@ -156,6 +156,14 @@ pub trait CommandRunner {
         Err(dir_unsupported(argv))
     }
 
+    /// The folder a command this runner starts reads its relative paths from, when that is not this process's own folder
+    /// ([`SystemRunner::with_cwd`]). A caller that names a relative path for a command to read names it from here, so it is
+    /// the path the command reads (ripgrep.rs `RipgrepSearcher::search` names a relative root so). A runner that wraps
+    /// another answers as the one it wraps.
+    fn starts_in(&self) -> Option<PathBuf> {
+        None
+    }
+
     /// [`CommandRunner::run_with_limits`] with the command started in `dir`, as [`CommandRunner::run_in`] starts it. A runner that
     /// cannot enforce the limits refuses as [`CommandRunner::run_with_limits`] does (`mux.command_limits_unsupported`), so its caller
     /// can ask [`CommandRunner::run_in`] instead, which refuses in turn if the runner cannot start a command in a directory either.
@@ -203,6 +211,10 @@ impl<T: CommandRunner + ?Sized> CommandRunner for Box<T> {
 
     fn configured_timeout(&self) -> Option<std::time::Duration> {
         (**self).configured_timeout()
+    }
+
+    fn starts_in(&self) -> Option<PathBuf> {
+        (**self).starts_in()
     }
 
     fn run_with_limits(
@@ -258,6 +270,10 @@ impl<T: CommandRunner + ?Sized> CommandRunner for &T {
 
     fn configured_timeout(&self) -> Option<std::time::Duration> {
         (**self).configured_timeout()
+    }
+
+    fn starts_in(&self) -> Option<PathBuf> {
+        (**self).starts_in()
     }
 
     fn run_with_limits(
@@ -316,6 +332,10 @@ impl<T: CommandRunner + ?Sized> CommandRunner for std::sync::Arc<T> {
 
     fn configured_timeout(&self) -> Option<std::time::Duration> {
         (**self).configured_timeout()
+    }
+
+    fn starts_in(&self) -> Option<PathBuf> {
+        (**self).starts_in()
     }
 
     fn run_with_limits(
@@ -2299,6 +2319,10 @@ fn invocation_stream_limit(timeout: std::time::Duration, aggregate_bytes: usize)
 }
 
 impl CommandRunner for SystemRunner {
+    fn starts_in(&self) -> Option<PathBuf> {
+        self.cwd.clone()
+    }
+
     fn configured_timeout(&self) -> Option<std::time::Duration> {
         let remaining = self
             .deadline
@@ -2448,6 +2472,10 @@ impl<R: CommandRunner> CommandRunner for RecordingRunner<R> {
 
     fn configured_timeout(&self) -> Option<std::time::Duration> {
         self.inner.configured_timeout()
+    }
+
+    fn starts_in(&self) -> Option<PathBuf> {
+        self.inner.starts_in()
     }
 
     fn run_with_limits(
@@ -2698,6 +2726,150 @@ mod tests {
                 "{dir}"
             );
         }
+    }
+
+    /// A runner that answers each command with the folder it was asked to start it in and the kind of call, and says it starts
+    /// commands in `/base`.
+    struct Started;
+
+    impl CommandRunner for Started {
+        fn run(&self, _argv: &[String]) -> Result<Output> {
+            Ok(Output::success("run"))
+        }
+
+        fn run_in(
+            &self,
+            dir: &Path,
+            _argv: &[String],
+            _timeout: Option<std::time::Duration>,
+        ) -> Result<Output> {
+            Ok(Output::success(format!("in {}", dir.display())))
+        }
+
+        fn run_in_with_limits(
+            &self,
+            dir: &Path,
+            _argv: &[String],
+            _remaining_timeout: std::time::Duration,
+            remaining_aggregate_bytes: usize,
+            _strict_utf8: bool,
+        ) -> Result<Output> {
+            Ok(Output::success(format!(
+                "limited in {} to {remaining_aggregate_bytes}",
+                dir.display()
+            )))
+        }
+
+        fn starts_in(&self) -> Option<PathBuf> {
+            Some(PathBuf::from("/base"))
+        }
+    }
+
+    /// What `runner` answers to a command started in `/root`, unbounded and bounded.
+    fn started(runner: &dyn CommandRunner) -> (String, String) {
+        let argv = vec!["rg".to_string()];
+        let dir = Path::new("/root");
+        (
+            runner.run_in(dir, &argv, None).unwrap().stdout,
+            runner
+                .run_in_with_limits(dir, &argv, std::time::Duration::from_secs(1), 4096, false)
+                .unwrap()
+                .stdout,
+        )
+    }
+
+    /// Round 55 item 8b (DLW build ruling 2026-11-09): a runner that wraps another starts a command where the one it wraps
+    /// would, bounded or not: `Box`, `Arc`, a borrow and the recording runner each pass the folder on.
+    #[test]
+    fn a_wrapping_runner_starts_a_command_in_the_folder_it_is_given() {
+        let expected = (
+            "in /root".to_string(),
+            "limited in /root to 4096".to_string(),
+        );
+        let boxed: Box<dyn CommandRunner> = Box::new(Started);
+        assert_eq!(started(&boxed), expected, "Box");
+        assert_eq!(started(&std::sync::Arc::new(Started)), expected, "Arc");
+        assert_eq!(started(&&Started), expected, "a borrow");
+        assert_eq!(
+            started(&RecordingRunner::new(Started)),
+            expected,
+            "the recording runner"
+        );
+    }
+
+    /// The same ruling: a runner that wraps another says where the one it wraps starts commands, so a relative path is named
+    /// from there (ripgrep.rs `RipgrepSearcher::search`).
+    #[test]
+    fn a_wrapping_runner_says_where_the_one_it_wraps_starts_commands() {
+        fn says(runner: &dyn CommandRunner) -> Option<PathBuf> {
+            runner.starts_in()
+        }
+        let base = Some(PathBuf::from("/base"));
+        let boxed: Box<dyn CommandRunner> = Box::new(Started);
+        assert_eq!(says(&boxed), base, "Box");
+        assert_eq!(says(&std::sync::Arc::new(Started)), base, "Arc");
+        assert_eq!(says(&&Started), base, "a borrow");
+        assert_eq!(
+            says(&RecordingRunner::new(Started)),
+            base,
+            "the recording runner"
+        );
+        assert_eq!(ScriptedRunner::new().starts_in(), None);
+        assert_eq!(SystemRunner::new().starts_in(), None);
+        assert_eq!(
+            SystemRunner::new().with_cwd("/base").starts_in(),
+            base,
+            "a runner started in a folder"
+        );
+    }
+
+    /// The same ruling: a recorded response answers a command started in a folder as it answers one started anywhere, within the
+    /// capacity a bounded call gives it.
+    #[test]
+    fn a_scripted_runner_answers_a_command_started_in_a_folder() {
+        let runner = ScriptedRunner::new().on("rg", "recorded");
+        let argv = vec!["rg".to_string()];
+        let dir = Path::new("/root");
+        assert_eq!(runner.run_in(dir, &argv, None).unwrap().stdout, "recorded");
+        assert_eq!(
+            runner
+                .run_in_with_limits(dir, &argv, std::time::Duration::from_secs(1), 64, false)
+                .unwrap()
+                .stdout,
+            "recorded"
+        );
+        assert_eq!(
+            runner
+                .run_in_with_limits(dir, &argv, std::time::Duration::from_secs(1), 8, false)
+                .unwrap_err()
+                .code(),
+            "mux.command_output_limit"
+        );
+    }
+
+    /// The same ruling: a runner that implements none of it refuses a command in a folder before anything runs, and refuses a
+    /// bounded one as a runner that cannot bound a read, so its caller can ask for an unbounded one instead.
+    #[test]
+    fn a_runner_that_cannot_start_in_a_folder_refuses_before_anything_runs() {
+        struct Plain;
+        impl CommandRunner for Plain {
+            fn run(&self, _argv: &[String]) -> Result<Output> {
+                panic!("nothing runs")
+            }
+        }
+        let argv = vec!["rg".to_string()];
+        let dir = Path::new("/root");
+        assert_eq!(
+            Plain.run_in(dir, &argv, None).unwrap_err().code(),
+            "mux.command_dir_unsupported"
+        );
+        assert_eq!(
+            Plain
+                .run_in_with_limits(dir, &argv, std::time::Duration::from_secs(1), 64, false)
+                .unwrap_err()
+                .code(),
+            "mux.command_limits_unsupported"
+        );
     }
 
     #[cfg(any(target_os = "linux", target_os = "macos"))]
