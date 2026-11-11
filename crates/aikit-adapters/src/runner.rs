@@ -4859,6 +4859,97 @@ mod tests {
         );
     }
 
+    /// Round 55 item 8c (DLW build ruling 2026-11-11; the review of #616, F2): every runner in the workspace that wraps another
+    /// passes on where it starts commands (`starts_in`) and both forms that start one in a folder (`run_in`,
+    /// `run_in_with_limits`), so a new wrapper cannot forget them: the trait's defaults refuse a folder search and name no
+    /// folder. The workspace's sources are read as text. A runner wraps another when its `CommandRunner` impl calls a run form
+    /// on a field of its own or on what it points at. One wrapper is bare on purpose, and named here: `LegacyNative`, the test
+    /// runner that shows what the defaults do.
+    #[test]
+    fn every_runner_that_wraps_another_forwards_the_folder_forms() {
+        fn sources(folder: &Path, found: &mut Vec<PathBuf>) {
+            for entry in std::fs::read_dir(folder).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    if path.file_name().is_some_and(|name| name != "target") {
+                        sources(&path, found);
+                    }
+                } else if path.extension().is_some_and(|extension| extension == "rs") {
+                    found.push(path);
+                }
+            }
+        }
+        let crates = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+        let mut files = Vec::new();
+        sources(&crates, &mut files);
+        let (mut wrappers, mut bare) = (0, Vec::new());
+        for file in files {
+            let text = std::fs::read_to_string(&file).unwrap();
+            let mut from = 0;
+            while let Some(at) = text[from..].find("CommandRunner for ").map(|at| at + from) {
+                from = at + 1;
+                let Some(open) = text[at..].find('{').map(|open| open + at) else {
+                    continue;
+                };
+                // An impl's header, not a mention in prose: it stands after `impl` on its line and names a type before `{`.
+                let line = text[..at].rfind('\n').map_or(0, |line| line + 1);
+                if !text[line..at].trim_start().starts_with("impl") || text[at..open].contains('\n')
+                {
+                    continue;
+                }
+                let name = text[at + "CommandRunner for ".len()..open]
+                    .trim()
+                    .to_owned();
+                let mut depth = 0usize;
+                let mut end = text.len();
+                for (offset, character) in text[open..].char_indices() {
+                    match character {
+                        '{' => depth += 1,
+                        '}' => {
+                            depth -= 1;
+                            if depth == 0 {
+                                end = open + offset;
+                                break;
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                let body: String = text[open..end].split_whitespace().collect();
+                let wraps = body.contains("(**self).run")
+                    || body.match_indices("self.").any(|(at, _)| {
+                        let rest = &body[at + "self.".len()..];
+                        let field = rest
+                            .find(|c: char| !(c.is_alphanumeric() || c == '_'))
+                            .unwrap_or(rest.len());
+                        field > 0
+                            && [
+                                ".run(",
+                                ".run_with_timeout(",
+                                ".run_with_limits(",
+                                ".run_in(",
+                            ]
+                            .iter()
+                            .any(|call| rest[field..].starts_with(call))
+                    });
+                if !wraps || name == "LegacyNative" {
+                    continue;
+                }
+                wrappers += 1;
+                for form in ["fnstarts_in(", "fnrun_in(", "fnrun_in_with_limits("] {
+                    if !body.contains(form) {
+                        bare.push(format!("{name} in {} lacks {form}", file.display()));
+                    }
+                }
+            }
+        }
+        assert!(bare.is_empty(), "{bare:#?}");
+        assert!(
+            wrappers >= 11,
+            "the scan still finds the workspace's wrappers: {wrappers}"
+        );
+    }
+
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
     fn unsupported_runner_limits_do_not_delegate_to_an_actual_effectful_run() {

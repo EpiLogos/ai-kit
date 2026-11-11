@@ -61,6 +61,42 @@ impl CommandRunner for SearchReceiptInterleaving {
     fn run_with_timeout(&self, argv: &[String], timeout: Duration) -> aikit_core::Result<Output> {
         self.after_search(argv, self.runner.run_with_timeout(argv, timeout)?)
     }
+
+    // A runner that wraps another passes on where it starts commands and both forms that start one in a folder (round 55 item
+    // 8c; the review of #616, F2): the defaults refuse a folder search, and `starts_in` would read as this process's own folder.
+
+    fn starts_in(&self) -> Option<std::path::PathBuf> {
+        self.runner.starts_in()
+    }
+
+    fn run_in(
+        &self,
+        dir: &std::path::Path,
+        argv: &[String],
+        timeout: Option<std::time::Duration>,
+    ) -> aikit_core::Result<Output> {
+        self.after_search(argv, self.runner.run_in(dir, argv, timeout)?)
+    }
+
+    fn run_in_with_limits(
+        &self,
+        dir: &std::path::Path,
+        argv: &[String],
+        remaining_timeout: std::time::Duration,
+        remaining_aggregate_bytes: usize,
+        strict_utf8: bool,
+    ) -> aikit_core::Result<Output> {
+        self.after_search(
+            argv,
+            self.runner.run_in_with_limits(
+                dir,
+                argv,
+                remaining_timeout,
+                remaining_aggregate_bytes,
+                strict_utf8,
+            )?,
+        )
+    }
 }
 
 fn scratch() -> tempfile::TempDir {
@@ -1386,6 +1422,42 @@ impl CommandRunner for RgReceiptInterleaving {
     fn run_with_timeout(&self, argv: &[String], timeout: Duration) -> aikit_core::Result<Output> {
         self.after_query(argv, self.runner.run_with_timeout(argv, timeout)?)
     }
+
+    // A runner that wraps another passes on where it starts commands and both forms that start one in a folder (round 55 item
+    // 8c; the review of #616, F2): the defaults refuse a folder search, and `starts_in` would read as this process's own folder.
+
+    fn starts_in(&self) -> Option<std::path::PathBuf> {
+        self.runner.starts_in()
+    }
+
+    fn run_in(
+        &self,
+        dir: &std::path::Path,
+        argv: &[String],
+        timeout: Option<std::time::Duration>,
+    ) -> aikit_core::Result<Output> {
+        self.after_query(argv, self.runner.run_in(dir, argv, timeout)?)
+    }
+
+    fn run_in_with_limits(
+        &self,
+        dir: &std::path::Path,
+        argv: &[String],
+        remaining_timeout: std::time::Duration,
+        remaining_aggregate_bytes: usize,
+        strict_utf8: bool,
+    ) -> aikit_core::Result<Output> {
+        self.after_query(
+            argv,
+            self.runner.run_in_with_limits(
+                dir,
+                argv,
+                remaining_timeout,
+                remaining_aggregate_bytes,
+                strict_utf8,
+            )?,
+        )
+    }
 }
 
 #[test]
@@ -1676,6 +1748,39 @@ impl CommandRunner for BeforeResolveBatch {
 
     fn run_with_timeout(&self, argv: &[String], timeout: Duration) -> aikit_core::Result<Output> {
         self.0.run_with_timeout(&Self::renamed(argv), timeout)
+    }
+
+    // A runner that wraps another passes on where it starts commands and both forms that start one in a folder (round 55 item
+    // 8c; the review of #616, F2): the defaults refuse a folder search, and `starts_in` would read as this process's own folder.
+
+    fn starts_in(&self) -> Option<std::path::PathBuf> {
+        self.0.starts_in()
+    }
+
+    fn run_in(
+        &self,
+        dir: &std::path::Path,
+        argv: &[String],
+        timeout: Option<std::time::Duration>,
+    ) -> aikit_core::Result<Output> {
+        self.0.run_in(dir, &Self::renamed(argv), timeout)
+    }
+
+    fn run_in_with_limits(
+        &self,
+        dir: &std::path::Path,
+        argv: &[String],
+        remaining_timeout: std::time::Duration,
+        remaining_aggregate_bytes: usize,
+        strict_utf8: bool,
+    ) -> aikit_core::Result<Output> {
+        self.0.run_in_with_limits(
+            dir,
+            &Self::renamed(argv),
+            remaining_timeout,
+            remaining_aggregate_bytes,
+            strict_utf8,
+        )
     }
 }
 

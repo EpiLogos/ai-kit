@@ -211,9 +211,15 @@ impl SearchRequest {
                 root: None,
                 argv: self.argv_over(
                     executable,
-                    files
-                        .into_iter()
-                        .map(|file| file.to_string_lossy().into_owned()),
+                    // A relative file named with a leading dash is named from `.`, so ripgrep reads a path and not a flag.
+                    files.into_iter().map(|file| {
+                        let named = file.to_string_lossy().into_owned();
+                        if named.starts_with('-') {
+                            format!("./{named}")
+                        } else {
+                            named
+                        }
+                    }),
                     false,
                 ),
             });
@@ -248,7 +254,11 @@ fn started_anywhere(executable: &Path) -> PathBuf {
 /// as a default APFS or HFS+ volume does: an entry of the folder, named with
 /// its ASCII letters' case swapped, is the same file. A folder none of whose
 /// first entries has an ASCII letter is judged by its own name in its parent,
-/// when that parent is on the same volume. Nothing judged answers no.
+/// when that parent is on the same volume. Where nothing can be judged (no
+/// name with a letter to try, or a parent on another volume) the answer is
+/// yes: the caller asks for its deny globs, and a deny glob matched without
+/// regard to case withholds no less than one matched with it (round 55 item
+/// 8c; the review of #616, F5).
 pub(crate) fn folds_case(folder: &Path) -> bool {
     #[cfg(unix)]
     {
@@ -284,13 +294,13 @@ pub(crate) fn folds_case(folder: &Path) -> bool {
         let (Some(parent), Some((name, other))) =
             (folder.parent(), folder.file_name().and_then(swapped))
         else {
-            return false;
+            return true;
         };
         let on_one_volume = match (std::fs::metadata(parent), std::fs::metadata(folder)) {
             (Ok(parent), Ok(folder)) => parent.dev() == folder.dev(),
             _ => false,
         };
-        on_one_volume && same(&parent.join(name), &parent.join(other))
+        !on_one_volume || same(&parent.join(name), &parent.join(other))
     }
     #[cfg(not(unix))]
     {
@@ -390,19 +400,54 @@ pub struct RipgrepOutcome {
     pub matches: Vec<RipgrepMatch>,
     pub files_searched: usize,
     pub truncated: bool,
+    /// How many passes of a bounded search were stopped at their capacity and
+    /// asked again for a sample ([`RipgrepSearcher::search_bounded`]). Each
+    /// cost up to two more reads of its allowance, so a caller can tell a
+    /// search that read once from one that read up to three times a root.
+    pub asked_again: usize,
 }
 
 impl RipgrepOutcome {
     /// One pass's outcome added to the request's, its paths named under the
-    /// pass's root.
-    fn add(&mut self, pass: &RipgrepPass, part: RipgrepOutcome) {
+    /// pass's root, in path order and then line order: ripgrep walks a root on
+    /// more than one thread, so the order of its stream is not the same twice
+    /// (round 55 item 8c; the review of #616, F5). Which matches a limit keeps
+    /// is still the stream's to say; what is kept is ordered.
+    fn add(&mut self, pass: &RipgrepPass, mut part: RipgrepOutcome) {
         self.files_searched += part.files_searched;
         self.truncated |= part.truncated;
+        self.asked_again += part.asked_again;
+        part.matches.sort_by(|one, other| {
+            (&one.path, one.line_number).cmp(&(&other.path, other.line_number))
+        });
         self.matches
             .extend(part.matches.into_iter().map(|matched| RipgrepMatch {
                 path: pass.named(matched.path),
                 ..matched
             }));
+    }
+
+    /// The matches in the order the request named its roots: a root that is a
+    /// file where the request named it, and not after every folder, though the
+    /// single files are searched by one pass after the folders'. A match is its
+    /// root's by being that file, or else by standing under that folder; the
+    /// order inside a root is kept.
+    fn in_request_order(mut self, request: &SearchRequest) -> Self {
+        let place = |matched: &RipgrepMatch| {
+            request
+                .roots
+                .iter()
+                .position(|root| *root == matched.path)
+                .or_else(|| {
+                    request
+                        .roots
+                        .iter()
+                        .position(|root| matched.path.starts_with(root))
+                })
+                .unwrap_or(request.roots.len())
+        };
+        self.matches.sort_by_key(place);
+        self
     }
 }
 
@@ -470,9 +515,11 @@ impl Deadline {
 /// ([`RipgrepSearcher::search_bounded`]). Each pass may keep an equal part of
 /// the matches still unkept, rounded up, and read an equal part of the bytes
 /// still unread; what a pass leaves unused is carried on to the passes after
-/// it, so a first root cannot starve the rest. The whole read is bounded as one
-/// process over every root was: its matches' worth of events and one more, on
-/// each of its two streams.
+/// it, so a first root cannot starve the rest. The first read of every pass is
+/// bounded together as one process over every root was: its matches' worth of
+/// events and one more, on each of its two streams. A pass stopped at its
+/// capacity reads at most its allowance twice more for its sample: three
+/// allowances for that pass in the worst case.
 struct Share {
     matches: usize,
     bytes: usize,
@@ -494,6 +541,11 @@ impl Share {
     /// What the next pass may keep, and what it may read.
     fn next(&self) -> (usize, usize) {
         (self.matches.div_ceil(self.passes), self.bytes / self.passes)
+    }
+
+    /// A stopped pass kept `kept` matches after all, as its sample.
+    fn kept(&mut self, kept: usize) {
+        self.matches = self.matches.saturating_sub(kept);
     }
 
     /// A pass kept `kept` matches and read `read` bytes.
@@ -571,9 +623,11 @@ impl<R: CommandRunner> RipgrepSearcher<R> {
                 },
             };
             let kept = request.limit.saturating_sub(outcome.matches.len());
-            outcome.add(&pass, Self::outcome_of(kept, &pass, &output)?);
+            let part = Self::outcome_of(kept, &pass, &output)
+                .map_err(|error| never_stood(&request, &pass, error))?;
+            outcome.add(&pass, part);
         }
-        Ok(outcome)
+        Ok(outcome.in_request_order(&request))
     }
 
     /// [`RipgrepSearcher::search`] with what is read bounded as well as what
@@ -586,10 +640,18 @@ impl<R: CommandRunner> RipgrepSearcher<R> {
     ///
     /// The passes of a request over several roots share its matches and its
     /// read fairly ([`Share`]): each may keep and read an equal part of what
-    /// is left, so every root is represented and the whole read is bounded
-    /// as tightly as one process over every root was. A pass stopped at its
-    /// capacity answers truncated with no sample of its own; what the other
-    /// passes keep stands.
+    /// is left. A folder pass stopped at its capacity answers truncated, and
+    /// is asked again for a sample: the files that match, then one match of
+    /// each of the first of them ([`RipgrepSearcher::sample_of_stopped`]). So
+    /// a root is represented when the limit allows a match a root and the list
+    /// of its matching files fits its allowance; where that list does not fit,
+    /// and for the pass over single files, a stopped pass keeps no sample.
+    /// What the other passes keep stands either way. The worst case of the
+    /// read is so: each pass reads its allowance once, and a stopped pass at
+    /// most twice more, three allowances in all; the first reads of every pass
+    /// together are bounded as one process over every root was. The outcome
+    /// counts the passes asked again (`asked_again`). Every read, the two
+    /// further ones too, runs under the request's one timeout.
     pub fn search_bounded(&self, request: &SearchRequest) -> Result<RipgrepOutcome> {
         if request.is_no_match() || request.roots.is_empty() || request.limit == usize::MAX {
             return self.search(request);
@@ -616,7 +678,8 @@ impl<R: CommandRunner> RipgrepSearcher<R> {
             };
             match output {
                 Ok(output) => {
-                    let part = Self::outcome_of(kept, pass, &output)?;
+                    let part = Self::outcome_of(kept, pass, &output)
+                        .map_err(|error| never_stood(&request, pass, error))?;
                     share.spent(
                         part.matches.len(),
                         output.stdout.len().saturating_add(output.stderr.len()),
@@ -626,6 +689,12 @@ impl<R: CommandRunner> RipgrepSearcher<R> {
                 Err(error) if error.code() == "mux.command_output_limit" => {
                     share.spent(0, allowance);
                     outcome.truncated = true;
+                    let (asked, sample) = self.sample_of_stopped(pass, kept, allowance, &deadline);
+                    outcome.asked_again += usize::from(asked);
+                    if let Some(sample) = sample {
+                        share.kept(sample.matches.len());
+                        outcome.add(pass, sample);
+                    }
                 }
                 Err(error) if error.code() == "mux.command_limits_unsupported" => {
                     return self.search(&request)
@@ -633,7 +702,88 @@ impl<R: CommandRunner> RipgrepSearcher<R> {
                 Err(error) => return Err(unsearchable(pass, error)),
             }
         }
-        Ok(outcome)
+        Ok(outcome.in_request_order(&request))
+    }
+
+    /// A sample of a folder pass that was stopped at its capacity, so its root
+    /// is still represented (round 55 item 8c; the review of #616, the share).
+    /// The pass is asked again for less, twice, each read under the stopped
+    /// pass's own allowance: first the files that match, by name and count,
+    /// which is a far smaller stream than their match events; then one match of
+    /// each of the first `kept` of them, in path order. Where either read
+    /// fails or runs past its allowance too, there is no sample, as before.
+    /// Both reads run under what is left of the request's one timeout, and
+    /// neither starts once it is spent. Answers whether the pass was asked
+    /// again at all, and its sample.
+    fn sample_of_stopped(
+        &self,
+        pass: &RipgrepPass,
+        kept: usize,
+        allowance: usize,
+        deadline: &Deadline,
+    ) -> (bool, Option<RipgrepOutcome>) {
+        let Some(root) = pass.root.as_ref().filter(|_| kept > 0) else {
+            return (false, None);
+        };
+        let listing = counted(pass.argv.clone());
+        let Ok(budget) = deadline.remaining(&listing) else {
+            return (false, None);
+        };
+        (
+            true,
+            self.sample_within(root, pass, kept, allowance, deadline, &listing, budget),
+        )
+    }
+
+    /// The two reads of [`RipgrepSearcher::sample_of_stopped`].
+    #[allow(clippy::too_many_arguments)]
+    fn sample_within(
+        &self,
+        root: &Path,
+        pass: &RipgrepPass,
+        kept: usize,
+        allowance: usize,
+        deadline: &Deadline,
+        listing: &[String],
+        budget: Option<Duration>,
+    ) -> Option<RipgrepOutcome> {
+        let listed = self
+            .runner
+            .run_in_with_limits(
+                root,
+                listing,
+                budget.unwrap_or(BOUNDED_SEARCH_TIMEOUT),
+                allowance,
+                false,
+            )
+            .ok()?;
+        let mut files: Vec<PathBuf> = count_records(&listed.stdout)
+            .ok()?
+            .into_iter()
+            .filter(|(_, count)| *count > 0)
+            .map(|(path, _)| path)
+            .collect();
+        files.sort();
+        files.truncate(kept);
+        if files.is_empty() {
+            return None;
+        }
+        let sampling = one_match_of_each(&pass.argv, &files);
+        let budget = deadline.remaining(&sampling).ok()?;
+        let sampled = self
+            .runner
+            .run_in_with_limits(
+                root,
+                &sampling,
+                budget.unwrap_or(BOUNDED_SEARCH_TIMEOUT),
+                allowance,
+                false,
+            )
+            .ok()?;
+        let mut sample = Self::outcome_of(kept, pass, &sampled).ok()?;
+        // The sample is one match a file: whether more stand is the stopped pass's to say, and it has.
+        sample.truncated = true;
+        Some(sample)
     }
 
     /// One pass's answer, keeping at most `kept` matches.
@@ -692,6 +842,35 @@ impl<R: CommandRunner> RipgrepSearcher<R> {
     }
 }
 
+/// A folder pass's argv turned to its sample pass ([`RipgrepSearcher::sample_of_stopped`]): the same flags over `files`, named
+/// from the pass's root in place of `.`, with one match kept a file. A name ripgrep could read as a flag is named from `.`.
+fn one_match_of_each(argv: &[String], files: &[PathBuf]) -> Vec<String> {
+    let mut argv = argv.to_vec();
+    argv.pop();
+    match argv.iter().position(|arg| arg == "--max-count") {
+        Some(cap) => argv[cap + 1] = "1".into(),
+        None => {
+            let pattern = argv
+                .iter()
+                .rposition(|arg| arg == "-e")
+                .unwrap_or(argv.len());
+            argv.splice(
+                pattern..pattern,
+                ["--max-count".to_string(), "1".to_string()],
+            );
+        }
+    }
+    argv.extend(files.iter().map(|file| {
+        let named = file.to_string_lossy().into_owned();
+        if named.starts_with('-') {
+            format!("./{named}")
+        } else {
+            named
+        }
+    }));
+    argv
+}
+
 /// ` searching <root>`, for a pass started in a root; nothing for the pass over
 /// single files, whose command names them.
 fn searching(pass: &RipgrepPass) -> String {
@@ -734,6 +913,33 @@ fn unsearchable(pass: &RipgrepPass, error: AikitError) -> AikitError {
     }
 }
 
+/// The failure of the pass over single files, when one of the roots it was given is not there: that root is named, in the
+/// words an unreadable folder root is named in (`unsearchable`), since ripgrep's own failure over a missing path names nothing
+/// under `--no-messages` (round 55 item 8c; the review of #616, F3). A root that is not a folder goes to that pass, a missing
+/// one too (`SearchRequest::passes`). A failure ripgrep gave a diagnostic for, and any other, is passed on as it is.
+fn never_stood(request: &SearchRequest, pass: &RipgrepPass, error: AikitError) -> AikitError {
+    // Only where ripgrep itself said nothing: a diagnostic it gave is the better word.
+    let silent = error.message().contains("ripgrep reported no diagnostic")
+        || error.message().starts_with("ripgrep count exited");
+    if pass.root.is_some() || error.code() != "search.ripgrep_failed" || !silent {
+        return error;
+    }
+    let missing = request.roots.iter().find_map(|root| {
+        std::fs::symlink_metadata(root)
+            .err()
+            .filter(|cause| cause.kind() == std::io::ErrorKind::NotFound)
+            .map(|cause| (root, cause))
+    });
+    match missing {
+        Some((root, cause)) => failed(
+            pass,
+            format!("ripgrep could not search {}: {cause}", root.display()),
+        )
+        .with("root", root.display().to_string()),
+        None => error,
+    }
+}
+
 impl<R: CommandRunner> RipgrepSearcher<R> {
     /// Count matching lines per file over the request's whole scope. The
     /// exact, untruncated companion of [`RipgrepSearcher::search`] for a
@@ -762,12 +968,16 @@ impl<R: CommandRunner> RipgrepSearcher<R> {
                 },
             };
             if output.status != 0 && output.status != 1 {
-                return Err(failed(
+                return Err(never_stood(
+                    &request,
                     &pass,
-                    format!(
-                        "ripgrep count exited with status {}{}",
-                        output.status,
-                        searching(&pass)
+                    failed(
+                        &pass,
+                        format!(
+                            "ripgrep count exited with status {}{}",
+                            output.status,
+                            searching(&pass)
+                        ),
                     ),
                 ));
             }
@@ -991,8 +1201,14 @@ mod tests {
         assert_eq!((all.matches.len(), all.truncated), (64, false));
         let mut narrow = wide.clone();
         narrow.limit = 2;
+        // The pass is stopped at its capacity and says so. Since round 55 item 8c it is asked again and keeps a sample: one
+        // match of each of the first two files that match, where before it kept none.
         let cut = searcher.search_bounded(&narrow).unwrap();
-        assert_eq!((cut.matches.len(), cut.truncated), (0, true));
+        assert_eq!(
+            (cut.matches.len(), cut.truncated, cut.asked_again),
+            (2, true, 1)
+        );
+        assert_eq!(all.asked_again, 0);
     }
 
     #[test]
@@ -1373,6 +1589,292 @@ mod tests {
         assert_eq!(kept_per_root(&[3, 3], 2), (vec![1, 1], true));
     }
 
+    /// Round 55 item 8c (the review of #616, the share): a root whose matches run past its share of the read still keeps a
+    /// sample. Two roots of 40 one-match files under a limit of 10 each keep their five, where both kept none; a second root of
+    /// one file keeps its one.
+    #[test]
+    fn a_root_stopped_at_its_capacity_still_keeps_a_sample() {
+        if !available() {
+            return;
+        }
+        assert_eq!(kept_per_root(&[40, 40], 10), (vec![5, 5], true));
+        assert_eq!(kept_per_root(&[40, 1], 10), (vec![5, 1], true));
+    }
+
+    /// The same ruling, by what each read is given: a stopped pass is asked again twice, each read under the same allowance
+    /// and under what the reads before it left of the request's one timeout; the outcome counts the pass. Once the timeout is
+    /// spent nothing more is asked, and the pass is not counted.
+    #[test]
+    fn a_stopped_pass_is_asked_again_within_the_request_s_timeout_and_counted() {
+        let dir = tempfile::tempdir().unwrap();
+        let shared = ledger_request(dir.path(), 2, 10);
+        let whole = 11 * MATCH_EVENT_BYTES * 2;
+        let seconds = |given: &[Given]| -> Vec<(usize, u64, Option<usize>)> {
+            given
+                .iter()
+                .map(|given| {
+                    (
+                        shared
+                            .roots
+                            .iter()
+                            .position(|root| *root == given.root)
+                            .unwrap(),
+                        // To the nearest second: the logical clock moves by whole seconds, the machine's by a little more.
+                        given.timeout.unwrap().as_secs_f64().round() as u64,
+                        given.bytes,
+                    )
+                })
+                .collect()
+        };
+        let ledger = Ledger::new(&shared.roots, &[400, 2], Duration::from_secs(4));
+        let outcome = RipgrepSearcher::new(&ledger, "rg")
+            .search_bounded(&shared)
+            .unwrap();
+        assert_eq!(outcome.asked_again, 1);
+        let half = Some(whole / 2);
+        assert_eq!(
+            seconds(&ledger.given()),
+            [(0, 30, half), (0, 26, half), (0, 22, half), (1, 18, half)]
+        );
+        // A pass that takes the whole timeout leaves nothing to ask again with, and the next pass does not start.
+        let slow = Ledger::new(&shared.roots, &[400, 2], Duration::from_secs(30));
+        let spent = RipgrepSearcher::new(&slow, "rg").search_bounded(&shared);
+        assert_eq!(spent.unwrap_err().code(), "mux.command_timeout");
+        assert_eq!(seconds(&slow.given()), [(0, 30, half)]);
+        // One that is not stopped is not asked again.
+        let small = Ledger::new(&shared.roots, &[2, 2], Duration::ZERO);
+        let once = RipgrepSearcher::new(&small, "rg")
+            .search_bounded(&shared)
+            .unwrap();
+        assert_eq!((once.asked_again, small.given().len()), (0, 2));
+    }
+
+    /// The same ruling, by its argv: the sample pass keeps the stopped pass's flags, names the listed files in place of `.`,
+    /// and keeps one match a file, whether the request named a cap of its own or none.
+    #[test]
+    fn a_sample_pass_names_the_listed_files_and_keeps_one_match_of_each() {
+        let mut capped = request();
+        capped.max_count_per_file = Some(4);
+        for request in [request(), capped] {
+            let over_a_folder = request.argv_over(Path::new("rg"), [".".to_string()], false);
+            let sampling = one_match_of_each(
+                &over_a_folder,
+                &[PathBuf::from("./a.md"), PathBuf::from("-b.md")],
+            );
+            let cap = sampling
+                .iter()
+                .position(|arg| arg == "--max-count")
+                .unwrap();
+            assert_eq!(sampling[cap + 1], "1", "{sampling:?}");
+            assert_eq!(
+                sampling.iter().filter(|arg| *arg == "--max-count").count(),
+                1,
+                "{sampling:?}"
+            );
+            let pattern = sampling.iter().position(|arg| arg == "-e").unwrap();
+            assert!(cap < pattern, "{sampling:?}");
+            assert_eq!(
+                sampling[pattern + 2..],
+                ["./a.md", "./-b.md"],
+                "{sampling:?}"
+            );
+        }
+    }
+
+    /// A runner that answers every folder pass with one stream and the pass over single files with another, and records
+    /// which form each pass was run by and the time it was given.
+    struct Streams {
+        in_a_root: String,
+        over_files: String,
+        ran: std::sync::Mutex<Vec<(&'static str, Option<Duration>)>>,
+    }
+
+    impl Streams {
+        fn new(in_a_root: String, over_files: String) -> Self {
+            Self {
+                in_a_root,
+                over_files,
+                ran: std::sync::Mutex::new(Vec::new()),
+            }
+        }
+
+        fn ran(&self) -> Vec<(&'static str, Option<Duration>)> {
+            self.ran.lock().unwrap().clone()
+        }
+    }
+
+    impl CommandRunner for Streams {
+        fn run(&self, _argv: &[String]) -> Result<crate::runner::Output> {
+            self.ran.lock().unwrap().push(("run", None));
+            Ok(crate::runner::Output::success(self.over_files.clone()))
+        }
+
+        fn run_with_timeout(
+            &self,
+            _argv: &[String],
+            timeout: Duration,
+        ) -> Result<crate::runner::Output> {
+            self.ran
+                .lock()
+                .unwrap()
+                .push(("run_with_timeout", Some(timeout)));
+            Ok(crate::runner::Output::success(self.over_files.clone()))
+        }
+
+        fn run_in(
+            &self,
+            _dir: &Path,
+            _argv: &[String],
+            timeout: Option<Duration>,
+        ) -> Result<crate::runner::Output> {
+            self.ran.lock().unwrap().push(("run_in", timeout));
+            Ok(crate::runner::Output::success(self.in_a_root.clone()))
+        }
+    }
+
+    /// Round 55 item 8c (the review of #616, F5): the matches of a pass are answered in path order, then line order, whatever
+    /// order ripgrep's threads streamed them in; and the roots keep the order the request named them in, a file root named
+    /// before a folder answering before it.
+    #[test]
+    fn matches_are_ordered_by_path_inside_a_root_and_roots_as_the_request_named_them() {
+        let dir = tempfile::tempdir().unwrap();
+        let folder = dir.path().join("d");
+        std::fs::create_dir_all(&folder).unwrap();
+        let file = dir.path().join("f.md");
+        std::fs::write(&file, "harness gate\n").unwrap();
+        let in_a_root = [("./z.md", 1), ("./a.md", 7), ("./a.md", 2)]
+            .map(|(path, line)| rg_json_line(path, line, "harness gate"))
+            .join("\n");
+        let over_files = rg_json_line(&file.to_string_lossy(), 1, "harness gate");
+        let mut ordered = request();
+        ordered.roots = vec![file.clone(), folder.clone()];
+        ordered.timeout = None;
+        let runner = Streams::new(in_a_root, over_files);
+        let outcome = RipgrepSearcher::new(&runner, "rg")
+            .search(&ordered)
+            .unwrap();
+        let answered: Vec<(PathBuf, u64)> = outcome
+            .matches
+            .iter()
+            .map(|matched| (matched.path.clone(), matched.line_number))
+            .collect();
+        assert_eq!(
+            answered,
+            [
+                (file, 1),
+                (folder.join("a.md"), 2),
+                (folder.join("a.md"), 7),
+                (folder.join("z.md"), 1)
+            ]
+        );
+    }
+
+    /// Round 55 item 8c: a count answers in path order whatever order ripgrep streamed its records in. (The reviewer's mutant
+    /// r07 was killed in #616's review by a test over real ripgrep, whose two threads do not always stream out of order; this
+    /// one does not lean on that.)
+    #[test]
+    fn a_count_is_answered_in_path_order_whatever_the_stream_s() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut counted = request();
+        counted.roots = vec![dir.path().to_path_buf()];
+        let nul = '\0';
+        let runner = Streams::new(
+            format!("./z.md{nul}1\n./a.md{nul}2\n./m.md{nul}3\n"),
+            String::new(),
+        );
+        assert_eq!(
+            RipgrepSearcher::new(&runner, "rg").count(&counted).unwrap(),
+            [("a.md", 2), ("m.md", 3), ("z.md", 1)]
+                .map(|(name, count)| (dir.path().join(name), count))
+        );
+    }
+
+    /// Round 55 item 8c (the reviewer's mutants r08 and r09): the pass over single files runs under the request's budget too, in
+    /// a search and in a count; with no budget named it runs with none.
+    #[test]
+    fn the_pass_over_single_files_runs_under_the_request_s_budget() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("f.md");
+        std::fs::write(&file, "harness gate\n").unwrap();
+        let mut single = request();
+        single.roots = vec![file];
+        for (budget, form) in [
+            (Some(Duration::from_secs(30)), "run_with_timeout"),
+            (None, "run"),
+        ] {
+            single.timeout = budget;
+            let runner = Streams::new(String::new(), String::new());
+            let searcher = RipgrepSearcher::new(&runner, "rg");
+            searcher.search(&single).unwrap();
+            searcher.count(&single).unwrap();
+            let ran = runner.ran();
+            assert_eq!(
+                ran.iter().map(|(form, _)| *form).collect::<Vec<_>>(),
+                [form, form],
+                "{budget:?}"
+            );
+            for (_, given) in ran {
+                assert_eq!(given.is_some(), budget.is_some(), "{budget:?}");
+                assert!(given <= budget, "{given:?} of {budget:?}");
+            }
+        }
+    }
+
+    /// Round 55 item 8c (the reviewer's mutant r03): a pass stopped at its capacity has spent its allowance of the read. The
+    /// pass after it may read what is left, not the whole again.
+    #[test]
+    fn a_pass_stopped_at_its_capacity_has_spent_its_allowance() {
+        let dir = tempfile::tempdir().unwrap();
+        let shared = ledger_request(dir.path(), 2, 10);
+        let ledger = Ledger::new(&shared.roots, &[400, 2], Duration::ZERO);
+        RipgrepSearcher::new(&ledger, "rg")
+            .search_bounded(&shared)
+            .unwrap();
+        let whole = 11 * MATCH_EVENT_BYTES * 2;
+        let second: Vec<Option<usize>> = ledger
+            .given()
+            .iter()
+            .filter(|given| given.root == shared.roots[1])
+            .map(|given| given.bytes)
+            .collect();
+        assert_eq!(second, [Some(whole / 2)]);
+    }
+
+    /// Round 55 item 8c (the reviewer's mutant r05): on a volume that folds case the deny globs are matched without regard to
+    /// case and the include globs are passed as they were.
+    #[test]
+    fn include_globs_are_unchanged_where_deny_globs_fold_case() {
+        let mut globbed = request();
+        globbed.include_globs = vec!["*.MD".into()];
+        globbed.exclude_globs = vec!["secret/**".into()];
+        let argv = globbed.argv_over(Path::new("rg"), [".".to_string()], true);
+        let flag_of = |glob: &str| {
+            let at = argv.iter().position(|arg| arg == glob).unwrap();
+            argv[at - 1].clone()
+        };
+        assert_eq!(flag_of("*.MD"), "--glob", "{argv:?}");
+        assert_eq!(flag_of("!secret/**"), "--iglob", "{argv:?}");
+    }
+
+    /// Round 55 item 8c (the reviewer's mutant r06): a pass that cannot start for a reason that is not its root is the runner's
+    /// own refusal, passed on as it is. A ripgrep that is not there, over a root that reads, is not "could not search <root>".
+    #[test]
+    fn a_ripgrep_that_is_not_there_is_not_blamed_on_a_root_that_reads() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut folder = request();
+        folder.roots = vec![dir.path().to_path_buf()];
+        let searcher =
+            RipgrepSearcher::new(SystemRunner::new(), dir.path().join("no-ripgrep-here"));
+        for error in [
+            searcher.search(&folder).unwrap_err(),
+            searcher.search_bounded(&folder).unwrap_err(),
+            searcher.count(&folder).unwrap_err(),
+        ] {
+            assert_eq!(error.code(), "mux.command_spawn_failed", "{error:?}");
+            assert!(!error.message().contains("could not search"), "{error:?}");
+        }
+    }
+
     /// The same ruling: a root that cannot be read is ripgrep's failure to search it (`search.ripgrep_failed`), as it was before
     /// each root's pass started in it, and the words name the root. A superuser reads any folder, so there it is not run.
     #[cfg(unix)]
@@ -1409,6 +1911,65 @@ mod tests {
                 "{error:?}"
             );
         }
+    }
+
+    /// Round 55 item 8c (DLW build ruling 2026-11-11; the review of #616, F3): a root that never stood is named. Beside a folder
+    /// that stands and holds a match, a root that is not there fails the search, the bounded search and the count as ripgrep's
+    /// failure, in words that name the missing root, as an unreadable one is named.
+    #[test]
+    fn a_root_that_never_stood_is_named_in_ripgrep_s_failure() {
+        if !available() {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let stands = dir.path().join("stands");
+        std::fs::create_dir_all(&stands).unwrap();
+        std::fs::write(stands.join("a.md"), "harness gate\n").unwrap();
+        let missing = dir.path().join("never-stood.md");
+        let mut asked = request();
+        asked.roots = vec![stands, missing.clone()];
+        asked.include_globs = vec![];
+        asked.limit = 10;
+        for error in [
+            real().search(&asked).unwrap_err(),
+            real().search_bounded(&asked).unwrap_err(),
+            real().count(&asked).unwrap_err(),
+        ] {
+            assert_eq!(error.code(), "search.ripgrep_failed", "{error:?}");
+            assert!(
+                error
+                    .message()
+                    .starts_with(&format!("ripgrep could not search {}: ", missing.display())),
+                "{error:?}"
+            );
+        }
+    }
+
+    /// The same ruling (F5): a relative file root that begins with a dash is named from `.`, so ripgrep reads it as a path and
+    /// never as a flag. A file root named any other way goes as given.
+    #[test]
+    fn a_file_root_that_begins_with_a_dash_is_named_as_a_path() {
+        let mut asked = request();
+        asked.roots = vec![PathBuf::from("-x.md"), PathBuf::from("y.md")];
+        let passes = asked.passes(Path::new("rg"));
+        assert_eq!(passes.len(), 1, "{passes:?}");
+        assert_eq!(
+            passes[0].argv[passes[0].argv.len() - 2..],
+            ["./-x.md".to_string(), "y.md".to_string()],
+            "{:?}",
+            passes[0].argv
+        );
+    }
+
+    /// The same ruling (F5): a folder whose volume cannot be judged is taken to fold case, the safe side for a deny glob. Here
+    /// no name gives a letter to try: the folder's own name and its one entry's are digits.
+    #[test]
+    fn a_volume_that_cannot_be_judged_is_taken_to_fold_case() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("123");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("456"), "").unwrap();
+        assert!(folds_case(&root));
     }
 
     /// The same ruling: a relative root, searched by a runner that starts its commands in another folder than this process's,

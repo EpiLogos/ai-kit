@@ -318,13 +318,69 @@ fn read_project_wiki(
     parse_wiki_objects(&text).map(Some)
 }
 
-/// The project-relative form of the path, for pattern matching and keys.
-fn relative(project_root: &Path, path: &str) -> String {
-    Path::new(path)
-        .strip_prefix(project_root)
-        .unwrap_or_else(|_| Path::new(path))
-        .to_string_lossy()
-        .into_owned()
+/// The project-relative form of the path, for pattern matching and keys, or
+/// none for a path that is not in the project (round 55 item 8c; the review of
+/// #616, F6). The path is read three ways, the first that places it under the
+/// project standing:
+///
+/// - as the two are given, the path under the project's root;
+/// - a relative route taken from the project's own folder, which is how a
+///   harness names a file to its tool (the PreToolUse reaction in
+///   `app/mod.rs` hands that route on as it came), with `.` and `..` read as
+///   written, so a route that climbs out of the project is not in it;
+/// - each as the disk resolves it, for a project or a file named through a
+///   link.
+///
+/// A path that is in the project by none of them is matched by nothing: it is
+/// never matched as it was given, so the folders above a project choose none
+/// of its guidance, by any route.
+fn relative(project_root: &Path, path: &str) -> Option<String> {
+    let given = Path::new(path);
+    if let Ok(inside) = given.strip_prefix(project_root) {
+        return Some(inside.to_string_lossy().into_owned());
+    }
+    let named = if given.is_relative() {
+        project_root.join(given)
+    } else {
+        given.to_path_buf()
+    };
+    let resolved = |named: &Path| {
+        std::fs::canonicalize(named).ok().or_else(|| {
+            // A file about to be made does not stand yet: its folder does.
+            let folder = std::fs::canonicalize(named.parent()?).ok()?;
+            Some(folder.join(named.file_name()?))
+        })
+    };
+    let inside = as_written(&named)
+        .strip_prefix(as_written(project_root))
+        .ok()
+        .map(Path::to_path_buf)
+        .or_else(|| {
+            let (root, file) = (resolved(project_root)?, resolved(&named)?);
+            file.strip_prefix(root).ok().map(Path::to_path_buf)
+        })?;
+    Some(inside.to_string_lossy().into_owned())
+}
+
+/// A path with its `.` and `..` read as written: each `..` takes away the name
+/// before it, and one with no name before it stays.
+fn as_written(path: &Path) -> std::path::PathBuf {
+    let mut plain = std::path::PathBuf::new();
+    for part in path.components() {
+        match part {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir
+                if matches!(
+                    plain.components().next_back(),
+                    Some(std::path::Component::Normal(_))
+                ) =>
+            {
+                plain.pop();
+            }
+            other => plain.push(other.as_os_str()),
+        }
+    }
+    plain
 }
 
 fn path_touches(reference: &str, relative_path: &str) -> bool {
@@ -396,7 +452,11 @@ pub fn run(
 ) -> (Vec<Block>, Vec<String>) {
     let mut blocks = Vec::new();
     let mut warnings = Vec::new();
-    let relative_path = relative(project_root, path);
+    // A file outside the project has no wiki relation in it and no domain of
+    // its own to arm.
+    let Some(relative_path) = relative(project_root, path) else {
+        return (blocks, warnings);
+    };
 
     // Wiki relations: one block, deduped as a whole per file.
     if !wiki_objects.is_empty() {
