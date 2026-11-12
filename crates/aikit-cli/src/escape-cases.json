@@ -1,0 +1,220 @@
+{
+ "what": "Cases of taking terminal escapes and controls out of words, held by Central (ctrl/src/escape-cases.json; a notification's title is `line`, its body `block`) and by AIKit (crates/aikit-cli/src/escape-cases.json; a run's reason and summary are `record`, or `block` where no `record` stands). The same bytes in both, under one sha256.",
+ "why_record_differs": "A record keeps a carriage return before its line break and makes any control that is not part of an escape a space, so words do not fuse; a notification drops both. A record is not trimmed.",
+ "cases": [
+  {
+   "name": "a colour code goes whole",
+   "text": "a\u001b[31mred\u001b[0m",
+   "line": "ared",
+   "block": "ared"
+  },
+  {
+   "name": "a CSI with a private parameter and one with an intermediate character",
+   "text": "a\u001b[?25lb\u001b[0 qc",
+   "line": "abc",
+   "block": "abc"
+  },
+  {
+   "name": "what is not a CSI in its strict form loses only its opening",
+   "text": "tests: \u001b[ 12 failed",
+   "line": "tests:  12 failed",
+   "block": "tests:  12 failed"
+  },
+  {
+   "name": "a CSI cut short is not one",
+   "text": "a\u001b[31",
+   "line": "a31",
+   "block": "a31"
+  },
+  {
+   "name": "a whole CSI takes what a terminal would",
+   "text": "\u001b[12 tests failed",
+   "line": "ests failed",
+   "block": "ests failed"
+  },
+  {
+   "name": "an OSC ended by a BEL",
+   "text": "\u001b]0;window title\u0007Done",
+   "line": "Done",
+   "block": "Done"
+  },
+  {
+   "name": "an OSC ended by ESC backslash",
+   "text": "a\u001b]8;;https://example.test\u001b\\link",
+   "line": "alink",
+   "block": "alink"
+  },
+  {
+   "name": "an OSC ended by the ESC of the sequence after it",
+   "text": "boom \u001b]0;t\u001b[31mred\u001b[0m",
+   "line": "boom red",
+   "block": "boom red"
+  },
+  {
+   "name": "an OSC nothing ends on its line loses its opening only",
+   "text": "a\u001b]0;never ended",
+   "line": "a0;never ended",
+   "block": "a0;never ended"
+  },
+  {
+   "name": "an end on a later line is not its end",
+   "text": "a\u001b]0;first line\nsecond line",
+   "line": "a0;first line\nsecond line",
+   "block": "a0;first line\nsecond line"
+  },
+  {
+   "name": "a DCS takes the words up to the next ESC",
+   "text": "Press \u001bP to pause, \u001b[1mnow",
+   "line": "Press now",
+   "block": "Press now"
+  },
+  {
+   "name": "DCS, APC, PM and SOS ended by ESC backslash",
+   "text": "a\u001bPq#0\u001b\\b\u001b_hidden\u001b\\c\u001b^x\u001b\\d\u001bXy\u001b\\e",
+   "line": "abcde",
+   "block": "abcde"
+  },
+  {
+   "name": "a character set selection goes whole",
+   "text": "text\u001b(B more",
+   "line": "text more",
+   "block": "text more"
+  },
+  {
+   "name": "ESC, intermediates and a digit as the final character",
+   "text": "p\u001b#8q\u001b Fr",
+   "line": "pqr",
+   "block": "pqr"
+  },
+  {
+   "name": "a two-character escape goes whole, its letter with it",
+   "text": "a\u001b7b\u001b8c\u001bMd\u001bce\u001b=f\u001b\\g",
+   "line": "abcdefg",
+   "block": "abcdefg"
+  },
+  {
+   "name": "an ESC at the end goes alone",
+   "text": "abc\u001b",
+   "line": "abc",
+   "block": "abc"
+  },
+  {
+   "name": "an ESC before a character past U+007E goes alone",
+   "text": "a\u001b\u00e9b",
+   "line": "a\u00e9b",
+   "block": "a\u00e9b"
+  },
+  {
+   "name": "an ESC and an intermediate character that no final one follows",
+   "text": "a\u001b!\u00e9b",
+   "line": "a!\u00e9b",
+   "block": "a!\u00e9b"
+  },
+  {
+   "name": "a carriage return that no line break follows parts words",
+   "text": "Step 1\rStep 2",
+   "line": "Step 1 Step 2",
+   "block": "Step 1\nStep 2"
+  },
+  {
+   "name": "a carriage return before its line break",
+   "text": "one\r\ntwo",
+   "line": "one\ntwo",
+   "block": "one\ntwo",
+   "record": "one\r\ntwo"
+  },
+  {
+   "name": "two carriage returns before a line break",
+   "text": "one\r\r\ntwo",
+   "line": "one \ntwo",
+   "block": "one\n\ntwo",
+   "record": "one\n\r\ntwo"
+  },
+  {
+   "name": "a vertical tab parts words",
+   "text": "a\u000bb",
+   "line": "a b",
+   "block": "a\nb"
+  },
+  {
+   "name": "a form feed parts words",
+   "text": "a\fb",
+   "line": "a b",
+   "block": "a\nb"
+  },
+  {
+   "name": "a next line parts words",
+   "text": "a\u0085b",
+   "line": "a b",
+   "block": "a\nb"
+  },
+  {
+   "name": "a line and a paragraph separator part words",
+   "text": "A\u2028B\u2029C",
+   "line": "A B C",
+   "block": "A\nB\nC"
+  },
+  {
+   "name": "a vertical tab ends the line an OSC may end on: a BEL past it is not its end",
+   "text": "a\u001b]0;t\u000bb\u0007c",
+   "line": "a0;t bc",
+   "block": "a0;t\nbc",
+   "record": "a0;t\nb c"
+  },
+  {
+   "name": "a form feed ends the line an OSC may end on: a BEL past it is not its end",
+   "text": "a\u001b]0;t\fb\u0007c",
+   "line": "a0;t bc",
+   "block": "a0;t\nbc",
+   "record": "a0;t\nb c"
+  },
+  {
+   "name": "a next line ends the line an OSC may end on: a BEL past it is not its end",
+   "text": "a\u001b]0;t\u0085b\u0007c",
+   "line": "a0;t bc",
+   "block": "a0;t\nbc",
+   "record": "a0;t\nb c"
+  },
+  {
+   "name": "U+009B opens nothing",
+   "text": "a\u009b31mred",
+   "line": "a31mred",
+   "block": "a31mred",
+   "record": "a 31mred"
+  },
+  {
+   "name": "U+009D opens nothing",
+   "text": "a\u009d0;title b",
+   "line": "a0;title b",
+   "block": "a0;title b",
+   "record": "a 0;title b"
+  },
+  {
+   "name": "U+009C ends nothing",
+   "text": "x\u001b]0;t\u009cy",
+   "line": "x0;ty",
+   "block": "x0;ty",
+   "record": "x0;t y"
+  },
+  {
+   "name": "a BEL ends only an OSC",
+   "text": "a\u001bPnot\u0007 ended",
+   "line": "anot ended",
+   "block": "anot ended",
+   "record": "anot  ended"
+  },
+  {
+   "name": "any other control between words",
+   "text": "Bell\u0007 and\u0000 null",
+   "line": "Bell and null",
+   "block": "Bell and null",
+   "record": "Bell  and  null"
+  },
+  {
+   "name": "a character that draws nothing is left out",
+   "text": "Ro\u202esa\u200brium",
+   "line": "Rosarium",
+   "block": "Rosarium"
+  }
+ ]
+}
