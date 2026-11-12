@@ -6638,8 +6638,10 @@ fn cmd_context(cwd: &std::path::Path, c: ContextCmd) -> Result<Reply> {
 }
 
 /// `aikit work day-move run|due`: the Day's agent runs a move. A run that was
-/// begun comes back as its recorded outcome (done, refused or stalled); an error
-/// means the run could not be recorded at all.
+/// begun comes back as the end it stands at in Central. An error before the run
+/// began means nothing was recorded; after it, that the run was not known ended
+/// when the runner last looked (`day_move_runner::run_move`, which also says
+/// how long the end can take).
 fn cmd_day_move(cwd: &std::path::Path, c: DayMoveCmd) -> Result<Reply> {
     use aikit_cli::day_move_runner as runner;
     let service = Service::discover(cwd)?;
