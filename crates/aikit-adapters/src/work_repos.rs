@@ -1327,12 +1327,12 @@ impl<R: CommandRunner> WorkReposSourcePoolProvider<R> {
         // of the files, instead of a process per file. Each file is still
         // bracketed by its own current reads, taken before and after the
         // passes that check it.
-        let mut basis = Vec::with_capacity(selected.len());
-        for (_, relative, _) in &selected {
-            let source = Self::source_ref(project, relative)?;
-            let before = self.material(&source)?;
-            basis.push((source, before, project.root.join(relative)));
-        }
+        //
+        // A folder can be marked after the selection above and before one of
+        // these reads. The read gate then refuses the file, and that file is
+        // dropped: the search answers with the rest (round 55 item 8c; the
+        // review of #616, F4). Any other refusal of a read stands as it is.
+        let (basis, selected) = self.first_reads(project, selected)?;
         let absolutes: Vec<PathBuf> = basis
             .iter()
             .map(|(_, _, absolute)| absolute.clone())
@@ -1428,7 +1428,9 @@ impl<R: CommandRunner> WorkReposSourcePoolProvider<R> {
                 checked_terms = terms_counted;
                 checked_count = counted;
             }
-            let after = self.material(&source)?;
+            let Some(after) = self.read_unless_marked_since(project, &relative, &source)? else {
+                continue;
+            };
             let same_lines = if outcome.truncated {
                 checked_lines.starts_with(&evidence.matched_lines)
             } else {
@@ -1469,6 +1471,56 @@ impl<R: CommandRunner> WorkReposSourcePoolProvider<R> {
             });
         }
         Ok(hits)
+    }
+
+    /// Each selected file's first read, taken before the passes that check
+    /// it: its source, that read and its path, beside the files still
+    /// selected. A file whose folder was marked since the selection is
+    /// dropped here ([`Self::read_unless_marked_since`]).
+    #[allow(clippy::type_complexity)]
+    fn first_reads<Selected>(
+        &self,
+        project: &WorkRepoProject,
+        selected: Vec<(f64, PathBuf, Selected)>,
+    ) -> Result<(
+        Vec<(SourceRef, SourceMaterial, PathBuf)>,
+        Vec<(f64, PathBuf, Selected)>,
+    )> {
+        let mut basis = Vec::with_capacity(selected.len());
+        let mut still_selected = Vec::with_capacity(selected.len());
+        for candidate in selected {
+            let source = Self::source_ref(project, &candidate.1)?;
+            let Some(before) = self.read_unless_marked_since(project, &candidate.1, &source)?
+            else {
+                continue;
+            };
+            basis.push((source, before, project.root.join(&candidate.1)));
+            still_selected.push(candidate);
+        }
+        Ok((basis, still_selected))
+    }
+
+    /// A selected file's current read, or none when the read gate withholds
+    /// it and a folder above it holds the marker now: it was marked after
+    /// the selection, so the file is dropped from the answer rather than
+    /// failing the whole search. A file the gate withholds for any other
+    /// reason is still the gate's refusal.
+    fn read_unless_marked_since(
+        &self,
+        project: &WorkRepoProject,
+        relative: &Path,
+        source: &SourceRef,
+    ) -> Result<Option<SourceMaterial>> {
+        match self.material(source) {
+            Ok(material) => Ok(Some(material)),
+            Err(error)
+                if error.code() == "work_repos.source_unauthorised"
+                    && in_marked_folder(&project.root, relative)? =>
+            {
+                Ok(None)
+            }
+            Err(error) => Err(error),
+        }
     }
 
     fn run_search(&self, query: &str, tags: &[String], limit: usize) -> Result<Vec<SourceHit>>
@@ -3023,6 +3075,12 @@ mod tests {
     struct MarksMidSearch {
         inner: SystemRunner,
         folder: PathBuf,
+        /// Mark the folder later instead: as the check over the selected files starts, after the selection and each file's
+        /// first read.
+        at_the_check: bool,
+        /// As the check starts, put a link to the second file in the first one's place: a file the read gate then withholds
+        /// for a reason that is no marker.
+        link_at_the_check: Option<(PathBuf, PathBuf)>,
         calls: std::sync::Mutex<Vec<Vec<String>>>,
     }
 
@@ -3038,12 +3096,27 @@ mod tests {
             self.inner.run(argv)
         }
 
+        fn starts_in(&self) -> Option<PathBuf> {
+            self.inner.starts_in()
+        }
+
         fn run_with_timeout(
             &self,
             argv: &[String],
             timeout: std::time::Duration,
         ) -> Result<crate::runner::Output> {
             self.record(argv);
+            // The check over the selected files is the pass over single files: it starts in no root.
+            if self.at_the_check {
+                write(&self.folder.join(NO_AGENT_RETRIEVAL_MARKER), "");
+            }
+            #[cfg(unix)]
+            if let Some((file, target)) = &self.link_at_the_check {
+                if !file.is_symlink() {
+                    std::fs::remove_file(file).unwrap();
+                    std::os::unix::fs::symlink(target, file).unwrap();
+                }
+            }
             self.inner.run_with_timeout(argv, timeout)
         }
 
@@ -3073,7 +3146,9 @@ mod tests {
                 remaining_aggregate_bytes,
                 strict_utf8,
             );
-            write(&self.folder.join(NO_AGENT_RETRIEVAL_MARKER), "");
+            if !self.at_the_check {
+                write(&self.folder.join(NO_AGENT_RETRIEVAL_MARKER), "");
+            }
             output
         }
     }
@@ -3094,6 +3169,8 @@ mod tests {
         let runner = MarksMidSearch {
             inner,
             folder: root.join("sealed"),
+            at_the_check: false,
+            link_at_the_check: None,
             calls: std::sync::Mutex::new(Vec::new()),
         };
         let provider = WorkReposSourcePoolProvider::connect(
@@ -3114,6 +3191,143 @@ mod tests {
         assert!(
             calls.iter().all(|argv| !argv.contains(&withheld)),
             "no command names the withheld file: {calls:?}"
+        );
+    }
+
+    /// Round 55 item 8c (the reviewer's mutants w01 and w02): a file is in a marked folder when its own folder holds the marker,
+    /// or any folder above it in the project, the project's own included. A marker that cannot be asked after is an error, not
+    /// "no marker": here a file stands where the path names a folder.
+    #[test]
+    fn a_marker_is_asked_of_every_folder_above_a_file_and_an_unanswered_one_fails() {
+        let temp = native_scratch();
+        let root = temp.path();
+        write(&root.join("a/b/c/deep.md"), "x\n");
+        write(&root.join("other/plain.md"), "x\n");
+        let deep = Path::new("a/b/c/deep.md");
+        assert!(!in_marked_folder(root, deep).unwrap());
+        write(&root.join("a").join(NO_AGENT_RETRIEVAL_MARKER), "");
+        assert!(in_marked_folder(root, deep).unwrap(), "three folders above");
+        assert!(!in_marked_folder(root, Path::new("other/plain.md")).unwrap());
+        std::fs::remove_file(root.join("a").join(NO_AGENT_RETRIEVAL_MARKER)).unwrap();
+        write(&root.join(NO_AGENT_RETRIEVAL_MARKER), "");
+        assert!(
+            in_marked_folder(root, deep).unwrap(),
+            "the project's own folder"
+        );
+        assert!(in_marked_folder(root, Path::new("other/plain.md")).unwrap());
+        let through_a_file = in_marked_folder(root, Path::new("other/plain.md/inner.md"));
+        assert!(through_a_file.is_err(), "{through_a_file:?}");
+    }
+
+    /// Round 55 item 8c (the reviewer's mutant w03): `status()` counts the marked folders as they stand when it is asked, a
+    /// folder marked since the provider attached among them; a folder inside a marked one is not counted again.
+    #[test]
+    fn status_counts_the_marked_folders_as_they_stand_now() {
+        let temp = native_scratch();
+        let root = temp.path();
+        let inner = native_matches(
+            root,
+            &[("src/kept.rs", 1, "needle"), ("one/a.md", 1, "needle")],
+        );
+        write(&root.join("one").join(NO_AGENT_RETRIEVAL_MARKER), "");
+        write(&root.join("one/within").join(NO_AGENT_RETRIEVAL_MARKER), "");
+        let provider = WorkReposSourcePoolProvider::connect(
+            inner,
+            crate::ripgrep::executable(),
+            vec![project(root)],
+        );
+        let marked = |provider: &WorkReposSourcePoolProvider<SystemRunner>| {
+            let detail = provider.status().detail;
+            detail
+                .split(".no-agent-retrieval prunes ")
+                .nth(1)
+                .and_then(|rest| rest.split(' ').next())
+                .map(str::to_owned)
+                .unwrap_or_else(|| panic!("{detail}"))
+        };
+        assert_eq!(marked(&provider), "1");
+        write(&root.join("two/deep").join(NO_AGENT_RETRIEVAL_MARKER), "");
+        assert_eq!(marked(&provider), "2");
+    }
+
+    /// Round 55 item 8c (the review of #616, F4): a folder marked after the selection, as the check over the selected files
+    /// starts, withholds its file at that file's last read. The file is dropped and the search answers with the rest; it does
+    /// not fail whole on the read gate. The folder is the file's own, and then one three levels above it.
+    #[test]
+    fn a_file_in_a_folder_marked_after_the_selection_is_dropped_and_the_rest_answered() {
+        for (member, marked) in [
+            ("sealed/withheld.md", "sealed"),
+            ("sealed/a/b/c/withheld.md", "sealed"),
+        ] {
+            let temp = native_scratch();
+            let root = temp.path();
+            let inner =
+                native_matches(root, &[("src/kept.rs", 1, "needle"), (member, 1, "needle")]);
+            let runner = MarksMidSearch {
+                inner,
+                folder: root.join(marked),
+                at_the_check: true,
+                link_at_the_check: None,
+                calls: std::sync::Mutex::new(Vec::new()),
+            };
+            let provider = WorkReposSourcePoolProvider::connect(
+                &runner,
+                crate::ripgrep::executable(),
+                vec![project(root)],
+            );
+            assert!(
+                provider.status().available,
+                "real ripgrep is required for this test"
+            );
+            let hits = provider
+                .search("needle", SourceSearchMode::Fulltext, &[], 50)
+                .unwrap();
+            assert_eq!(members(&hits), ["src/kept.rs"], "{member}");
+            // The file was selected and named to the check: it was the last read that withheld it.
+            let withheld = root.join(member).display().to_string();
+            let calls = runner.calls.lock().unwrap().clone();
+            assert!(
+                calls.iter().any(|argv| argv.contains(&withheld)),
+                "{member}: the check named the file before its folder was marked: {calls:?}"
+            );
+        }
+    }
+
+    /// The same ruling, its other half: the read gate stays the last refusal. A selected file that the gate withholds at its
+    /// last read for a reason that is no marker (here it has become a link since the selection) is not dropped: the search
+    /// fails on the gate, as it did.
+    #[cfg(unix)]
+    #[test]
+    fn a_selected_file_withheld_for_another_reason_still_fails_the_search() {
+        let temp = native_scratch();
+        let root = temp.path();
+        let inner = native_matches(
+            root,
+            &[("src/kept.rs", 1, "needle"), ("docs/other.md", 1, "needle")],
+        );
+        let runner = MarksMidSearch {
+            inner,
+            folder: root.join("unrelated"),
+            at_the_check: false,
+            link_at_the_check: Some((root.join("docs/other.md"), root.join("src/kept.rs"))),
+            calls: std::sync::Mutex::new(Vec::new()),
+        };
+        let provider = WorkReposSourcePoolProvider::connect(
+            &runner,
+            crate::ripgrep::executable(),
+            vec![project(root)],
+        );
+        assert!(
+            provider.status().available,
+            "real ripgrep is required for this test"
+        );
+        let refused = provider
+            .search("needle", SourceSearchMode::Fulltext, &[], 50)
+            .unwrap_err();
+        assert_eq!(
+            refused.code(),
+            "work_repos.source_unauthorised",
+            "{refused:?}"
         );
     }
 
@@ -3144,5 +3358,256 @@ mod tests {
             .search("rareword common", SourceSearchMode::Fulltext, &[], 5)
             .unwrap();
         assert_eq!(members(&hits)[0], "docs/answer.md", "{hits:?}");
+    }
+
+    /// A real runner that records each command and lets a test answer in a command's place as it is asked for.
+    struct Interposed<F> {
+        inner: SystemRunner,
+        calls: std::sync::Mutex<Vec<Vec<String>>>,
+        instead: F,
+    }
+
+    impl<F: Fn(&[String]) -> Option<AikitError>> Interposed<F> {
+        fn asked(&self, argv: &[String]) -> Result<()> {
+            self.calls.lock().unwrap().push(argv.to_vec());
+            (self.instead)(argv).map_or(Ok(()), Err)
+        }
+
+        /// What each command after the version probe was: a pass over the project (`walk`) or a count over it, or the check
+        /// over the selected files or a count over them, which name their files.
+        fn kinds(&self) -> Vec<&'static str> {
+            let calls = self.calls.lock().unwrap();
+            calls
+                .iter()
+                .filter(|argv| !argv.iter().any(|arg| arg == "--version"))
+                .map(|argv| {
+                    let over_the_project = argv.last().is_some_and(|arg| arg == ".");
+                    match (argv.iter().any(|arg| arg == "--count"), over_the_project) {
+                        (true, true) => "count-walk",
+                        (true, false) => "count-named",
+                        (false, true) => "walk",
+                        (false, false) => "check",
+                    }
+                })
+                .collect()
+        }
+    }
+
+    impl<F: Fn(&[String]) -> Option<AikitError>> CommandRunner for Interposed<F> {
+        fn run(&self, argv: &[String]) -> Result<crate::runner::Output> {
+            self.asked(argv)?;
+            self.inner.run(argv)
+        }
+
+        fn starts_in(&self) -> Option<PathBuf> {
+            self.inner.starts_in()
+        }
+
+        fn run_with_timeout(
+            &self,
+            argv: &[String],
+            timeout: std::time::Duration,
+        ) -> Result<crate::runner::Output> {
+            self.asked(argv)?;
+            self.inner.run_with_timeout(argv, timeout)
+        }
+
+        fn run_in(
+            &self,
+            dir: &Path,
+            argv: &[String],
+            timeout: Option<std::time::Duration>,
+        ) -> Result<crate::runner::Output> {
+            self.asked(argv)?;
+            self.inner.run_in(dir, argv, timeout)
+        }
+
+        fn run_in_with_limits(
+            &self,
+            dir: &Path,
+            argv: &[String],
+            remaining_timeout: std::time::Duration,
+            remaining_aggregate_bytes: usize,
+            strict_utf8: bool,
+        ) -> Result<crate::runner::Output> {
+            self.asked(argv)?;
+            self.inner.run_in_with_limits(
+                dir,
+                argv,
+                remaining_timeout,
+                remaining_aggregate_bytes,
+                strict_utf8,
+            )
+        }
+    }
+
+    /// Round 55 item 8d (DLW build ruling 2026-11-12; the review of #620, F1): a Work search whose match pass is stopped at
+    /// its capacity runs six commands for a query of two terms, the six it ran before 8c, and no more: the stopped pass, a
+    /// count of the project for each term, the check over the selected files, and a count of those files for each term.
+    /// (8c ran eight: after the stopped pass it listed the project and named the listed files to a sample pass.) Every hit
+    /// takes its snippet from the check. The match pass is stopped here by the runner, in its place.
+    #[test]
+    fn a_stopped_work_search_runs_the_six_commands_it_ran_before_8c() {
+        let temp = native_scratch();
+        let root = temp.path();
+        let inner = native_matches(
+            root,
+            &[
+                ("src/both.rs", 3, "rareword and common"),
+                ("docs/one.md", 1, "common"),
+            ],
+        );
+        let stopped = std::sync::Mutex::new(false);
+        let runner = Interposed {
+            inner,
+            calls: std::sync::Mutex::new(Vec::new()),
+            instead: |argv: &[String]| {
+                let mut stopped = stopped.lock().unwrap();
+                let the_match_pass = argv.iter().any(|arg| arg == "--json")
+                    && argv.last().is_some_and(|arg| arg == ".");
+                if *stopped || !the_match_pass {
+                    return None;
+                }
+                *stopped = true;
+                Some(AikitError::new(
+                    "mux.command_output_limit",
+                    "the match pass ran past its capacity",
+                ))
+            },
+        };
+        let provider = WorkReposSourcePoolProvider::connect(
+            &runner,
+            crate::ripgrep::executable(),
+            vec![project(root)],
+        );
+        assert!(
+            provider.status().available,
+            "real ripgrep is required for this test"
+        );
+        let hits = provider
+            .search("rareword common", SourceSearchMode::Fulltext, &[], 5)
+            .unwrap();
+        assert_eq!(
+            runner.kinds(),
+            [
+                "walk",
+                "count-walk",
+                "count-walk",
+                "check",
+                "count-named",
+                "count-named"
+            ]
+        );
+        assert_eq!(members(&hits), ["src/both.rs", "docs/one.md"]);
+        let answered: Vec<(&str, Option<&str>)> = hits
+            .iter()
+            .map(|hit| (hit.snippet.as_str(), hit.provider_binding.as_deref()))
+            .collect();
+        assert_eq!(
+            answered,
+            [
+                ("rareword and common", Some("line:3")),
+                ("common", Some("line:1"))
+            ]
+        );
+    }
+
+    /// Round 55 item 8d (the review of #620, F4; the reviewer's test): the selection's own marker check is not only a second
+    /// guard. A file in a folder marked during the search takes no place under the limit: with the marked file ranked first
+    /// and a limit of one, the answer is the file that stays readable, not nothing.
+    #[test]
+    fn a_marked_file_takes_no_place_under_the_limit() {
+        let temp = native_scratch();
+        let root = temp.path();
+        let inner = native_matches(
+            root,
+            &[
+                ("a-sealed/withheld.md", 1, "needle"),
+                ("src/kept.rs", 1, "needle"),
+            ],
+        );
+        let runner = MarksMidSearch {
+            inner,
+            folder: root.join("a-sealed"),
+            at_the_check: false,
+            link_at_the_check: None,
+            calls: std::sync::Mutex::new(Vec::new()),
+        };
+        let provider = WorkReposSourcePoolProvider::connect(
+            &runner,
+            crate::ripgrep::executable(),
+            vec![project(root)],
+        );
+        assert!(
+            provider.status().available,
+            "real ripgrep is required for this test"
+        );
+        let hits = provider
+            .search("needle", SourceSearchMode::Fulltext, &[], 1)
+            .unwrap();
+        assert_eq!(members(&hits), ["src/kept.rs"]);
+    }
+
+    /// Round 55 item 8d (the reviewer's mutant w01): a folder marked after the selection and before a file's first read
+    /// withholds that file at its first read. It is dropped there and the files beside it are read; the search does not fail
+    /// whole. No command runs between the selection and the first reads, so the reads are asked for here as the search asks.
+    #[test]
+    fn a_file_in_a_folder_marked_before_its_first_read_is_dropped_there() {
+        let temp = native_scratch();
+        let root = temp.path();
+        let inner = native_matches(
+            root,
+            &[
+                ("src/kept.rs", 1, "needle"),
+                ("sealed/withheld.md", 1, "needle"),
+            ],
+        );
+        let project = project(root);
+        let provider = WorkReposSourcePoolProvider::connect(
+            inner,
+            crate::ripgrep::executable(),
+            vec![project.clone()],
+        );
+        let selected = vec![
+            (0.4, PathBuf::from("sealed/withheld.md"), ()),
+            (0.2, PathBuf::from("src/kept.rs"), ()),
+        ];
+        write(&root.join("sealed").join(NO_AGENT_RETRIEVAL_MARKER), "");
+        let (basis, still_selected) = provider.first_reads(&project, selected).unwrap();
+        assert_eq!(still_selected, [(0.2, PathBuf::from("src/kept.rs"), ())]);
+        let read: Vec<&Path> = basis.iter().map(|(_, _, path)| path.as_path()).collect();
+        assert_eq!(read, [root.join("src/kept.rs")]);
+    }
+
+    /// Round 55 item 8d (the reviewer's mutant w02): a file under a marker that the read gate refuses for another reason is
+    /// still the gate's refusal, and is not dropped as marked. Here the project's folder is another folder than the one that
+    /// was attached, with the marker in it: the read fails on the binding, and so does the search.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn a_file_under_a_marker_refused_for_another_reason_is_still_refused() {
+        let temp = native_scratch();
+        let root = temp.path().join("proj");
+        let inner = native_matches(&root, &[("sealed/withheld.md", 1, "needle")]);
+        let project = project(&root);
+        let provider = WorkReposSourcePoolProvider::connect(
+            inner,
+            crate::ripgrep::executable(),
+            vec![project.clone()],
+        );
+        let selected = || vec![(0.4, PathBuf::from("sealed/withheld.md"), ())];
+        assert_eq!(
+            provider.first_reads(&project, selected()).unwrap().1.len(),
+            1
+        );
+        std::fs::rename(&root, temp.path().join("attached")).unwrap();
+        write(&root.join("sealed/withheld.md"), "needle\n");
+        write(&root.join("sealed").join(NO_AGENT_RETRIEVAL_MARKER), "");
+        assert!(in_marked_folder(&root, Path::new("sealed/withheld.md")).unwrap());
+        let refused = provider.first_reads(&project, selected()).unwrap_err();
+        assert_eq!(
+            refused.code(),
+            "work_repos.source_binding_changed",
+            "{refused:?}"
+        );
     }
 }

@@ -119,18 +119,57 @@ impl ProbeTracker {
     }
 }
 
-impl CommandRunner for ProbeTracker {
-    fn run(&self, argv: &[String]) -> Result<Output> {
-        // Pass the real answer through — intake functions parse stdout — and
-        // record what it classified to, so a surface can report the spawn's
-        // outcome in the shared vocabulary without changing the intake's data.
-        let result = self.runner.run(argv);
+impl ProbeTracker {
+    /// The real answer passed through, with what it classified to recorded.
+    fn recorded(&self, result: Result<Output>) -> Result<Output> {
         let outcome = classify(&result, self.budget);
         self.outcomes
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .push(outcome);
         result
+    }
+}
+
+impl CommandRunner for ProbeTracker {
+    fn run(&self, argv: &[String]) -> Result<Output> {
+        // Pass the real answer through — intake functions parse stdout — and
+        // record what it classified to, so a surface can report the spawn's
+        // outcome in the shared vocabulary without changing the intake's data.
+        self.recorded(self.runner.run(argv))
+    }
+
+    // A runner that wraps another passes on where it starts commands and both forms that start one in a folder (round 55 item
+    // 8c; the review of #616, F2): the defaults refuse a folder search, and `starts_in` would read as this process's own folder.
+
+    fn starts_in(&self) -> Option<std::path::PathBuf> {
+        self.runner.starts_in()
+    }
+
+    fn run_in(
+        &self,
+        dir: &std::path::Path,
+        argv: &[String],
+        timeout: Option<std::time::Duration>,
+    ) -> Result<Output> {
+        self.recorded(self.runner.run_in(dir, argv, timeout))
+    }
+
+    fn run_in_with_limits(
+        &self,
+        dir: &std::path::Path,
+        argv: &[String],
+        remaining_timeout: std::time::Duration,
+        remaining_aggregate_bytes: usize,
+        strict_utf8: bool,
+    ) -> Result<Output> {
+        self.recorded(self.runner.run_in_with_limits(
+            dir,
+            argv,
+            remaining_timeout,
+            remaining_aggregate_bytes,
+            strict_utf8,
+        ))
     }
 }
 

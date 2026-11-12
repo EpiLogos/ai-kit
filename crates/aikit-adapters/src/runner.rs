@@ -4859,6 +4859,202 @@ mod tests {
         );
     }
 
+    /// The text from a `{` at `open` to the `}` that closes it.
+    fn braced(text: &str, open: usize) -> &str {
+        let mut depth = 0usize;
+        for (offset, character) in text[open..].char_indices() {
+            match character {
+                '{' => depth += 1,
+                '}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return &text[open..open + offset];
+                    }
+                }
+                _ => {}
+            }
+        }
+        &text[open..]
+    }
+
+    /// Whether `body` (with no white space in it) calls `call` on anything but `self` alone: on a field, on a local, on what a
+    /// method or a lock answers, or on what `self` points at.
+    fn calls_on_another(body: &str, call: &str) -> bool {
+        body.match_indices(call).any(|(at, _)| {
+            let own = body[..at].strip_suffix("self").is_some_and(|before| {
+                !before.ends_with(|c: char| c.is_alphanumeric() || c == '_' || c == '.')
+            });
+            !own
+        })
+    }
+
+    /// Each `CommandRunner` impl in `text` that wraps another runner, by the type it is for, with what it lacks. A runner wraps
+    /// another when its impl calls any run form on anything but itself. It must declare `starts_in`, `run_in` and
+    /// `run_in_with_limits`, and each must pass on to the same form of another: one that is declared and answers by itself
+    /// forwards nothing. The impl's header may run over lines (a `where` clause).
+    fn wrappers_in(text: &str) -> Vec<(String, Vec<String>)> {
+        const FORMS: [&str; 5] = [
+            ".run(",
+            ".run_with_timeout(",
+            ".run_with_limits(",
+            ".run_in(",
+            ".run_in_with_limits(",
+        ];
+        let mut found = Vec::new();
+        let mut from = 0;
+        while let Some(at) = text[from..].find("CommandRunner for ").map(|at| at + from) {
+            from = at + 1;
+            let Some(open) = text[at..].find('{').map(|open| open + at) else {
+                continue;
+            };
+            // An impl's header, not a mention in prose: `impl` opens its line, and only the header stands between the two.
+            let Some(start) = text[..at].rfind("impl") else {
+                continue;
+            };
+            let line = text[..start].rfind('\n').map_or(0, |line| line + 1);
+            if !text[line..start].trim().is_empty() || text[start..at].contains(['{', '}', ';']) {
+                continue;
+            }
+            let header = &text[at + "CommandRunner for ".len()..open];
+            let name = header
+                .split_whitespace()
+                .take_while(|word| *word != "where")
+                .collect::<Vec<_>>()
+                .join(" ");
+            let body: String = braced(text, open).split_whitespace().collect();
+            if !FORMS.iter().any(|call| calls_on_another(&body, call)) {
+                continue;
+            }
+            let mut lacks = Vec::new();
+            for form in ["starts_in", "run_in", "run_in_with_limits"] {
+                match body.find(&format!("fn{form}(")) {
+                    None => lacks.push(format!("lacks {form}")),
+                    Some(declared) => {
+                        let forwards = body[declared..].find('{').is_some_and(|open| {
+                            calls_on_another(braced(&body, declared + open), &format!(".{form}("))
+                        });
+                        if !forwards {
+                            lacks.push(format!("does not forward {form}"));
+                        }
+                    }
+                }
+            }
+            found.push((name, lacks));
+        }
+        found
+    }
+
+    /// Round 55 item 8c (DLW build ruling 2026-11-11; the review of #616, F2): every runner in the workspace that wraps another
+    /// passes on where it starts commands (`starts_in`) and both forms that start one in a folder (`run_in`,
+    /// `run_in_with_limits`), so a new wrapper cannot forget them: the trait's defaults refuse a folder search and name no
+    /// folder. The workspace's sources are read as text ([`wrappers_in`]). Two impls are exempt by name: `LegacyNative`, the
+    /// test runner that is bare on purpose to show what the defaults do, and `SystemRunner`, which wraps no runner: it starts
+    /// the processes, and the forms it calls are its own, on a copy of itself made for one folder or one budget.
+    #[test]
+    fn every_runner_that_wraps_another_forwards_the_folder_forms() {
+        fn sources(folder: &Path, found: &mut Vec<PathBuf>) {
+            for entry in std::fs::read_dir(folder).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    if path.file_name().is_some_and(|name| name != "target") {
+                        sources(&path, found);
+                    }
+                } else if path.extension().is_some_and(|extension| extension == "rs") {
+                    found.push(path);
+                }
+            }
+        }
+        let crates = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+        let mut files = Vec::new();
+        sources(&crates, &mut files);
+        let (mut wrappers, mut bare) = (Vec::new(), Vec::new());
+        for file in files {
+            let text = std::fs::read_to_string(&file).unwrap();
+            for (name, lacks) in wrappers_in(&text) {
+                if name == "LegacyNative" || name == "SystemRunner" {
+                    continue;
+                }
+                for lack in lacks {
+                    bare.push(format!("{name} in {} {lack}", file.display()));
+                }
+                wrappers.push(name);
+            }
+        }
+        assert!(bare.is_empty(), "{bare:#?}");
+        // The scan still reads the sources: it finds this file's own three, which every other wrapper is held through.
+        for known in ["Box<T>", "&T", "std::sync::Arc<T>"] {
+            assert!(
+                wrappers.iter().any(|name| name == known),
+                "{known}: {wrappers:?}"
+            );
+        }
+    }
+
+    /// Round 55 item 8d (the review of #620, F5): the scan holds each shape a wrapper can take, not one. Each of these lacks
+    /// or fails to forward what its row says: a plain wrapper; one whose header runs over lines; one that calls through a
+    /// local, through a method, behind a lock; one that forwards `run_in_with_limits` alone; one that declares the three and
+    /// forwards none. A wrapper that forwards the three lacks nothing. (The shapes name the trait by a stand-in, so the scan of
+    /// this file does not read them as impls.)
+    #[test]
+    fn the_wrapper_scan_holds_each_shape_of_wrapper() {
+        let three = ["starts_in", "run_in", "run_in_with_limits"];
+        let lacking = |forms: &[&str]| -> Vec<String> {
+            forms.iter().map(|form| format!("lacks {form}")).collect()
+        };
+        let shapes: [(&str, &str, Vec<String>); 8] = [
+            (
+                "Bare",
+                "impl RUNNER for Bare {\n    fn run(&self, argv: &[String]) -> Result<Output> {\n        self.inner.run(argv)\n    }\n}\n",
+                lacking(&three),
+            ),
+            (
+                "OverLines<R>",
+                "impl<R> RUNNER for OverLines<R>\nwhere\n    R: RUNNER,\n{\n    fn run(&self, argv: &[String]) -> Result<Output> {\n        self.inner.run(argv)\n    }\n}\n",
+                lacking(&three),
+            ),
+            (
+                "ThroughALocal",
+                "impl RUNNER for ThroughALocal {\n    fn run(&self, argv: &[String]) -> Result<Output> {\n        let inner = &self.inner;\n        inner.run(argv)\n    }\n}\n",
+                lacking(&three),
+            ),
+            (
+                "ThroughAMethod",
+                "impl RUNNER for ThroughAMethod {\n    fn run(&self, argv: &[String]) -> Result<Output> {\n        self.inner().run(argv)\n    }\n}\n",
+                lacking(&three),
+            ),
+            (
+                "BehindALock",
+                "impl RUNNER for BehindALock {\n    fn run(&self, argv: &[String]) -> Result<Output> {\n        self.inner.lock().unwrap().run(argv)\n    }\n}\n",
+                lacking(&three),
+            ),
+            (
+                "LimitsAlone",
+                "impl RUNNER for LimitsAlone {\n    fn run(&self, argv: &[String]) -> Result<Output> {\n        Err(refuse(argv))\n    }\n    fn run_in_with_limits(&self, dir: &Path, argv: &[String], t: Duration, b: usize, s: bool) -> Result<Output> {\n        self.inner.run_in_with_limits(dir, argv, t, b, s)\n    }\n}\n",
+                lacking(&three[..2]),
+            ),
+            (
+                "DeclaredAlone",
+                "impl RUNNER for DeclaredAlone {\n    fn run(&self, argv: &[String]) -> Result<Output> {\n        self.inner.run(argv)\n    }\n    fn starts_in(&self) -> Option<PathBuf> {\n        None\n    }\n    fn run_in(&self, _dir: &Path, argv: &[String], _timeout: Option<Duration>) -> Result<Output> {\n        self.run(argv)\n    }\n    fn run_in_with_limits(&self, _dir: &Path, argv: &[String], _t: Duration, _b: usize, _s: bool) -> Result<Output> {\n        self.inner.run(argv)\n    }\n}\n",
+                three
+                    .iter()
+                    .map(|form| format!("does not forward {form}"))
+                    .collect(),
+            ),
+            (
+                "Whole",
+                "impl RUNNER for Whole {\n    fn run(&self, argv: &[String]) -> Result<Output> {\n        self.inner.run(argv)\n    }\n    fn starts_in(&self) -> Option<PathBuf> {\n        self.inner.starts_in()\n    }\n    fn run_in(&self, dir: &Path, argv: &[String], timeout: Option<Duration>) -> Result<Output> {\n        self.inner.run_in(dir, argv, timeout)\n    }\n    fn run_in_with_limits(&self, dir: &Path, argv: &[String], t: Duration, b: usize, s: bool) -> Result<Output> {\n        (**self).run_in_with_limits(dir, argv, t, b, s)\n    }\n}\n",
+                Vec::new(),
+            ),
+        ];
+        for (name, shape, lacks) in shapes {
+            let text = shape.replace("RUNNER", "CommandRunner");
+            assert_eq!(wrappers_in(&text), [(name.to_owned(), lacks)], "{name}");
+        }
+        // A runner that calls only its own forms wraps nothing, and a mention in prose is no impl.
+        let own = "/// impl RUNNER for Prose { self.inner.run(argv) }\nimpl RUNNER for Own {\n    fn run_in(&self, _dir: &Path, argv: &[String], _timeout: Option<Duration>) -> Result<Output> {\n        self.run(argv)\n    }\n}\n";
+        assert!(wrappers_in(&own.replace("RUNNER", "CommandRunner")).is_empty());
+    }
+
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
     fn unsupported_runner_limits_do_not_delegate_to_an_actual_effectful_run() {

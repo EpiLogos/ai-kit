@@ -803,4 +803,84 @@ provenance = "central:source:project:demo:ProjectCentral/user/docs.md"
         .to_string_lossy()
         .into_owned();
     assert_eq!(chosen(&project, &nested), ["domain/any-docs"]);
+    // Round 55 item 8c (the review of #616, F6): the mixed routes. A file named through a link to the project is the
+    // project's, by the disk; a file that is not in the project is matched by nothing, though a folder named docs stands
+    // above it.
+    #[cfg(unix)]
+    {
+        fs::create_dir_all(project.join("src/docs")).unwrap();
+        fs::write(project.join("src/docs/guide.md"), "guide\n").unwrap();
+        std::os::unix::fs::symlink(&project, tmp.path().join("by-a-link")).unwrap();
+        let through = tmp
+            .path()
+            .join("by-a-link/src/docs/guide.md")
+            .to_string_lossy()
+            .into_owned();
+        assert_eq!(chosen(&project, &through), ["domain/any-docs"]);
+    }
+    let outside = tmp
+        .path()
+        .join("elsewhere/docs/guide.md")
+        .to_string_lossy()
+        .into_owned();
+    assert_eq!(chosen(&project, &outside), Vec::<String>::new());
+    // A harness names a file to its tool by a route from the project's own folder: with the project named whole, that
+    // route is the file's path in the project. The same route with a step out and back in is the same file.
+    assert_eq!(chosen(&project, "docs/guide.md"), ["domain/docs-tree"]);
+    assert_eq!(
+        chosen(&project, "src/../src/docs/./guide.md"),
+        ["domain/any-docs"]
+    );
+    assert_eq!(
+        chosen(&project, "../elsewhere/docs/guide.md"),
+        Vec::<String>::new(),
+        "a relative route that climbs out of the project"
+    );
+    // Round 55 item 8d (the review of #620, F3). A path that begins with the project's own and then climbs out of it is
+    // not in the project, though a folder named docs stands on its way; nor is a path anywhere under a root given as `.`.
+    let climbs = project
+        .join("../elsewhere/docs/guide.md")
+        .to_string_lossy()
+        .into_owned();
+    assert_eq!(
+        chosen(&project, &climbs),
+        Vec::<String>::new(),
+        "the project's prefix, then out of it"
+    );
+    assert_eq!(
+        chosen(std::path::Path::new("."), &outside),
+        Vec::<String>::new(),
+        "a root given as `.` holds no path that is not under it"
+    );
+    // A step out and back in, written after the project's prefix, is still the file's path in the project.
+    let back_in = project
+        .join("src/../docs/guide.md")
+        .to_string_lossy()
+        .into_owned();
+    assert_eq!(chosen(&project, &back_in), ["domain/docs-tree"]);
+    // A file about to be made, in a folder that does not stand yet, named by another spelling than the root's: through a
+    // link to the project, and in another case of the project's name where the volume folds case. Each chooses what the
+    // project's own spelling chooses (it did before 8c, by the path as given); so does a new file in a folder that stands.
+    fs::create_dir_all(project.join("src/docs")).unwrap();
+    let own = project
+        .join("pkg/docs/new.md")
+        .to_string_lossy()
+        .into_owned();
+    assert_eq!(chosen(&project, &own), ["domain/any-docs"]);
+    #[cfg(unix)]
+    {
+        let link = tmp.path().join("by-a-link");
+        for new in ["pkg/docs/new.md", "src/docs/new.md"] {
+            let through = link.join(new).to_string_lossy().into_owned();
+            assert_eq!(chosen(&project, &through), ["domain/any-docs"], "{new}");
+        }
+    }
+    let upper = tmp.path().join("docs/PROJ");
+    let in_another_case = upper.join("pkg/docs/new.md").to_string_lossy().into_owned();
+    let folded: &[&str] = if upper.is_dir() {
+        &["domain/any-docs"]
+    } else {
+        &[]
+    };
+    assert_eq!(chosen(&project, &in_another_case), folded);
 }
