@@ -1073,27 +1073,42 @@ mod project_text_capsule {
     #[test]
     fn a_change_that_keeps_the_size_and_the_time_is_seen_and_copied_again() {
         use std::os::unix::fs::MetadataExt;
-        let rows: [(&str, &str, &[u8], &[u8]); 3] = [
+        // Round 55 item 9f (the review of #617, F3): the look is pinned at its size. The last row's change stands at byte 3000
+        // of the database, inside the 4096 bytes the look reads and past its first 1024 and 2048.
+        let far = |state: &str| {
+            let mut page = b"SQLite format 3\0".to_vec();
+            page.resize(3000, b'.');
+            page.extend_from_slice(state.as_bytes());
+            page
+        };
+        let rows: [(&str, &str, Vec<u8>, Vec<u8>); 4] = [
             (
                 "the database",
                 "",
-                b"SQLite format 3\0state one, page 1",
-                b"SQLite format 3\0state two, page 1",
+                b"SQLite format 3\0state one, page 1".to_vec(),
+                b"SQLite format 3\0state two, page 1".to_vec(),
             ),
             (
                 "the -wal",
                 "-wal",
-                b"WAL header, salt one: frame 1 and 2",
-                b"WAL header, salt two: frame 1 and 2",
+                b"WAL header, salt one: frame 1 and 2".to_vec(),
+                b"WAL header, salt two: frame 1 and 2".to_vec(),
             ),
             (
                 "the database, past its first 32 bytes",
                 "",
-                b"SQLite format 3\0the same sixteen and the same sixteen after: state one, in the first page",
-                b"SQLite format 3\0the same sixteen and the same sixteen after: state two, in the first page",
+                b"SQLite format 3\0the same sixteen and the same sixteen after: state one, in the first page".to_vec(),
+                b"SQLite format 3\0the same sixteen and the same sixteen after: state two, in the first page".to_vec(),
+            ),
+            (
+                "the database, at byte 3000 of its first page",
+                "",
+                far("state one"),
+                far("state two"),
             ),
         ];
         for (row, suffix, first, next) in rows {
+            let (first, next) = (first.as_slice(), next.as_slice());
             let run = Offline::new();
             let watched = PathBuf::from(format!("{}{suffix}", run.db.display()));
             fs::write(&watched, first).unwrap();
@@ -2045,6 +2060,59 @@ mod project_semantic_capsule {
         }
     }
 
+    /// Round 55 item 9f (DLW build ruling 2026-11-11; the review of #617, F1 and F2): the migration note never changes a capsule's
+    /// status, and the command it gives pastes as the database whatever its name. A `sed` that fails stands first on PATH (as one
+    /// that refuses a path's bytes does), bkmr ends with 7 after migrating its copy, and the database's name holds a space and a
+    /// quote and ends in a newline. The text capsule and the semantic capsule in each mode answer 7, and say the note once with the
+    /// database named whole, its last newline inside the quotes.
+    #[test]
+    fn the_migration_note_runs_no_other_program_and_names_the_database_whole() {
+        for (script, args) in [
+            (TEXT, vec!["lighthouse"]),
+            (SEMANTIC, vec!["--mode", "hybrid", "lighthouse"]),
+            (SEMANTIC, vec!["--mode", "semantic", "lighthouse"]),
+        ] {
+            let dir = native_tempdir();
+            let (db, _) = vector_database(dir.path(), "older db's.db\n", CLEAN_WAL);
+            let (path, seen) = shim(dir.path());
+            let failing_sed = dir.path().join("shim/sed");
+            fs::write(&failing_sed, "#!/bin/sh\nexit 1\n").unwrap();
+            fs::set_permissions(&failing_sed, fs::Permissions::from_mode(0o755)).unwrap();
+            let copies = dir.path().join("copies");
+            fs::create_dir(&copies).unwrap();
+            let output = run(
+                dir.path(),
+                script,
+                &db,
+                &[
+                    ("PATH", path),
+                    ("TMPDIR", copies.clone().into()),
+                    ("AIKIT_TEST_SHIM_SEEN", seen.clone().into()),
+                    ("AIKIT_TEST_SHIM_BACKUP", "1".into()),
+                    ("AIKIT_TEST_SHIM_STATUS", "7".into()),
+                ],
+                &args,
+            );
+            let case = format!("{script} {args:?}");
+            assert_eq!(output.status, 7, "{case}: {}", output.stderr);
+            assert!(
+                migrated_words(&db).contains("older db'\\''s.db\n' search"),
+                "the words asked for hold the name's last newline"
+            );
+            assert_eq!(
+                output.stderr.matches(&migrated_words(&db)).count(),
+                1,
+                "{case}: {}",
+                output.stderr
+            );
+            assert_eq!(
+                fs::read_dir(&copies).unwrap().count(),
+                0,
+                "{case}: no copy is left"
+            );
+        }
+    }
+
     /// Round 55 item 9e, item 4 (the review of #615, B3): where the copy cannot be made, the doctor reports and goes on. It says
     /// why on stderr, naming the database, prints its rows as "?", leaves the embedding counts out, and ends with status 0, as it
     /// did before it counted from a copy for a database it could not read. (9b made it stop there with 74.)
@@ -2085,9 +2153,10 @@ mod project_semantic_capsule {
             output.stdout
         );
         assert!(!output.stdout.contains("embeddings"), "{}", output.stdout);
+        // The doctor searches nothing: its reason says what its copy is for (round 55 item 9f; the review of #617, F4).
         assert!(
             output.stderr.contains(&format!(
-                "could not copy the database to search it: {}",
+                "could not copy the database to count its rows: {}",
                 db.display()
             )) && output
                 .stderr

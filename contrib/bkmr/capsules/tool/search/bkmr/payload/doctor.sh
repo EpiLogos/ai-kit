@@ -44,6 +44,11 @@ fi
 printf 'bound database: %s\n' "$db"
 [ -f "$db" ] || die "the bound database does not exist: $db" 2
 
+# What the copy is for, in the words of the two refusals below that say so: the
+# block is one text in three capsules, and this capsule's purpose is its own.
+copy_for='to count its rows'
+folder_for='to count the rows of a copy of the database in'
+
 # --- the private copy: the same in search-text.sh, search-semantic.sh and
 # doctor.sh. A capsule ships only its own payload, so the three cannot share one
 # file; a test holds them to the same text (bkmr_real.rs). ---
@@ -108,7 +113,7 @@ real_file() {
 private_copy() {
   if [ -z "$copies" ]; then
     copies=$(mktemp -d "${TMPDIR:-/tmp}/aikit-bkmr-search.XXXXXX") || {
-      printf '%s: could not make a private folder to search a copy of the database in: %s\n' "$me" "$1" >&2
+      printf '%s: could not make a private folder %s: %s\n' "$me" "$folder_for" "$1" >&2
       return 74
     }
   fi
@@ -132,7 +137,7 @@ private_copy() {
     after=$(look_at "$real" && look_at "$real-wal" && look_at "$real-journal") || after=
     if [ "$before" = "$after" ]; then
       [ "$copied" = no ] || break
-      printf '%s: could not copy the database to search it: %s\n' "$me" "$1" >&2
+      printf '%s: could not copy the database %s: %s\n' "$me" "$copy_for" "$1" >&2
       return 74
     fi
     if [ "$tries" -ge 5 ]; then
@@ -156,14 +161,39 @@ private_copy() {
 # words name the backup it made, which is of the copy and goes with it. Once,
 # however many backups stand in the copy's folder. The command it gives names
 # the database in single quotes, so that it can be pasted whatever the path
-# holds. (The doctor runs no bkmr and does not call it.)
+# holds. (The doctor runs no bkmr and does not call it.) It always answers 0:
+# the note is never the capsule's status, which is bkmr's.
+#
+# quote_for_paste TEXT: TEXT in single quotes for a shell, each ' in it written
+# '\'', left in $quoted. The shell does this itself. No other program runs, so
+# none can be missing or fail (a sed that refuses the path's bytes did, and took
+# the capsule's status with it); and nothing is dropped from the end of TEXT, as
+# a command substitution drops a newline there, so a name that ends in a
+# newline pastes as that name.
+quote_for_paste() {
+  unquoted=$1
+  quoted=
+  while :; do
+    case $unquoted in
+      *"'"*)
+        quoted=$quoted${unquoted%%"'"*}"'\\''"
+        unquoted=${unquoted#*"'"}
+        ;;
+      *)
+        quoted=$quoted$unquoted
+        break
+        ;;
+    esac
+  done
+}
 migrated() {
   for backup in "$copies"/search_backup_*.db; do
     [ -f "$backup" ] || continue
-    quoted=$(printf '%s' "$1" | sed "s/'/'\\\\''/g")
-    printf '%s: bkmr migrated the private copy this search made of %s, which is kept in an older schema. The backup bkmr names was made of that copy and is removed with it. Each search migrates its copy again until the database itself is migrated, once: bkmr --db '"'%s'"' search --np --limit 1 ""\n' "$me" "$1" "$quoted" >&2
+    quote_for_paste "$1"
+    printf '%s: bkmr migrated the private copy this search made of %s, which is kept in an older schema. The backup bkmr names was made of that copy and is removed with it. Each search migrates its copy again until the database itself is migrated, once: bkmr --db '"'%s'"' search --np --limit 1 ""\n' "$me" "$1" "$quoted" >&2 || :
     return 0
   done
+  return 0
 }
 # --- end of the private copy ---
 
