@@ -4944,7 +4944,9 @@ pub enum CredentialSub {
     Rotate(CredentialRotateArgs),
     /// Mark a binding revoked so resolution and dispatch refuse it.
     Revoke(CredentialRevokeArgs),
-    /// Surface candidate keys already on this machine (presence only).
+    /// Surface candidate keys already on this machine (presence only). A key
+    /// in a harness's own login store is listed as kept by that harness,
+    /// never proposed as a binding.
     Discover(CredentialDiscoverArgs),
     /// Run one operator-invoked live check against a bound provider key.
     Verify(CredentialVerifyArgs),

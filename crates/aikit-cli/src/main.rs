@@ -6067,7 +6067,9 @@ fn cmd_credential(cwd: &std::path::Path, command: CredentialCmd, json_mode: bool
                     "findings are presence-only: names and locations, never values. \
                      bind one with `aikit credential setup credential:<provider> \
                      --from-env --env-var <NAME>` or declare its store location \
-                     with `--ref <SECRET_REF>`"
+                     with `--ref <SECRET_REF>`. a `harness-auth` finding is a key \
+                     the harness keeps in its own login store (`kept_by`): it is \
+                     not actionable and is never proposed as a binding"
                         .to_string(),
                 ],
             ))

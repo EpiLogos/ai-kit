@@ -785,11 +785,19 @@ pub struct CredentialDiscoveryFinding {
     /// The variable or key name, as seen.
     pub name: String,
     /// The credential ref a bind would satisfy, when the vendor is known.
+    /// Always `None` for a harness's own login store: that key is the
+    /// harness's, and nothing is proposed for binding.
     pub proposed_credential_ref: Option<String>,
     /// The env var an explicit `--from-env` import would read.
     pub proposed_env_var: Option<String>,
     /// Whether a non-revoked binding for the proposed ref already exists.
     pub already_bound: bool,
+    /// Whether AIKit can bind this finding. `false` for a key inside a
+    /// harness's own login store: the harness keeps it and reads it itself.
+    pub actionable: bool,
+    /// The harness that keeps this key in its own login store, when it is one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub kept_by: Option<&'static str>,
 }
 
 /// Known vendor prefixes and the provider segment of the credential ref each
@@ -905,11 +913,23 @@ const HARNESS_AUTH_FILES: &[(&str, &str)] = &[
 /// Scan the machine for candidate provider keys: shell environment names, the
 /// project's dotenv files and a short, named list of harness auth files.
 /// Presence only — findings name what was seen and where, never what the
-/// value is.
+/// value is. A key inside a harness's own login store is listed as kept by
+/// that harness, with nothing proposed to bind: the harness reads it itself.
 pub fn discover(
     home: &AikitHome,
     project_root: Option<&Path>,
     extra_env_file: Option<&Path>,
+) -> Result<Vec<CredentialDiscoveryFinding>> {
+    let user_home = std::env::var_os("HOME").map(PathBuf::from);
+    discover_in(home, project_root, extra_env_file, user_home.as_deref())
+}
+
+/// [`discover`] against an explicit user home for the harness auth files.
+fn discover_in(
+    home: &AikitHome,
+    project_root: Option<&Path>,
+    extra_env_file: Option<&Path>,
+    user_home: Option<&Path>,
 ) -> Result<Vec<CredentialDiscoveryFinding>> {
     let bindings = CredentialBindingStore::new(home).list()?;
     let bound_refs: BTreeSet<String> = bindings
@@ -939,6 +959,8 @@ pub fn discover(
                     proposed_env_var: Some(name.clone()),
                     name,
                     already_bound,
+                    actionable: true,
+                    kept_by: None,
                 },
             );
         };
@@ -976,9 +998,9 @@ pub fn discover(
         }
     }
 
-    if let Ok(home_dir) = std::env::var("HOME") {
+    if let Some(home_dir) = user_home {
         for (harness, relative) in HARNESS_AUTH_FILES {
-            let path = Path::new(&home_dir).join(relative);
+            let path = home_dir.join(relative);
             let Ok(bytes) = std::fs::read(&path) else {
                 continue;
             };
@@ -986,11 +1008,21 @@ pub fn discover(
                 continue;
             };
             for name in names {
-                push(
-                    "harness-auth",
-                    format!("{} ({harness})", path.display()),
-                    name,
-                    &mut findings,
+                let location = format!("{} ({harness})", path.display());
+                // The harness's own login store: listed so the person sees
+                // where the key lies, never proposed as a binding.
+                findings.insert(
+                    ("harness-auth".to_string(), location.clone(), name.clone()),
+                    CredentialDiscoveryFinding {
+                        source: "harness-auth",
+                        location,
+                        name,
+                        proposed_credential_ref: None,
+                        proposed_env_var: None,
+                        already_bound: false,
+                        actionable: false,
+                        kept_by: Some(harness),
+                    },
                 );
             }
         }
@@ -1551,6 +1583,34 @@ mod tests {
         let rendered = format!("{names:?}");
         assert!(!rendered.contains("material-that-must-not-leak"));
         assert_eq!(json_key_names(b"not json"), None);
+    }
+
+    #[test]
+    fn a_harness_login_store_key_is_kept_by_the_harness_never_proposed() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = AikitHome::at(temp.path().join("aikit"));
+        let user_home = temp.path().join("user-home");
+        std::fs::create_dir_all(user_home.join(".codex")).unwrap();
+        std::fs::write(
+            user_home.join(".codex/auth.json"),
+            br#"{"OPENAI_API_KEY": "material-that-must-not-leak", "tokens": {}}"#,
+        )
+        .unwrap();
+        let findings = discover_in(&home, None, None, Some(&user_home)).unwrap();
+        let kept: Vec<_> = findings
+            .iter()
+            .filter(|finding| finding.source == "harness-auth")
+            .collect();
+        assert_eq!(kept.len(), 2, "{kept:?}");
+        for finding in &kept {
+            assert_eq!(finding.proposed_credential_ref, None, "{finding:?}");
+            assert_eq!(finding.proposed_env_var, None, "{finding:?}");
+            assert!(!finding.actionable, "{finding:?}");
+            assert_eq!(finding.kept_by, Some("codex"));
+        }
+        let json = serde_json::to_string(&findings).unwrap();
+        assert!(!json.contains("material-that-must-not-leak"));
+        assert!(!json.contains("credential:openai"), "{json}");
     }
 
     #[test]

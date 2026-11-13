@@ -96,7 +96,11 @@ Laws this surface keeps:
   materialises at the one moment of use, and `env://` is refused — import
   explicitly with `--from-env --env-var` instead.
 * Discovery findings are presence-only: variable names and locations, never
-  values. Harness auth files contribute key names only.
+  values. Harness auth files contribute key names only, and a key in a
+  harness's own login store (`~/.codex/auth.json`, `~/.claude/.credentials.json`,
+  `~/.pi/agent/auth.json`) is listed as `kept_by` that harness with
+  `actionable: false` and nothing proposed: the harness reads its own login,
+  so it is never offered as a binding.
 * Rotation changes the material or its location while the credential ref and
   first-bound timestamp stay stable; the routing join and the settings
   inventory read those facts, so availability follows the binding, and a
