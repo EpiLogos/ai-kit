@@ -1,44 +1,52 @@
 //! The per-project agency mint.
 //!
-//! Until now every ACP chat session reused one hand-authored agency source
-//! (`Work/O-I/.aikit/sf6-agency/agency-request.json`), which the disclosure
-//! named as a limitation. This module derives a *fresh* native chain per
-//! project + agent from that standing template and runs the real native owner
-//! (`actuation agency actualise`) against it, through the same
+//! Each chat session's Agency is a *fresh* native chain per (agent, project),
+//! resolved through the World's standing authority in Actuation and actualised
+//! by the real native owner (`actuation agency actualise`), through the same
 //! [`CommandRunner`](aikit_adapters::runner::CommandRunner) seam
 //! [`admit_agency`](aikit_adapters::agency_admission::admit_agency) uses.
 //!
+//! The World's authority is the person's: they grant it at the World's Setup
+//! (the Ground step, `actuation.authority.grant-world`), and Actuation keeps it
+//! in its authority store. The mint asks Actuation for the live grant that
+//! names the child's world (`actuation authority list`), composes the
+//! resolution request from its own per-(agent, project) refs and has Actuation
+//! resolve it (`actuation authority resolve`). Only an admitted resolution's
+//! actualisation request is persisted and actualised; any other answer is
+//! refused in Actuation's words.
+//!
 //! Derivation law (what is minted vs what is carried):
 //!
-//! * Carried verbatim from the owner's standing template — never invented
-//!   here: `requester_ref`, `governing_binding`, `metagency_grant`, the
-//!   determination's `bounds_refs` and `authority_refs`, the delegated
-//!   autonomy's denials, and the `scope_ref` of the child binding. These are
-//!   the owner's standing authority, not the mint's.
+//! * Carried from the World's grant — never invented here: the requester (the
+//!   grant's holder), the governing binding and metagency grant (which only
+//!   Actuation's stored record supplies), the requested bounds (the grant's)
+//!   and the authority refs (the governing binding's).
 //! * Minted freshly per (agent, project), deterministically (the same
-//!   agent + project always derives byte-identical request text, so the
-//!   persisted source is content-addressed and re-mints are honest replays):
-//!   `request_ref`, `determination_ref`, `differentiated_agency_ref`, the
-//!   child `binding_ref`, `return_relation_ref`, `continuity_ref`,
-//!   `agent_identity` evidence and provenance source refs.
+//!   agent + project always derives the same refs, so the persisted source is
+//!   content-addressed and re-mints are honest replays): `request_ref`,
+//!   `determination_ref`, the child `agency_ref` and `binding_ref`,
+//!   `return_relation_ref`, `continuity_ref`, `agent_identity` evidence and
+//!   provenance source refs.
 //! * The child `world_ref` is the canonical Project identity resolved from
 //!   `--project-cwd` through the same `session-space project-context`
-//!   resolution path; it is never inferred from the directory name here.
-//! * The delegated autonomy's allowed Actions are the template's allowed
-//!   refs *plus* the two Actions an ACP chat session cannot work without
-//!   (`action/aikit/encounter-send`, `action/aikit/model-realise`) — the
-//!   native admission refuses a binding that cannot send.
+//!   resolution path; it is never inferred from the directory name here. The
+//!   child's scope is its own world, so the Central root's child is the root
+//!   context and a Project's child needs its Project binding.
+//! * The delegated Actions are the two an ACP chat session cannot work without
+//!   (`action/aikit/encounter-send`, `action/aikit/model-realise`), plus the
+//!   task Action when the mint is for a task — the native admission refuses a
+//!   binding that cannot send.
 //!
 //! Agent identity resolution order: explicit `--agent-ref` (pinned to its
 //! scope's Central AgentProfile when that scope — the root or a Project —
 //! declares one for it), else the Central AgentProfile for the project scope
 //! when exactly one exists, else a derived, clearly-attributed
 //! `agent/<project-slug>-chat`. A human `requester_ref` is never fabricated:
-//! it is always the template's.
+//! it is always the grant's holder.
 use super::{read_binding, EncounterAgencyBinding};
 use crate::app::Service;
 use aikit_adapters::{
-    agency_admission::{admit_agency, AgencySourceBasis, AGENCY_ACTUALISATION_SCHEMA},
+    agency_admission::{admit_agency, AgencySourceBasis},
     runner::{CommandRunner, SystemRunner},
 };
 use aikit_core::{AikitError, ProjectRef, ResourceRef, Result, SourceRevision};
@@ -56,147 +64,9 @@ use std::{
 pub const REQUIRED_MINTED_ACTIONS: [&str; 2] =
     ["action/aikit/encounter-send", "action/aikit/model-realise"];
 
-/// Owner override for the standing template; without it the template is read
-/// from the Central root above the project (`Work/O-I/.aikit/sf6-agency/agency-request.json`).
-pub const TEMPLATE_ENV: &str = "AIKIT_AGENCY_MINT_TEMPLATE";
-
-/// The minted request document, derived from the standing template.
-///
-/// `tag` is the deterministic per-(agent, project) suffix shared by every
-/// freshly minted ref.
-pub fn mint_request_document(
-    template: &Value,
-    agent_ref: &str,
-    world_ref: &str,
-) -> Result<(Value, String)> {
-    if template["schema"] != AGENCY_ACTUALISATION_SCHEMA {
-        return Err(mint_error(
-            "agency_mint.template_invalid",
-            format!(
-                "the standing template must declare {AGENCY_ACTUALISATION_SCHEMA}, found {}",
-                template["schema"]
-            ),
-        ));
-    }
-    let requester_ref = template["requester_ref"].as_str().ok_or_else(|| {
-        mint_error(
-            "agency_mint.template_invalid",
-            "the standing template has no requester_ref; the mint never invents one",
-        )
-    })?;
-    let governing = &template["governing_binding"];
-    if !governing.is_object() {
-        return Err(mint_error(
-            "agency_mint.template_invalid",
-            "the standing template has no governing_binding to carry",
-        ));
-    }
-    let grant = &template["metagency_grant"];
-    if !grant.is_object() {
-        return Err(mint_error(
-            "agency_mint.template_invalid",
-            "the standing template has no metagency_grant to carry",
-        ));
-    }
-    let template_determination = &template["determination"];
-    if template_determination["kind"] != "delegation" {
-        return Err(mint_error(
-            "agency_mint.template_invalid",
-            format!(
-                "the mint derives delegation chains; the template's determination kind is {}",
-                template_determination["kind"]
-            ),
-        ));
-    }
-    let child_scope = template["differentiated_binding"]["scope_ref"]
-        .as_str()
-        .unwrap_or("scope:root");
-    let determining_agency = governing["agency_ref"]
-        .as_str()
-        .ok_or_else(|| {
-            mint_error(
-                "agency_mint.template_invalid",
-                "the template's governing_binding names no agency_ref",
-            )
-        })?
-        .to_owned();
-
-    let tag = mint_tag(agent_ref, world_ref);
-    // Bounds and authority are the owner's standing structure, carried
-    // verbatim from the template's own determination.
-    let bounds_refs = template_determination["bounds_refs"].clone();
-    let authority_refs = template_determination["authority_refs"].clone();
-    let denied = template_determination["delegated_autonomy"]["denied_action_refs"].clone();
-    let may_determine = template_determination["delegated_autonomy"]["may_determine_within_bounds"]
-        .as_bool()
-        .unwrap_or(false);
-    let mut allowed: Vec<Value> = REQUIRED_MINTED_ACTIONS
-        .iter()
-        .map(|action| json!(action))
-        .collect();
-    if let Some(template_allowed) =
-        template_determination["delegated_autonomy"]["allowed_action_refs"].as_array()
-    {
-        for action in template_allowed {
-            if !allowed.contains(action) {
-                allowed.push(action.clone());
-            }
-        }
-    }
-    let mode = template_determination["return_policy"]["mode"]
-        .as_str()
-        .unwrap_or("required");
-    let continuity_ref = format!("continuity:{agent_ref}");
-
-    let request = json!({
-        "schema": AGENCY_ACTUALISATION_SCHEMA,
-        "request_ref": format!("actualisation-request:aikit-mint-{tag}"),
-        "requester_ref": requester_ref,
-        "governing_binding": governing,
-        "metagency_grant": grant,
-        "determination": {
-            "schema": "actuation.agency/v1",
-            "determination_ref": format!("determination:aikit-mint-{tag}"),
-            "kind": "delegation",
-            "determining_agency_ref": determining_agency,
-            "differentiated_agency_ref": format!("agency:aikit-mint-{tag}"),
-            "world_binding_ref": format!("binding:aikit-mint-{tag}"),
-            "bounds_refs": bounds_refs,
-            "authority_refs": authority_refs,
-            "delegated_autonomy": {
-                "allowed_action_refs": allowed,
-                "denied_action_refs": denied,
-                "may_determine_within_bounds": may_determine,
-            },
-            "return_policy": {
-                "mode": mode,
-                "return_relation_ref": format!("return-relation:aikit-mint-{tag}"),
-            },
-        },
-        "differentiated_binding": {
-            "schema": "actuation.agency/v1",
-            "binding_ref": format!("binding:aikit-mint-{tag}"),
-            "agent_ref": agent_ref,
-            "agency_ref": format!("agency:aikit-mint-{tag}"),
-            "world_ref": world_ref,
-            "scope_ref": child_scope,
-            "determining_agency_ref": determining_agency,
-            "bounds_refs": bounds_refs,
-            "authority_refs": authority_refs,
-            "return_relation_ref": format!("return-relation:aikit-mint-{tag}"),
-            "continuity_ref": continuity_ref,
-        },
-        "agent_identity": {
-            "standing": "existing",
-            "evidence_refs": [format!("evidence/aikit-agency-mint/{tag}")],
-        },
-        "provenance": {
-            "source_refs": [format!("source/aikit-agency-mint/{tag}")],
-            "context_refs": [],
-        },
-    });
-    Ok((request, tag))
-}
+/// What a refusal for want of the World's authority names as its fix.
+const AUTHORITY_FIX: &str = "the World's Setup grants it at the Ground step \
+     (`actuation.authority.grant-world`)";
 
 /// Resolve the project identity from `project_cwd` through the same
 /// application resolution `aikit session-space project-context` uses.
@@ -227,55 +97,237 @@ fn resolve_project(
     Ok(resolution.project_binding.project)
 }
 
-/// Where the owner's standing template lives: the explicit override, else the
-/// sf6 chain inside the Central root above the project.
-fn locate_template(project_cwd: &Path) -> Result<PathBuf> {
-    if let Some(override_path) = std::env::var_os(TEMPLATE_ENV) {
-        return Ok(PathBuf::from(override_path));
-    }
-    let central_root = project_cwd
-        .ancestors()
-        .find(|candidate| candidate.join("Control").is_dir() && candidate.join("Work").is_dir());
-    let Some(central_root) = central_root else {
-        return Err(mint_error(
-            "agency_mint.template_missing",
-            format!(
-                "no Central root (Control/ + Work/) above {}; cannot locate the standing \
-                 agency template. Set {TEMPLATE_ENV} to the owner's \
-                 actuation.agency-actualisation/v1 request",
-                project_cwd.display()
-            ),
-        ));
-    };
-    Ok(central_root
-        .join("Work")
-        .join("O-I")
-        .join(".aikit")
-        .join("sf6-agency")
-        .join("agency-request.json"))
+/// The live grant in Actuation's authority store that names a world: its
+/// source ref and the governing record Actuation keeps for it.
+struct WorldGrant {
+    authority_source_ref: String,
+    record: Value,
 }
 
-fn load_template(project_cwd: &Path) -> Result<Value> {
-    let path = locate_template(project_cwd)?;
-    let bytes = std::fs::read(&path).map_err(|error| {
-        mint_error(
-            "agency_mint.template_missing",
+/// Ask Actuation for the grants it holds and take the live one naming
+/// `world_ref` — not revoked, not expired, the world among its allowed
+/// worlds; the newest when several do. None is a refusal naming the fix.
+fn find_world_grant(
+    runner: &dyn CommandRunner,
+    actuation_bin: &Path,
+    world_ref: &str,
+) -> Result<WorldGrant> {
+    let argv = vec![
+        actuation_bin.to_string_lossy().into_owned(),
+        "authority".into(),
+        "list".into(),
+        "--json".into(),
+    ];
+    let output = runner.run(&argv)?;
+    if output.status != 0 {
+        return Err(mint_error(
+            "agency_mint.authority_missing",
             format!(
-                "the standing agency template is not readable at {}: {error}; set \
-                 {TEMPLATE_ENV} to the owner's actualisation request",
-                path.display()
+                "Actuation could not list the World's authority (exit {}): {}; {AUTHORITY_FIX}",
+                output.status,
+                owner_text(&output)
             ),
+        ));
+    }
+    let listing: Value = serde_json::from_str(&output.stdout).map_err(|error| {
+        mint_error(
+            "agency_mint.authority_missing",
+            format!("Actuation's authority listing is not readable: {error}"),
         )
     })?;
-    serde_json::from_slice(&bytes).map_err(|error| {
-        mint_error(
-            "agency_mint.template_invalid",
-            format!(
-                "the standing agency template at {} is invalid: {error}",
-                path.display()
-            ),
-        )
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_secs())
+        .unwrap_or_default();
+    let newest = listing["authorities"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|listed| listed["revoked"].is_null())
+        .filter(|listed| {
+            listed["record"]["expires_at_unix_seconds"]
+                .as_u64()
+                .is_none_or(|expires| expires > now)
+        })
+        .filter(|listed| {
+            listed["record"]["allowed_world_refs"]
+                .as_array()
+                .is_some_and(|worlds| worlds.iter().any(|world| world == world_ref))
+        })
+        .filter_map(|listed| {
+            Some((
+                listed["issued_at_unix_seconds"]
+                    .as_u64()
+                    .unwrap_or_default(),
+                listed["authority_source_ref"].as_str()?,
+                listed,
+            ))
+        })
+        .max_by(|left, right| (left.0, left.1).cmp(&(right.0, right.1)));
+    let Some((_, authority_source_ref, listed)) = newest else {
+        return Err(mint_error(
+            "agency_mint.authority_missing",
+            format!("no live authority in Actuation names the world {world_ref}; {AUTHORITY_FIX}"),
+        ));
+    };
+    Ok(WorldGrant {
+        authority_source_ref: authority_source_ref.to_owned(),
+        record: listed["record"].clone(),
     })
+}
+
+/// The task Action a mint for a task delegates as well.
+const TASK_ACTION: &str = "action/aikit/encounter-task";
+
+/// The resolution request the mint puts to Actuation
+/// (`actuation.local-authority/v1`): its own per-(agent, project) refs, the
+/// grant's holder as requester, the grant's bounds and the governing
+/// binding's authority. The governing side is the stored record's alone.
+fn resolution_request(
+    grant: &WorldGrant,
+    agent_ref: &str,
+    world_ref: &str,
+    tag: &str,
+    for_task: bool,
+) -> Result<Value> {
+    let record = &grant.record;
+    let named = |value: &Value, what: &str| -> Result<String> {
+        value.as_str().map(str::to_owned).ok_or_else(|| {
+            mint_error(
+                "agency_mint.authority_refused",
+                format!(
+                    "the World's authority {} names no {what}; {AUTHORITY_FIX}",
+                    grant.authority_source_ref
+                ),
+            )
+        })
+    };
+    let holder = named(&record["holder"], "holder")?;
+    let determining_agency = named(
+        &record["governing_binding"]["agency_ref"],
+        "governing agency",
+    )?;
+    let bounds_refs = record["metagency_grant"]["bounds_refs"].clone();
+    let authority_refs = record["governing_binding"]["authority_refs"].clone();
+    let mut allowed: Vec<Value> = REQUIRED_MINTED_ACTIONS
+        .iter()
+        .map(|action| json!(action))
+        .collect();
+    if for_task {
+        allowed.push(json!(TASK_ACTION));
+    }
+    Ok(json!({
+        "schema": "actuation.local-authority/v1",
+        "resolution_ref": format!("resolution:aikit-mint-{tag}"),
+        "request_ref": format!("actualisation-request:aikit-mint-{tag}"),
+        "requester_ref": holder,
+        "authority_source_ref": grant.authority_source_ref,
+        "determination_ref": format!("determination:aikit-mint-{tag}"),
+        "differentiated_binding": {
+            "schema": "actuation.agency/v1",
+            "binding_ref": format!("binding:aikit-mint-{tag}"),
+            "agent_ref": agent_ref,
+            "agency_ref": format!("agency:aikit-mint-{tag}"),
+            "world_ref": world_ref,
+            "scope_ref": world_ref,
+            "determining_agency_ref": determining_agency,
+            "bounds_refs": bounds_refs,
+            "authority_refs": authority_refs,
+            "return_relation_ref": format!("return-relation:aikit-mint-{tag}"),
+            "continuity_ref": format!("continuity:{agent_ref}"),
+        },
+        "agent_identity": {
+            "standing": "existing",
+            "evidence_refs": [format!("evidence/aikit-agency-mint/{tag}")],
+        },
+        "requested_bounds_refs": bounds_refs,
+        "delegated_autonomy": {
+            "allowed_action_refs": allowed,
+            "denied_action_refs": [],
+            "may_determine_within_bounds": false,
+        },
+        "return_policy": {
+            "mode": "required",
+            "return_relation_ref": format!("return-relation:aikit-mint-{tag}"),
+        },
+        "provenance": {
+            "source_refs": [format!("source/aikit-agency-mint/{tag}")],
+            "context_refs": [],
+        },
+    }))
+}
+
+/// Have Actuation resolve the request against the World's grant. The request
+/// is written beside the minted sources (content-addressed) and passed by
+/// path. Admitted, the answer's actualisation request is returned; any other
+/// answer is refused in Actuation's words.
+fn resolve_through_authority(
+    runner: &dyn CommandRunner,
+    actuation_bin: &Path,
+    directory: &Path,
+    resolution: &Value,
+) -> Result<Value> {
+    let bytes = serde_json::to_vec_pretty(resolution)
+        .map_err(|error| mint_error("agency_mint.encode", error.to_string()))?;
+    let directory = directory.join("resolutions");
+    std::fs::create_dir_all(&directory).map_err(super::error)?;
+    let path = directory.join(format!("{}.json", blake3::hash(&bytes).to_hex()));
+    if std::fs::read(&path).ok().as_deref() != Some(bytes.as_slice()) {
+        std::fs::write(&path, &bytes).map_err(super::error)?;
+    }
+    let argv = vec![
+        actuation_bin.to_string_lossy().into_owned(),
+        "authority".into(),
+        "resolve".into(),
+        path.to_string_lossy().into_owned(),
+        "--json".into(),
+    ];
+    let output = runner.run(&argv)?;
+    let authority = resolution["authority_source_ref"].as_str().unwrap_or("?");
+    let world = resolution["differentiated_binding"]["world_ref"]
+        .as_str()
+        .unwrap_or("?");
+    if output.status != 0 {
+        return Err(mint_error(
+            "agency_mint.authority_refused",
+            format!(
+                "Actuation refused to resolve {world} against the World's authority {authority} \
+                 (exit {}): {}; {AUTHORITY_FIX}",
+                output.status,
+                owner_text(&output)
+            ),
+        ));
+    }
+    let outcome: Value = serde_json::from_str(&output.stdout).map_err(|error| {
+        mint_error(
+            "agency_mint.authority_refused",
+            format!("Actuation's resolution is not readable: {error}"),
+        )
+    })?;
+    match (&outcome["standing"], &outcome["actualisation_request"]) {
+        (standing, request) if standing == "admitted" && request.is_object() => Ok(request.clone()),
+        (standing, _) => Err(mint_error(
+            "agency_mint.authority_refused",
+            format!(
+                "Actuation answered {} for {world} against the World's authority {authority}: \
+                 {}: {}; {AUTHORITY_FIX}",
+                standing.as_str().unwrap_or("no standing"),
+                outcome["refusal"]["code"].as_str().unwrap_or("no code"),
+                outcome["refusal"]["reason"]
+                    .as_str()
+                    .unwrap_or("no reason given"),
+            ),
+        )),
+    }
+}
+
+/// A native owner's own words for a failed command: stderr, else stdout.
+fn owner_text(output: &aikit_adapters::runner::Output) -> &str {
+    if output.stderr.trim().is_empty() {
+        output.stdout.trim()
+    } else {
+        output.stderr.trim()
+    }
 }
 
 /// The agent identity the mint provisions with: the resolved ref, the
@@ -594,16 +646,12 @@ fn run_actualise(
     ];
     let output = runner.run(&argv)?;
     if output.status != 0 {
-        let owner_text = if output.stderr.trim().is_empty() {
-            output.stdout.trim()
-        } else {
-            output.stderr.trim()
-        };
         return Err(AikitError::new(
             "agency_mint.refused",
             format!(
-                "Actuation refused the minted agency request (exit {}): {owner_text}",
-                output.status
+                "Actuation refused the minted agency request (exit {}): {}",
+                output.status,
+                owner_text(&output)
             ),
         ));
     }
@@ -611,20 +659,27 @@ fn run_actualise(
         .map_err(|error| mint_error("agency_mint.receipt_invalid", error.to_string()))
 }
 
-/// Resolve the Actuation executable the way every other AIKit intake does:
-/// `actuation` on PATH, pinned to its absolute location for the persisted
-/// binding.
+/// Actuation as every AIKit owner call names it (gateway_owners.rs
+/// `ProcessOwners`): `ACTUATION_BIN` or `OI_ACTUATION_BIN` where the suite
+/// names its build, else `actuation` on PATH, pinned to its absolute location
+/// for the persisted binding. The mint asks the same Actuation that granted
+/// the World, never a different one found first on PATH.
 fn resolve_actuation_bin() -> PathBuf {
-    let name = "actuation";
-    if let Some(path) = std::env::var_os("PATH") {
-        for directory in std::env::split_paths(&path) {
-            let candidate = directory.join(name);
-            if candidate.is_file() {
-                return candidate;
-            }
-        }
+    let named = crate::gateway_owners::ProcessOwners::from_env().actuation;
+    crate::probe::which(&named).unwrap_or_else(|| PathBuf::from(named))
+}
+
+/// The owner-only directory the minted sources (and the resolutions put to
+/// Actuation) live in.
+fn prepare_mint_directory(directory: &Path) -> Result<()> {
+    std::fs::create_dir_all(directory).map_err(super::error)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(directory, std::fs::Permissions::from_mode(0o700))
+            .map_err(super::error)?;
     }
-    PathBuf::from(name)
+    Ok(())
 }
 
 fn fresh_revision() -> Result<SourceRevision> {
@@ -701,39 +756,28 @@ fn mint_per_project_agency_with_intent(
         None => (None, None),
     };
 
-    let template = load_template(project_cwd)?;
-    let (mut request, tag) =
-        mint_request_document(&template, agent_ref.as_str(), world_ref.as_str())?;
-    if for_task {
-        let allowed = request["determination"]["delegated_autonomy"]["allowed_action_refs"]
-            .as_array_mut()
-            .ok_or_else(|| {
-                mint_error(
-                    "agency_mint.actions",
-                    "Native determination actions are absent",
-                )
-            })?;
-        let action = json!("action/aikit/encounter-task");
-        if !allowed.contains(&action) {
-            allowed.push(action);
-        }
-        // This is a requested determination. Actualise below still decides
-        // against the owner's unchanged grant and bounds.
-    }
+    let directory = home.state().join("agency-mints");
+    let tag = mint_tag(agent_ref.as_str(), world_ref.as_str());
+    // The actualisation request, resolved through the World's authority in
+    // Actuation: a requested determination; actualise below still decides.
+    let grant = find_world_grant(runner, actuation_bin, world_ref.as_str())?;
+    let resolution = resolution_request(
+        &grant,
+        agent_ref.as_str(),
+        world_ref.as_str(),
+        &tag,
+        for_task,
+    )?;
+    prepare_mint_directory(&directory)?;
+    let request = resolve_through_authority(runner, actuation_bin, &directory, &resolution)?;
+    let authority_source_ref = grant.authority_source_ref;
 
     // Content-addressed persistence: the same agent + project derives
     // byte-identical request text, so re-mints land on the same source.
     let bytes = serde_json::to_vec_pretty(&request)
         .map_err(|error| mint_error("agency_mint.encode", error.to_string()))?;
     let digest = blake3::hash(&bytes).to_hex();
-    let directory = home.state().join("agency-mints");
-    std::fs::create_dir_all(&directory).map_err(super::error)?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o700))
-            .map_err(super::error)?;
-    }
+    prepare_mint_directory(&directory)?;
     let source_path = directory.join(format!("{digest}.json"));
     if std::fs::read(&source_path).ok().as_deref() != Some(bytes.as_slice()) {
         std::fs::write(&source_path, &bytes).map_err(super::error)?;
@@ -774,9 +818,12 @@ fn mint_per_project_agency_with_intent(
         agency_source: basis,
         actuation_bin: actuation_bin.to_path_buf(),
         allowed_senders: [ResourceRef::parse(
-            request["requester_ref"]
-                .as_str()
-                .expect("template requester"),
+            request["requester_ref"].as_str().ok_or_else(|| {
+                mint_error(
+                    "agency_mint.receipt_invalid",
+                    "the actualised request names no requester",
+                )
+            })?,
         )?]
         .into(),
         allowed_packet_sources: BTreeSet::new(),
@@ -800,6 +847,7 @@ fn mint_per_project_agency_with_intent(
             "agency_source": &binding.agency_source,
             "agency_admission": &admitted,
             "receipt_ref": receipt["receipt_ref"],
+            "authority_source_ref": authority_source_ref,
             "source_path": source_path.display().to_string(),
             "agent_identity_source": identity_source,
             "central_profile_ref": binding.central_profile_ref.clone(),
@@ -994,5 +1042,236 @@ mod tests {
         .err()
         .expect("ambiguous");
         assert_eq!(error.code(), "agency_mint.agent_ambiguous");
+    }
+
+    /// Actuation's authority verbs through the seam: `authority list`
+    /// answers `authorities`; `authority resolve <file>` records the request
+    /// it was given and answers `outcome`.
+    struct AuthorityRunner {
+        authorities: Value,
+        outcome: Value,
+        resolved: Mutex<Vec<Value>>,
+    }
+
+    impl CommandRunner for AuthorityRunner {
+        fn run(&self, argv: &[String]) -> Result<Output> {
+            match (
+                argv.get(1).map(String::as_str),
+                argv.get(2).map(String::as_str),
+            ) {
+                (Some("authority"), Some("list")) => Ok(Output::success(
+                    json!({"schema": "actuation.local-authority-listing/v1",
+                           "authorities": self.authorities, "invalid": []})
+                    .to_string(),
+                )),
+                (Some("authority"), Some("resolve")) => {
+                    let asked: Value =
+                        serde_json::from_slice(&std::fs::read(&argv[3]).unwrap()).unwrap();
+                    self.resolved.lock().unwrap().push(asked);
+                    Ok(Output::success(self.outcome.to_string()))
+                }
+                _ => panic!("only the authority verbs are asked: {argv:?}"),
+            }
+        }
+    }
+
+    /// A grant as `actuation authority grant-world` composes it.
+    fn listed_grant(source: &str, issued_at: u64, worlds: &[&str]) -> Value {
+        let root = worlds[0];
+        let bounds: Vec<String> = worlds
+            .iter()
+            .map(|world| format!("bound:{world}"))
+            .collect();
+        json!({
+            "authority_source_ref": source,
+            "issued_at_unix_seconds": issued_at,
+            "record": {
+                "schema": "actuation.local-authority/v1",
+                "authority_source_ref": source,
+                "holder": "human:owner",
+                "issued_by": "human:owner",
+                "governing_binding": {
+                    "schema": "actuation.agency/v1",
+                    "binding_ref": format!("binding:world-root@{root}"),
+                    "agent_ref": format!("agent:world-root@{root}"),
+                    "agency_ref": format!("agency:world-root@{root}"),
+                    "world_ref": root,
+                    "scope_ref": root,
+                    "bounds_refs": bounds,
+                    "authority_refs": [format!("authority:world@{root}")],
+                    "return_relation_ref": format!("return-relation:world-root@{root}")
+                },
+                "metagency_grant": {
+                    "schema": "actuation.agency/v1",
+                    "grant_ref": format!("grant:world-root@{root}"),
+                    "agency_ref": format!("agency:world-root@{root}"),
+                    "world_binding_ref": format!("binding:world-root@{root}"),
+                    "authority_ref": format!("authority:world@{root}"),
+                    "bounds_refs": bounds,
+                    "operations": ["determine-agency", "actualise-agency"]
+                },
+                "allowed_world_refs": worlds,
+                "issued_at_unix_seconds": issued_at
+            }
+        })
+    }
+
+    fn authority_runner(authorities: Value, outcome: Value) -> AuthorityRunner {
+        AuthorityRunner {
+            authorities,
+            outcome,
+            resolved: Mutex::default(),
+        }
+    }
+
+    /// The live grant naming the world is taken, the newest when several do;
+    /// a revoked, expired or other-world grant never is.
+    #[test]
+    fn the_newest_live_grant_naming_the_world_is_taken() {
+        let mut revoked = listed_grant("authority:revoked", 30, &["control:root", "project:a"]);
+        revoked["revoked"] = json!({"at_unix_seconds": 31, "reason": "superseded"});
+        let mut expired = listed_grant("authority:expired", 40, &["control:root", "project:a"]);
+        expired["record"]["expires_at_unix_seconds"] = json!(41);
+        let runner = authority_runner(
+            json!([
+                listed_grant("authority:older", 10, &["control:root", "project:a"]),
+                listed_grant("authority:newer", 20, &["control:root", "project:a"]),
+                listed_grant("authority:elsewhere", 50, &["control:other", "project:b"]),
+                revoked,
+                expired,
+            ]),
+            Value::Null,
+        );
+        let grant = find_world_grant(&runner, Path::new("actuation"), "project:a").unwrap();
+        assert_eq!(grant.authority_source_ref, "authority:newer");
+        let grant = find_world_grant(&runner, Path::new("actuation"), "control:root").unwrap();
+        assert_eq!(grant.authority_source_ref, "authority:newer");
+        let missing = find_world_grant(&runner, Path::new("actuation"), "project:c")
+            .err()
+            .expect("no grant names it");
+        assert_eq!(missing.code(), "agency_mint.authority_missing");
+        assert!(
+            missing.message().contains("project:c"),
+            "{}",
+            missing.message()
+        );
+        assert!(
+            missing
+                .message()
+                .contains("actuation.authority.grant-world"),
+            "{}",
+            missing.message()
+        );
+    }
+
+    /// The resolution carries the grant's holder, bounds and authority and
+    /// the mint's own refs; the child's scope is its own world; the task
+    /// Action is asked for only with task intent.
+    #[test]
+    fn the_resolution_carries_the_grant_and_mints_its_own_refs() {
+        let grant = WorldGrant {
+            authority_source_ref: "authority:world".into(),
+            record: listed_grant("authority:world", 10, &["control:root", "project:a"])["record"]
+                .clone(),
+        };
+        let chat =
+            resolution_request(&grant, "agent/a-chat", "project:a", "a-1234", false).unwrap();
+        assert_eq!(chat["schema"], "actuation.local-authority/v1");
+        assert_eq!(chat["requester_ref"], "human:owner");
+        assert_eq!(chat["authority_source_ref"], "authority:world");
+        assert_eq!(
+            chat["requested_bounds_refs"],
+            json!(["bound:control:root", "bound:project:a"])
+        );
+        let child = &chat["differentiated_binding"];
+        assert_eq!(child["world_ref"], "project:a");
+        assert_eq!(child["scope_ref"], "project:a");
+        assert_eq!(child["agent_ref"], "agent/a-chat");
+        assert_eq!(
+            child["determining_agency_ref"],
+            "agency:world-root@control:root"
+        );
+        assert_eq!(child["bounds_refs"], chat["requested_bounds_refs"]);
+        assert_eq!(
+            child["authority_refs"],
+            json!(["authority:world@control:root"])
+        );
+        assert_eq!(child["agency_ref"], "agency:aikit-mint-a-1234");
+        assert_eq!(
+            chat["delegated_autonomy"]["allowed_action_refs"],
+            json!(REQUIRED_MINTED_ACTIONS)
+        );
+        let task = resolution_request(&grant, "agent/a-chat", "project:a", "a-1234", true).unwrap();
+        assert_eq!(
+            task["delegated_autonomy"]["allowed_action_refs"],
+            json!([
+                REQUIRED_MINTED_ACTIONS[0],
+                REQUIRED_MINTED_ACTIONS[1],
+                TASK_ACTION
+            ])
+        );
+        let mut holderless = grant.record.clone();
+        holderless["holder"] = Value::Null;
+        let refused = resolution_request(
+            &WorldGrant {
+                authority_source_ref: "authority:world".into(),
+                record: holderless,
+            },
+            "agent/a-chat",
+            "project:a",
+            "a-1234",
+            false,
+        )
+        .unwrap_err();
+        assert_eq!(refused.code(), "agency_mint.authority_refused");
+    }
+
+    /// Admitted, the answer's actualisation request comes back; refused, the
+    /// mint refuses in Actuation's words and names the fix.
+    #[test]
+    fn a_refused_resolution_is_refused_in_actuations_words() {
+        let temp = tempfile::tempdir().unwrap();
+        let grant = WorldGrant {
+            authority_source_ref: "authority:world".into(),
+            record: listed_grant("authority:world", 10, &["control:root", "project:a"])["record"]
+                .clone(),
+        };
+        let resolution =
+            resolution_request(&grant, "agent/a-chat", "project:a", "a-1234", false).unwrap();
+        let admitted = authority_runner(
+            json!([]),
+            json!({"standing": "admitted", "actualisation_request": {"request_ref": "r"}}),
+        );
+        let request =
+            resolve_through_authority(&admitted, Path::new("actuation"), temp.path(), &resolution)
+                .unwrap();
+        assert_eq!(request, json!({"request_ref": "r"}));
+        assert_eq!(
+            admitted.resolved.lock().unwrap().as_slice(),
+            std::slice::from_ref(&resolution)
+        );
+
+        let refused = authority_runner(
+            json!([]),
+            json!({"standing": "refused", "refusal": {"code": "authority.wrong_holder",
+                   "reason": "human:owner is not the holder of authority:world"}}),
+        );
+        let error =
+            resolve_through_authority(&refused, Path::new("actuation"), temp.path(), &resolution)
+                .unwrap_err();
+        assert_eq!(error.code(), "agency_mint.authority_refused");
+        for words in [
+            "authority.wrong_holder",
+            "human:owner is not the holder of authority:world",
+            "authority:world",
+            "project:a",
+            "actuation.authority.grant-world",
+        ] {
+            assert!(
+                error.message().contains(words),
+                "{words}: {}",
+                error.message()
+            );
+        }
     }
 }

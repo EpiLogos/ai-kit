@@ -304,6 +304,16 @@ fn a_registered_adapter_with_a_descriptor_fixture_gets_its_row() {
         pi["config_dir"],
         user_home.join(".pi/agent").display().to_string()
     );
+    // The row says whether that directory is there, by that name: a present
+    // config directory is not an installed harness (detection says that).
+    for row in &rows {
+        assert!(row.get("installed").is_none(), "{row}");
+        assert!(row.get("config_dir_present").is_some(), "{row}");
+    }
+    assert_eq!(
+        pi["config_dir_present"],
+        user_home.join(".pi/agent").exists()
+    );
 
     // A descriptor the record reports with no AIKit overlay renders as the
     // honest generic row: adapter-only, nothing planned, the missing contract
@@ -867,12 +877,9 @@ fn aikit_integration_reads_the_install_seam_not_the_harness_presence() {
 
     let before = claude(&home);
     assert_eq!(before["detection"], "detected");
-    assert_eq!(before["config_dir_exists"], true, "{before}");
+    assert_eq!(before["config_dir_present"], true, "{before}");
     assert_eq!(before["aikit_integration"], "absent", "{before}");
-    assert_eq!(
-        before["installed"], false,
-        "the alias follows the integration, not the config home: {before}"
-    );
+    assert!(before.get("installed").is_none(), "{before}");
     assert!(before["aikit_integration_reason"]
         .as_str()
         .unwrap()
@@ -903,7 +910,6 @@ fn aikit_integration_reads_the_install_seam_not_the_harness_presence() {
     let after = claude(&home);
     assert_eq!(after["aikit_integration"], "installed", "{after}");
     assert_eq!(after["aikit_integration_reason"], Value::Null);
-    assert_eq!(after["installed"], true);
 
     // An AIKit entry an install now writes differently is outdated.
     fs::write(
@@ -913,5 +919,4 @@ fn aikit_integration_reads_the_install_seam_not_the_harness_presence() {
     .unwrap();
     let drifted = claude(&home);
     assert_eq!(drifted["aikit_integration"], "outdated", "{drifted}");
-    assert_eq!(drifted["installed"], true);
 }

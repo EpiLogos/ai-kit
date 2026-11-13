@@ -6152,8 +6152,8 @@ pub enum ClientSub {
     ///
     /// `detection` says whether the harness is on this machine.
     /// `aikit_integration` says whether AIKit's entries stand in its install
-    /// seam (installed | outdated | absent | unknown); `installed` is its
-    /// deprecated boolean alias and never meant the harness is installed.
+    /// seam (installed | outdated | absent | unknown); `config_dir_present`
+    /// says only whether the harness's config directory exists.
     /// `credential` is ok when each provider is reached by a binding, its env
     /// var, or the harness's own login (its declared logged-in check, the
     /// same read as `aikit harness auth <harness> --check`), and

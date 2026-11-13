@@ -1676,11 +1676,9 @@ fn broker_row(rc: &ResolvedContext, dirs: &ClientDirs) -> Result<serde_json::Val
         "state": "self",
         "dispatch": "self",
         "config_dir": config_dir.display().to_string(),
-        "config_dir_exists": config_dir.exists(),
+        "config_dir_present": config_dir.exists(),
         "aikit_integration": "self",
         "aikit_integration_reason": null,
-        // Deprecated alias: the broker is AIKit itself, standing when its home does.
-        "installed": config_dir.exists(),
         "effect": planned.as_ref().ok().map(|p| adapter.activation_effect(None, p).describe()),
         "items": planned.as_ref().ok().map(|_| rc.view.active.len()),
         "materialization_items": planned.as_ref().ok().map(|p| p.items.len()),
@@ -1845,13 +1843,9 @@ fn overlaid_row(
         "state": state,
         "dispatch": dispatch_name,
         "config_dir": config_dir.as_ref().map(|d| d.display().to_string()),
-        "config_dir_exists": config_dir.as_ref().map(|d| d.exists()),
+        "config_dir_present": config_dir.as_ref().map(|d| d.exists()),
         "aikit_integration": integration.state,
         "aikit_integration_reason": integration.reason,
-        // Deprecated alias of `aikit_integration`: true when AIKit's entries
-        // are in the harness's install seam. It never meant the harness is
-        // installed; `detection` says that.
-        "installed": integration.added(),
         "effect": planned.as_ref().ok().map(|p| adapter.activation_effect(None, p).describe()),
         "items": planned.as_ref().ok().map(|_| semantic_items),
         "materialization_items": planned.as_ref().ok().map(|p| p.items.len()),
@@ -1863,6 +1857,9 @@ fn overlaid_row(
         "credential": credential.outcome.as_str(),
         "credential_reason": probe_reason(&credential.outcome),
         "credential_via": credential.via,
+        // Whether a conversation opens with it, decided as an open decides it
+        // (encounter_service.rs conversation_detail).
+        "conversation": crate::encounter_service::conversation_detail(home, overlay.catalog_slug),
         "detection": detection_name,
         "detection_reason": detection_reason,
         "admission": {
@@ -1926,12 +1923,10 @@ fn generic_row(
         "state": state,
         "dispatch": "adapter-only",
         "config_dir": config_dir.as_ref().map(|d| d.display().to_string()),
-        "config_dir_exists": config_dir.as_ref().map(|d| d.exists()),
+        "config_dir_present": config_dir.as_ref().map(|d| d.exists()),
         "aikit_integration": "unknown",
         "aikit_integration_reason": "no AIKit adapter carries this catalog slug; there is no \
                                      integration to install or read",
-        // Deprecated alias of `aikit_integration`.
-        "installed": false,
         "effect": null,
         "items": null,
         "materialization_items": null,
@@ -1943,6 +1938,7 @@ fn generic_row(
         "credential": credential.outcome.as_str(),
         "credential_reason": probe_reason(&credential.outcome),
         "credential_via": credential.via,
+        "conversation": crate::encounter_service::conversation_detail(home, &entry.slug),
         "detection": detection_name,
         "detection_reason": detection_reason,
         "gap": gap,
@@ -1969,11 +1965,6 @@ impl Integration {
             state: "unknown",
             reason: Some(reason.to_string()),
         }
-    }
-
-    /// The deprecated `installed` alias: AIKit's entries were added.
-    fn added(&self) -> bool {
-        matches!(self.state, "installed" | "outdated")
     }
 }
 
