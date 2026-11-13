@@ -806,3 +806,100 @@ fn a_hanging_actuation_is_timed_out_within_the_budget_instead_of_stalling() {
         "the timeout names the bound it violated: {reason}"
     );
 }
+
+/// Run one aikit command in the scenario's own homes (the stub actuation on PATH), answering its JSON envelope.
+fn aikit_in(home: &tempfile::TempDir, args: &[&str]) -> Value {
+    let mut command = Command::cargo_bin("aikit").unwrap();
+    command
+        .env("AIKIT_HOME", home.path().join("aikit-home"))
+        .env("HOME", home.path().join("user-home"))
+        .env(
+            "PATH",
+            format!(
+                "{}:/usr/bin:/bin",
+                home.path().join("actuation-bin").display()
+            ),
+        )
+        .env("FIXTURES", home.path().join("actuation-fixtures"))
+        .arg("--json")
+        .args(args)
+        .current_dir(home.path().join("project"));
+    let output = command.output().unwrap();
+    serde_json::from_slice(&output.stdout).unwrap_or_else(|_| {
+        panic!(
+            "aikit {args:?} answered no JSON: {} {}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        )
+    })
+}
+
+/// O-I #1003: each row says what the harness gets from AIKit — the model AIKit asks for when a new chat opens with it (the
+/// one model decider, `models.default`, keyed by its slug), the Skill Sets the context selects, the skills of those that
+/// support it, and the instruction files its profile declares it reads — so the census shows them without a reading of its own.
+#[test]
+fn every_row_carries_its_model_default_skill_sets_and_instruction_files() {
+    let home = scenario_with_partial_intake();
+    let plan = aikit_in(
+        &home,
+        &[
+            "config",
+            "plan",
+            "--setting",
+            "ai-kit:models:models.default",
+            "--scope",
+            "machine",
+            "--value",
+            r#"{"claude-code":{"model_id":"claude-opus-5-5"}}"#,
+        ],
+    );
+    let plan_file = home.path().join("plan.json");
+    fs::write(&plan_file, plan.to_string()).unwrap();
+    let applied = aikit_in(
+        &home,
+        &[
+            "config",
+            "apply",
+            "--plan-file",
+            plan_file.to_str().unwrap(),
+        ],
+    );
+    assert!(applied["error"].is_null(), "the default applies: {applied}");
+    assert_eq!(
+        aikit_in(&home, &["set", "create", "foundation"])["ok"],
+        true
+    );
+    let chosen = aikit_in(
+        &home,
+        &[
+            "compose",
+            "repertoire",
+            "--set",
+            "foundation",
+            "--scope",
+            "global",
+            "--apply",
+        ],
+    );
+    assert_eq!(chosen["ok"], true, "the set is selected: {chosen}");
+
+    let rows = rows_with_fixtures_env(&home, &["client", "status"]);
+    let claude = by_name(&rows, "claude");
+    assert_eq!(claude["model_default"]["model_id"], "claude-opus-5-5");
+    assert_eq!(claude["skill_sets"], serde_json::json!(["foundation"]));
+    assert_eq!(claude["skills"], serde_json::json!([]));
+    assert_eq!(
+        claude["guidance"],
+        serde_json::json!(["~/.claude/CLAUDE.md"])
+    );
+    assert!(claude.get("carries_reason").is_none(), "{claude}");
+    // No default for pi: it opens with its own model, and the row says none rather than borrowing another harness's.
+    let pi = by_name(&rows, "pi");
+    assert!(pi["model_default"].is_null(), "{pi}");
+    assert_eq!(pi["skill_sets"], serde_json::json!(["foundation"]));
+    assert_eq!(pi["guidance"], serde_json::json!(["~/.pi/agent/AGENTS.md"]));
+    // A slug AIKit carries no profile for reads no instruction file and is projected no skills.
+    let generic = by_name(&rows, "future-harness");
+    assert_eq!(generic["guidance"], serde_json::json!([]));
+    assert_eq!(generic["skills"], serde_json::json!([]));
+}
