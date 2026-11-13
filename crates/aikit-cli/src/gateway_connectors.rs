@@ -24,7 +24,6 @@ use std::{
 };
 
 use crate::cli::{GatewayConnectorCmd, GatewayConnectorSub};
-use crate::encounter_profile_provider::resolve_provider;
 use crate::encounter_service::EncounterProtocol;
 use crate::gateway_contact::three_part;
 
@@ -240,10 +239,11 @@ pub fn connector_factories(home: &AikitHome) -> Result<Vec<Box<dyn GatewayConnec
 }
 
 /// The conversation engine's turn sources: the encounter plane's own provider
-/// registry (`state/encounter-providers/*.json`, profile-derived entries
-/// resolved at load) read through the connector entries' `agent_backing`
-/// names. No second harness registry is invented here: a connector backs its
-/// conversations with a provider the encounter plane already declares.
+/// lookup ([`crate::encounter_service::provider_named`] — a stored row, else
+/// the row an embedded harness profile stands for, resolved at load) read
+/// through the connector entries' `agent_backing` names. No second harness
+/// registry is invented here: a connector backs its conversations with a
+/// provider the encounter plane would open.
 ///
 /// A declared backing that no provider answers, or whose connection facts are
 /// unreachable, is a serve-time startup error naming it — the gateway must
@@ -259,18 +259,16 @@ pub fn conversation_turn_resolver(home: &AikitHome) -> Result<Arc<dyn GatewayTur
     if backings.is_empty() {
         return Ok(Arc::new(NoAgentBacking));
     }
-    let providers = load_encounter_providers(home)?;
     let mut resolved: BTreeMap<String, ResolvedProvider> = BTreeMap::new();
     for (connector_ref, harness) in &backings {
-        let provider = providers
-            .iter()
-            .find(|provider| &provider.id == harness)
-            .ok_or_else(|| {
+        let provider =
+            crate::encounter_service::provider_named(home, harness)?.ok_or_else(|| {
                 three_part(
                     "gateway.agent_backing_unknown",
                     format!(
                         "Connector {connector_ref} declares agent backing {harness:?}, but no \
-                         encounter provider of that name is declared in {}.",
+                         encounter provider of that name is declared in {}, and no embedded \
+                         harness profile of that name connects.",
                         home.state().join("encounter-providers").display()
                     ),
                     "The gateway service was not started.",
@@ -291,7 +289,7 @@ pub fn conversation_turn_resolver(home: &AikitHome) -> Result<Arc<dyn GatewayTur
                 "Declare the provider with an explicit argv or a resolvable profile.",
             ));
         }
-        crate::encounter_profile_provider::ensure_connection_facts_reachable(provider).map_err(
+        crate::encounter_profile_provider::ensure_connection_facts_reachable(&provider).map_err(
             |error| {
                 three_part(
                     "gateway.agent_backing_unreachable",
@@ -382,52 +380,4 @@ fn harness_protocol(protocol: EncounterProtocol) -> ConversationHarnessProtocol 
         EncounterProtocol::PiRpc => ConversationHarnessProtocol::PiRpc,
         EncounterProtocol::PrimeRpc => ConversationHarnessProtocol::PrimeRpc,
     }
-}
-
-/// The encounter plane's own provider load: every `encounter-providers/*.json`
-/// of this home, with profile-derived entries resolved from their embedded
-/// profiles at load time. One registry, read the same way.
-fn load_encounter_providers(
-    home: &AikitHome,
-) -> Result<Vec<crate::encounter_service::EncounterProvider>> {
-    let root = home.state().join("encounter-providers");
-    if !root.exists() {
-        return Ok(Vec::new());
-    }
-    let mut rows = Vec::new();
-    for entry in std::fs::read_dir(&root).map_err(|error| {
-        AikitError::new(
-            "gateway.agent_backing_providers",
-            format!("read {}: {error}", root.display()),
-        )
-    })? {
-        let path = entry
-            .map_err(|error| {
-                AikitError::new(
-                    "gateway.agent_backing_providers",
-                    format!("read {}: {error}", root.display()),
-                )
-            })?
-            .path();
-        if path.extension().and_then(|s| s.to_str()) != Some("json") {
-            continue;
-        }
-        let bytes = std::fs::read(&path).map_err(|error| {
-            AikitError::new(
-                "gateway.agent_backing_providers",
-                format!("read {}: {error}", path.display()),
-            )
-        })?;
-        let provider: crate::encounter_service::EncounterProvider = serde_json::from_slice(&bytes)
-            .map_err(|error| {
-                AikitError::new(
-                    "gateway.agent_backing_providers",
-                    format!("decode {}: {error}", path.display()),
-                )
-            })?;
-        rows.push(resolve_provider(provider).map_err(|failure| {
-            AikitError::new(failure.code(), format!("{}: {failure}", path.display()))
-        })?);
-    }
-    Ok(rows)
 }

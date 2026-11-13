@@ -17,6 +17,11 @@
 //!   naming both. `required_context`, `model_policy` and `now_context` are
 //!   owner additions that survive resolution untouched — they pin material,
 //!   model policy and operative NOW delivery, not the connection.
+//! * [`profile_row`] is the row an open may name without one being stored:
+//!   the slug of an embedded profile with a protocol face and connection
+//!   facts stands for the `from_profile` row a person would store for it. It
+//!   is never written, a stored row of the same id wins, and it resolves
+//!   through `resolve_provider` like any stored profile row.
 //! * [`ensure_connection_facts_reachable`] is the honesty gate both paths
 //!   share: a declared launch environment or working directory that cannot
 //!   actually reach the provider child is refused, never accepted and
@@ -55,20 +60,16 @@ pub fn derive_provider(
             ),
         )
     })?;
-    let protocol = match sessions.protocol {
-        SessionProtocol::Acp => EncounterProtocol::Acp,
-        SessionProtocol::Rpc => EncounterProtocol::PiRpc,
-        SessionProtocol::Process => {
-            return Err(AikitError::new(
-                "encounter.profile_protocol_unsupported",
-                format!(
-                    "the {} harness profile declares the process protocol: process protocol \
-                     has no protocol provider; its face is the harness's own command surface",
-                    profile.slug
-                ),
-            ));
-        }
-    };
+    let protocol = protocol_face(sessions.protocol).ok_or_else(|| {
+        AikitError::new(
+            "encounter.profile_protocol_unsupported",
+            format!(
+                "the {} harness profile declares the process protocol: process protocol \
+                 has no protocol provider; its face is the harness's own command surface",
+                profile.slug
+            ),
+        )
+    })?;
     let connect = sessions.connect.as_ref().ok_or_else(|| {
         AikitError::new(
             "encounter.profile_connect_missing",
@@ -104,6 +105,51 @@ pub fn derive_provider(
         // own; now-context belongs to the owner's explicit configuration.
         now_context: None,
     })
+}
+
+/// The provider protocol a sessions layer's protocol is the face of: `acp`
+/// the ACP provider protocol, `rpc` the pi-rpc one. `process` has none.
+fn protocol_face(protocol: SessionProtocol) -> Option<EncounterProtocol> {
+    match protocol {
+        SessionProtocol::Acp => Some(EncounterProtocol::Acp),
+        SessionProtocol::Rpc => Some(EncounterProtocol::PiRpc),
+        SessionProtocol::Process => None,
+    }
+}
+
+/// The provider row an open names by a harness's slug when no row is stored
+/// under that id: for an embedded profile whose sessions layer has a protocol
+/// face (acp, rpc) and `[sessions.connect]` facts, the row a person would
+/// store for it — `from_profile` the slug, no argv of its own, labelled with
+/// the harness's display name. It is never written; wherever a provider is
+/// looked up a stored row of the same id wins, and this row resolves through
+/// [`resolve_provider`] exactly as a stored profile row does. `None` for any
+/// other id.
+pub fn profile_row(slug: &str) -> Option<EncounterProvider> {
+    let profile = profiles::for_slug(slug)?;
+    let sessions = profile.sessions.as_ref()?;
+    sessions.connect.as_ref()?;
+    Some(EncounterProvider {
+        protocol: protocol_face(sessions.protocol)?,
+        id: profile.slug.clone(),
+        label: aikit_core::target_label(&aikit_core::TargetId::new(profile.slug.as_str())),
+        argv: Vec::new(),
+        argv_fallback: Vec::new(),
+        env: BTreeMap::new(),
+        cwd: None,
+        from_profile: Some(profile.slug.clone()),
+        required_context: None,
+        model_policy: None,
+        body_ref: None,
+        body_revision: None,
+        now_context: None,
+    })
+}
+
+/// Every row [`profile_row`] stands for: one per embedded profile with a
+/// protocol face and connection facts.
+pub fn profile_rows() -> impl Iterator<Item = EncounterProvider> {
+    profiles::all().filter_map(|(slug, _)| profile_row(slug))
 }
 
 /// Resolve a configured provider's connection facts at provider-load time.

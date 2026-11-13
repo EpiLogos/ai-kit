@@ -510,8 +510,13 @@ impl ModelEnvironment {
             }
             return;
         }
+        // The person's account names (USER, LOGNAME) pass: a harness's own
+        // login is kept under them (Claude Code finds its macOS keychain item
+        // by `$USER`). They carry no credential.
         for name in [
             "HOME",
+            "USER",
+            "LOGNAME",
             "CODEX_HOME",
             "PATH",
             "TERM",
@@ -1497,6 +1502,22 @@ mod tests {
             String::from_utf8(output.stdout).unwrap(),
             "/isolated/native-codex-login\nwithheld\n"
         );
+    }
+
+    #[test]
+    fn empty_scrubbed_environment_keeps_the_login_account() {
+        // A harness's own login is kept under the person's account: Claude
+        // Code reads its macOS keychain item by `$USER`, and without it
+        // answers "Not logged in" though the item is there.
+        let mut command = Command::new("sh");
+        command.args(["-c", "printf '%s %s\\n' \"$USER\" \"$LOGNAME\""]);
+        ModelEnvironment::new().apply_with(&mut command, |name| match name {
+            "USER" | "LOGNAME" => Some("person".into()),
+            _ => None,
+        });
+        let output = command.output().unwrap();
+        assert!(output.status.success());
+        assert_eq!(String::from_utf8(output.stdout).unwrap(), "person person\n");
     }
 
     #[test]

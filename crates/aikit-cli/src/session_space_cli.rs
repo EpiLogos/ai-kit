@@ -392,9 +392,10 @@ enum Command {
         #[arg(long)]
         source_ref: String,
     },
-    /// Mint a fresh per-project native Agency chain from the owner's standing
-    /// template, actualise it through the real native owner, and provision this
-    /// session's binding. Owner-only, like encounter-agency-configure.
+    /// Mint a fresh per-project native Agency chain through the World's
+    /// standing authority in Actuation (granted at the World's Setup, the
+    /// Ground step), actualise it through the real native owner, and provision
+    /// this session's binding. Owner-only, like encounter-agency-configure.
     EncounterAgencyMint {
         #[arg(long)]
         agent_session: String,

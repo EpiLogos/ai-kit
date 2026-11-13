@@ -304,6 +304,16 @@ fn a_registered_adapter_with_a_descriptor_fixture_gets_its_row() {
         pi["config_dir"],
         user_home.join(".pi/agent").display().to_string()
     );
+    // The row says whether that directory is there, by that name: a present
+    // config directory is not an installed harness (detection says that).
+    for row in &rows {
+        assert!(row.get("installed").is_none(), "{row}");
+        assert!(row.get("config_dir_present").is_some(), "{row}");
+    }
+    assert_eq!(
+        pi["config_dir_present"],
+        user_home.join(".pi/agent").exists()
+    );
 
     // A descriptor the record reports with no AIKit overlay renders as the
     // honest generic row: adapter-only, nothing planned, the missing contract
