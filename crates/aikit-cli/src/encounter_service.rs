@@ -35,8 +35,7 @@ pub use native_release::NativeReleasedPredecessor;
 #[path = "encounter_agency.rs"]
 mod agency;
 pub use agency::mint::{
-    mint_from_cli, mint_per_project_agency, mint_request_document, mint_task_from_cli,
-    REQUIRED_MINTED_ACTIONS,
+    mint_from_cli, mint_per_project_agency, mint_task_from_cli, REQUIRED_MINTED_ACTIONS,
 };
 pub use agency::model::EncounterModelOpen;
 pub(crate) use agency::model::PreparedModel;

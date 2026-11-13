@@ -9,7 +9,7 @@ use aikit_adapters::{
     agency_admission::{admit_agency, AdmittedAgency, AgencySourceBasis},
     runner::{CommandRunner, Output, SystemRunner},
 };
-use aikit_cli::encounter_service::{mint_per_project_agency, mint_request_document};
+use aikit_cli::encounter_service::mint_per_project_agency;
 use aikit_core::ResourceRef;
 use aikit_store::AikitHome;
 use serde_json::{json, Value};
@@ -20,10 +20,6 @@ use std::{
 
 fn r(s: &str) -> ResourceRef {
     ResourceRef::parse(s).unwrap()
-}
-
-fn template() -> Value {
-    serde_json::from_str(include_str!("fixtures/mint-agency-template.json")).unwrap()
 }
 
 /// A python3 executable that answers `agency actualise <file> --json` with the
@@ -321,164 +317,6 @@ impl CommandRunner for ProfileRunner {
             stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
         })
     }
-}
-
-#[test]
-fn minted_request_carries_template_authority_and_mints_fresh_refs() {
-    let (request, tag) =
-        mint_request_document(&template(), "agent/factory-chat", "project:factory").unwrap();
-    assert_eq!(request["schema"], "actuation.agency-actualisation/v1");
-    // The owner's standing authority is carried verbatim, never reinvented.
-    assert_eq!(request["requester_ref"], "human:sf6-owner");
-    assert_eq!(
-        request["governing_binding"],
-        template()["governing_binding"]
-    );
-    assert_eq!(request["metagency_grant"], template()["metagency_grant"]);
-    assert_eq!(
-        request["determination"]["bounds_refs"],
-        template()["determination"]["bounds_refs"]
-    );
-    assert_eq!(
-        request["determination"]["authority_refs"],
-        template()["determination"]["authority_refs"]
-    );
-    assert_eq!(
-        request["determination"]["delegated_autonomy"]["denied_action_refs"],
-        template()["determination"]["delegated_autonomy"]["denied_action_refs"]
-    );
-    assert_eq!(
-        request["determination"]["delegated_autonomy"]["may_determine_within_bounds"],
-        template()["determination"]["delegated_autonomy"]["may_determine_within_bounds"]
-    );
-    assert_eq!(request["differentiated_binding"]["scope_ref"], "scope:root");
-    // The chat Actions a session cannot work without are delegated.
-    for action in aikit_cli::encounter_service::REQUIRED_MINTED_ACTIONS {
-        assert!(
-            request["determination"]["delegated_autonomy"]["allowed_action_refs"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .any(|allowed| allowed == action)
-        );
-    }
-    // Every per-agent/project ref is freshly minted, not the template's.
-    assert_ne!(request["request_ref"], template()["request_ref"]);
-    assert_ne!(
-        request["determination"]["determination_ref"],
-        template()["determination"]["determination_ref"]
-    );
-    assert_ne!(
-        request["determination"]["differentiated_agency_ref"],
-        template()["determination"]["differentiated_agency_ref"]
-    );
-    assert_ne!(
-        request["determination"]["world_binding_ref"],
-        template()["determination"]["world_binding_ref"]
-    );
-    assert_ne!(
-        request["determination"]["return_policy"]["return_relation_ref"],
-        template()["determination"]["return_policy"]["return_relation_ref"]
-    );
-    assert_ne!(
-        request["differentiated_binding"]["binding_ref"],
-        template()["differentiated_binding"]["binding_ref"]
-    );
-    assert_ne!(
-        request["differentiated_binding"]["agency_ref"],
-        template()["differentiated_binding"]["agency_ref"]
-    );
-    assert_ne!(
-        request["differentiated_binding"]["return_relation_ref"],
-        template()["differentiated_binding"]["return_relation_ref"]
-    );
-    assert_ne!(
-        request["differentiated_binding"]["continuity_ref"],
-        template()["differentiated_binding"]["continuity_ref"]
-    );
-    assert_ne!(
-        request["agent_identity"]["evidence_refs"],
-        template()["agent_identity"]["evidence_refs"]
-    );
-    assert_ne!(
-        request["provenance"]["source_refs"],
-        template()["provenance"]["source_refs"]
-    );
-    // The tag ties every fresh ref to this agent+project pair.
-    for (_, value) in request.as_object().unwrap() {
-        let text = value.to_string();
-        if text.contains("aikit-mint-") {
-            assert!(text.contains(tag.as_str()), "{text} does not carry {tag}");
-        }
-    }
-    // A delegation never claims to actualise a new identity.
-    assert_eq!(request["agent_identity"]["standing"], "existing");
-    assert_eq!(
-        request["differentiated_binding"]["world_ref"],
-        "project:factory"
-    );
-    assert_eq!(
-        request["differentiated_binding"]["agent_ref"],
-        "agent/factory-chat"
-    );
-    // The three native identities stay distinct, as admission requires.
-    assert_ne!(
-        request["differentiated_binding"]["agent_ref"],
-        request["differentiated_binding"]["agency_ref"]
-    );
-    assert_ne!(
-        request["differentiated_binding"]["agency_ref"],
-        request["differentiated_binding"]["binding_ref"]
-    );
-}
-
-#[test]
-fn minted_refs_are_fresh_per_agent_and_per_project() {
-    let (factory_a, _) =
-        mint_request_document(&template(), "agent/factory-chat", "project:factory").unwrap();
-    let (factory_b, _) =
-        mint_request_document(&template(), "agent/other-chat", "project:factory").unwrap();
-    let (central_a, _) =
-        mint_request_document(&template(), "agent/factory-chat", "project:Central").unwrap();
-    for (left, right) in [
-        (&factory_a, &factory_b),
-        (&factory_a, &central_a),
-        (&factory_b, &central_a),
-    ] {
-        assert_ne!(left["request_ref"], right["request_ref"]);
-        assert_ne!(
-            left["determination"]["determination_ref"],
-            right["determination"]["determination_ref"]
-        );
-        assert_ne!(
-            left["differentiated_binding"]["agency_ref"],
-            right["differentiated_binding"]["agency_ref"]
-        );
-        assert_ne!(
-            left["differentiated_binding"]["binding_ref"],
-            right["differentiated_binding"]["binding_ref"]
-        );
-    }
-    // The same agent+project pair is deterministic: byte-identical request.
-    let (again, _) =
-        mint_request_document(&template(), "agent/factory-chat", "project:factory").unwrap();
-    assert_eq!(
-        serde_json::to_vec(&factory_a).unwrap(),
-        serde_json::to_vec(&again).unwrap()
-    );
-    // The template's own refs never leak into a mint for another world.
-    assert_eq!(
-        central_a["differentiated_binding"]["world_ref"],
-        "project:Central"
-    );
-}
-
-#[test]
-fn a_non_delegation_template_is_refused_not_silently_recast() {
-    let mut not_delegation = template();
-    not_delegation["determination"]["kind"] = json!("derivation");
-    let error = mint_request_document(&not_delegation, "agent/x", "project:x").unwrap_err();
-    assert_eq!(error.code(), "agency_mint.template_invalid");
 }
 
 #[test]

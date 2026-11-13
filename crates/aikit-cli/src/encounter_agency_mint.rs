@@ -37,19 +37,16 @@
 //!   task Action when the mint is for a task — the native admission refuses a
 //!   binding that cannot send.
 //!
-//! [`TEMPLATE_ENV`] names a hand-authored actualisation request to derive from
-//! instead; harnesses outside AIKit set it.
-//!
 //! Agent identity resolution order: explicit `--agent-ref` (pinned to its
 //! scope's Central AgentProfile when that scope — the root or a Project —
 //! declares one for it), else the Central AgentProfile for the project scope
 //! when exactly one exists, else a derived, clearly-attributed
 //! `agent/<project-slug>-chat`. A human `requester_ref` is never fabricated:
-//! it is always the grant's holder (or the template's).
+//! it is always the grant's holder.
 use super::{read_binding, EncounterAgencyBinding};
 use crate::app::Service;
 use aikit_adapters::{
-    agency_admission::{admit_agency, AgencySourceBasis, AGENCY_ACTUALISATION_SCHEMA},
+    agency_admission::{admit_agency, AgencySourceBasis},
     runner::{CommandRunner, SystemRunner},
 };
 use aikit_core::{AikitError, ProjectRef, ResourceRef, Result, SourceRevision};
@@ -67,153 +64,9 @@ use std::{
 pub const REQUIRED_MINTED_ACTIONS: [&str; 2] =
     ["action/aikit/encounter-send", "action/aikit/model-realise"];
 
-/// Override: a hand-authored `actuation.agency-actualisation/v1` request the
-/// mint derives from instead of resolving through the World's authority. The
-/// O:I walk scenarios and acceptance harnesses set it; unset, the mint
-/// resolves through Actuation.
-pub const TEMPLATE_ENV: &str = "AIKIT_AGENCY_MINT_TEMPLATE";
-
 /// What a refusal for want of the World's authority names as its fix.
 const AUTHORITY_FIX: &str = "the World's Setup grants it at the Ground step \
      (`actuation.authority.grant-world`)";
-
-/// The minted request document, derived from the standing template.
-///
-/// `tag` is the deterministic per-(agent, project) suffix shared by every
-/// freshly minted ref.
-pub fn mint_request_document(
-    template: &Value,
-    agent_ref: &str,
-    world_ref: &str,
-) -> Result<(Value, String)> {
-    if template["schema"] != AGENCY_ACTUALISATION_SCHEMA {
-        return Err(mint_error(
-            "agency_mint.template_invalid",
-            format!(
-                "the standing template must declare {AGENCY_ACTUALISATION_SCHEMA}, found {}",
-                template["schema"]
-            ),
-        ));
-    }
-    let requester_ref = template["requester_ref"].as_str().ok_or_else(|| {
-        mint_error(
-            "agency_mint.template_invalid",
-            "the standing template has no requester_ref; the mint never invents one",
-        )
-    })?;
-    let governing = &template["governing_binding"];
-    if !governing.is_object() {
-        return Err(mint_error(
-            "agency_mint.template_invalid",
-            "the standing template has no governing_binding to carry",
-        ));
-    }
-    let grant = &template["metagency_grant"];
-    if !grant.is_object() {
-        return Err(mint_error(
-            "agency_mint.template_invalid",
-            "the standing template has no metagency_grant to carry",
-        ));
-    }
-    let template_determination = &template["determination"];
-    if template_determination["kind"] != "delegation" {
-        return Err(mint_error(
-            "agency_mint.template_invalid",
-            format!(
-                "the mint derives delegation chains; the template's determination kind is {}",
-                template_determination["kind"]
-            ),
-        ));
-    }
-    let child_scope = template["differentiated_binding"]["scope_ref"]
-        .as_str()
-        .unwrap_or("scope:root");
-    let determining_agency = governing["agency_ref"]
-        .as_str()
-        .ok_or_else(|| {
-            mint_error(
-                "agency_mint.template_invalid",
-                "the template's governing_binding names no agency_ref",
-            )
-        })?
-        .to_owned();
-
-    let tag = mint_tag(agent_ref, world_ref);
-    // Bounds and authority are the owner's standing structure, carried
-    // verbatim from the template's own determination.
-    let bounds_refs = template_determination["bounds_refs"].clone();
-    let authority_refs = template_determination["authority_refs"].clone();
-    let denied = template_determination["delegated_autonomy"]["denied_action_refs"].clone();
-    let may_determine = template_determination["delegated_autonomy"]["may_determine_within_bounds"]
-        .as_bool()
-        .unwrap_or(false);
-    let mut allowed: Vec<Value> = REQUIRED_MINTED_ACTIONS
-        .iter()
-        .map(|action| json!(action))
-        .collect();
-    if let Some(template_allowed) =
-        template_determination["delegated_autonomy"]["allowed_action_refs"].as_array()
-    {
-        for action in template_allowed {
-            if !allowed.contains(action) {
-                allowed.push(action.clone());
-            }
-        }
-    }
-    let mode = template_determination["return_policy"]["mode"]
-        .as_str()
-        .unwrap_or("required");
-    let continuity_ref = format!("continuity:{agent_ref}");
-
-    let request = json!({
-        "schema": AGENCY_ACTUALISATION_SCHEMA,
-        "request_ref": format!("actualisation-request:aikit-mint-{tag}"),
-        "requester_ref": requester_ref,
-        "governing_binding": governing,
-        "metagency_grant": grant,
-        "determination": {
-            "schema": "actuation.agency/v1",
-            "determination_ref": format!("determination:aikit-mint-{tag}"),
-            "kind": "delegation",
-            "determining_agency_ref": determining_agency,
-            "differentiated_agency_ref": format!("agency:aikit-mint-{tag}"),
-            "world_binding_ref": format!("binding:aikit-mint-{tag}"),
-            "bounds_refs": bounds_refs,
-            "authority_refs": authority_refs,
-            "delegated_autonomy": {
-                "allowed_action_refs": allowed,
-                "denied_action_refs": denied,
-                "may_determine_within_bounds": may_determine,
-            },
-            "return_policy": {
-                "mode": mode,
-                "return_relation_ref": format!("return-relation:aikit-mint-{tag}"),
-            },
-        },
-        "differentiated_binding": {
-            "schema": "actuation.agency/v1",
-            "binding_ref": format!("binding:aikit-mint-{tag}"),
-            "agent_ref": agent_ref,
-            "agency_ref": format!("agency:aikit-mint-{tag}"),
-            "world_ref": world_ref,
-            "scope_ref": child_scope,
-            "determining_agency_ref": determining_agency,
-            "bounds_refs": bounds_refs,
-            "authority_refs": authority_refs,
-            "return_relation_ref": format!("return-relation:aikit-mint-{tag}"),
-            "continuity_ref": continuity_ref,
-        },
-        "agent_identity": {
-            "standing": "existing",
-            "evidence_refs": [format!("evidence/aikit-agency-mint/{tag}")],
-        },
-        "provenance": {
-            "source_refs": [format!("source/aikit-agency-mint/{tag}")],
-            "context_refs": [],
-        },
-    });
-    Ok((request, tag))
-}
 
 /// Resolve the project identity from `project_cwd` through the same
 /// application resolution `aikit session-space project-context` uses.
@@ -242,28 +95,6 @@ fn resolve_project(
             )
         })?;
     Ok(resolution.project_binding.project)
-}
-
-/// The hand-authored request [`TEMPLATE_ENV`] names.
-fn load_template(path: &Path) -> Result<Value> {
-    let bytes = std::fs::read(path).map_err(|error| {
-        mint_error(
-            "agency_mint.template_missing",
-            format!(
-                "the agency template {TEMPLATE_ENV} names is not readable at {}: {error}",
-                path.display()
-            ),
-        )
-    })?;
-    serde_json::from_slice(&bytes).map_err(|error| {
-        mint_error(
-            "agency_mint.template_invalid",
-            format!(
-                "the agency template at {} is invalid: {error}",
-                path.display()
-            ),
-        )
-    })
 }
 
 /// The live grant in Actuation's authority store that names a world: its
@@ -828,20 +659,14 @@ fn run_actualise(
         .map_err(|error| mint_error("agency_mint.receipt_invalid", error.to_string()))
 }
 
-/// Resolve the Actuation executable the way every other AIKit intake does:
-/// `actuation` on PATH, pinned to its absolute location for the persisted
-/// binding.
+/// Actuation as every AIKit owner call names it (gateway_owners.rs
+/// `ProcessOwners`): `ACTUATION_BIN` or `OI_ACTUATION_BIN` where the suite
+/// names its build, else `actuation` on PATH, pinned to its absolute location
+/// for the persisted binding. The mint asks the same Actuation that granted
+/// the World, never a different one found first on PATH.
 fn resolve_actuation_bin() -> PathBuf {
-    let name = "actuation";
-    if let Some(path) = std::env::var_os("PATH") {
-        for directory in std::env::split_paths(&path) {
-            let candidate = directory.join(name);
-            if candidate.is_file() {
-                return candidate;
-            }
-        }
-    }
-    PathBuf::from(name)
+    let named = crate::gateway_owners::ProcessOwners::from_env().actuation;
+    crate::probe::which(&named).unwrap_or_else(|| PathBuf::from(named))
 }
 
 /// The owner-only directory the minted sources (and the resolutions put to
@@ -933,45 +758,19 @@ fn mint_per_project_agency_with_intent(
 
     let directory = home.state().join("agency-mints");
     let tag = mint_tag(agent_ref.as_str(), world_ref.as_str());
-    // The actualisation request: resolved through the World's authority in
-    // Actuation, or derived from the template the override names. Either way
-    // it is a requested determination; actualise below still decides.
-    let (request, authority_source_ref) = match std::env::var_os(TEMPLATE_ENV) {
-        Some(template_path) => {
-            let template = load_template(Path::new(&template_path))?;
-            let (mut request, _) =
-                mint_request_document(&template, agent_ref.as_str(), world_ref.as_str())?;
-            if for_task {
-                let allowed = request["determination"]["delegated_autonomy"]["allowed_action_refs"]
-                    .as_array_mut()
-                    .ok_or_else(|| {
-                        mint_error(
-                            "agency_mint.actions",
-                            "Native determination actions are absent",
-                        )
-                    })?;
-                let action = json!(TASK_ACTION);
-                if !allowed.contains(&action) {
-                    allowed.push(action);
-                }
-            }
-            (request, None)
-        }
-        None => {
-            let grant = find_world_grant(runner, actuation_bin, world_ref.as_str())?;
-            let resolution = resolution_request(
-                &grant,
-                agent_ref.as_str(),
-                world_ref.as_str(),
-                &tag,
-                for_task,
-            )?;
-            prepare_mint_directory(&directory)?;
-            let request =
-                resolve_through_authority(runner, actuation_bin, &directory, &resolution)?;
-            (request, Some(grant.authority_source_ref))
-        }
-    };
+    // The actualisation request, resolved through the World's authority in
+    // Actuation: a requested determination; actualise below still decides.
+    let grant = find_world_grant(runner, actuation_bin, world_ref.as_str())?;
+    let resolution = resolution_request(
+        &grant,
+        agent_ref.as_str(),
+        world_ref.as_str(),
+        &tag,
+        for_task,
+    )?;
+    prepare_mint_directory(&directory)?;
+    let request = resolve_through_authority(runner, actuation_bin, &directory, &resolution)?;
+    let authority_source_ref = grant.authority_source_ref;
 
     // Content-addressed persistence: the same agent + project derives
     // byte-identical request text, so re-mints land on the same source.
