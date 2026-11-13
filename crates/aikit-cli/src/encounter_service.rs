@@ -47,7 +47,7 @@ pub(crate) use agency::{
     allocate_central_now, bound_task_now, close_central_now, sources_in_effect, SourcesInEffect,
     SourcesRoutes,
 };
-pub use agency::{compose_agency_identity, EncounterCentralIdentityWorld};
+pub use agency::{compose_agency_identity, ComposedAgencyIdentity, EncounterCentralIdentityWorld};
 pub use agency::{
     conversation::{ConversationEntry, ConversationRecipientSpec, ConversationSendRequest},
     EncounterA2aFraming, EncounterAddressedTurn, EncounterAgencyBinding, EncounterContextPacket,

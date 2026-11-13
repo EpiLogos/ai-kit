@@ -169,6 +169,12 @@ impl CommandRunner for ProfileRunner {
                 json!({"ok":true,"status":"success","action":"agent-profile.list","data":{"profiles":self.profiles,"scope":"project","source_payloads_disclosed":false}}).to_string(),
             ));
         }
+        // Every listed profile reads back as accepted by the person.
+        if argv.iter().any(|arg| arg == "agent-profile.review") {
+            return Ok(Output::success(
+                json!({"ok":true,"status":"success","action":"agent-profile.review","data":{"accepted":true}}).to_string(),
+            ));
+        }
         let output = std::process::Command::new(&argv[0])
             .args(&argv[1..])
             .output()
@@ -592,6 +598,82 @@ fn a_profile_ref_is_carried_onto_the_minted_binding() {
     assert!(derived.get("central_identity_world").is_none());
 }
 
+/// A runner that answers `agent-profile.list` like [`ProfileRunner`] and
+/// records the scope input each listing was asked for.
+struct ScopedProfileRunner {
+    profiles: Value,
+    listed: std::sync::Mutex<Vec<Value>>,
+}
+
+impl CommandRunner for ScopedProfileRunner {
+    fn run(&self, argv: &[String]) -> aikit_core::Result<Output> {
+        if argv.iter().any(|arg| arg == "agent-profile.list") {
+            self.listed
+                .lock()
+                .unwrap()
+                .push(serde_json::from_str(argv.last().unwrap()).unwrap());
+        }
+        ProfileRunner {
+            profiles: self.profiles.clone(),
+        }
+        .run(argv)
+    }
+}
+
+/// The O-I kernel opens every Agent conversation with `--agent-ref`. A named
+/// Agent is still a Central Agent: the mint pins the one profile its scope
+/// declares for it, so every turn can say who it is — not only the implicit
+/// sole-profile case. Another Agent's profile in the same scope is not taken.
+#[test]
+fn a_named_agent_is_pinned_to_its_own_project_profile() {
+    let world = MintWorld::new("project:mint-fixture");
+    let session = r("agent-session/mint-proof");
+    let runner = ScopedProfileRunner {
+        profiles: json!([
+            {"profile":{"ref":"agent-profile:mint-warden","agent_ref":"agent/mint-fixture-warden"}},
+            {"profile":{"ref":"agent-profile:mint-clerk","agent_ref":"agent/mint-fixture-clerk"}}
+        ]),
+        listed: Default::default(),
+    };
+    let output = mint_per_project_agency(
+        &world.home,
+        &world.project,
+        &session,
+        Some(r("agent/mint-fixture-clerk")),
+        &world.actuation_bin,
+        &runner,
+    )
+    .unwrap();
+    assert_eq!(output["data"]["agent_ref"], "agent/mint-fixture-clerk");
+    assert_eq!(
+        output["data"]["agent_identity_source"],
+        "explicit-central-agent-profile"
+    );
+    let binding: Value =
+        serde_json::from_slice(&fs::read(binding_path(&world.home, &session)).unwrap()).unwrap();
+    assert_eq!(binding["central_profile_ref"], "agent-profile:mint-clerk");
+    assert_eq!(binding["central_identity_world"]["scope"], "project");
+    assert_eq!(binding["central_identity_world"]["project"], "mint-fixture");
+    assert_eq!(
+        runner.listed.lock().unwrap().as_slice(),
+        [json!({"scope":"project","project":"mint-fixture"})]
+    );
+
+    // A named Agent no profile declares stays an honest, unpinned identity.
+    let other_world = MintWorld::new("project:mint-fixture");
+    let output = mint_per_project_agency(
+        &other_world.home,
+        &other_world.project,
+        &session,
+        Some(r("agent/undeclared")),
+        &other_world.actuation_bin,
+        &runner,
+    )
+    .unwrap();
+    assert_eq!(output["data"]["agent_identity_source"], "explicit");
+    assert!(output["data"]["central_profile_ref"].is_null());
+}
+
 // ---------------------------------------------------------------------------
 // The Agency identity composition seam: the turn-time half of the Agency
 // route. Central is a controlled ctrl STUB (a simulated service, labelled as
@@ -712,12 +794,20 @@ mod identity_composition {
     fn the_seam_composes_the_accepted_orientation_with_its_receipt() {
         let world = fixture(true);
         let runner = review_runner(AGENT_REF, true, "project:mint-fixture");
-        let (text, receipt) =
+        let composed =
             compose_agency_identity(&runner, Some(&world.world), &world.agent, Some(PROFILE_REF))
                 .unwrap()
                 .expect("the accepted profile composes a self section");
+        let text = composed.text;
+        let receipt = composed.receipt.expect("pinned self sources are receipted");
+        // The declared definition leads; the pinned orientation follows it.
         assert!(
-            text.starts_with("# Operative orientation of the selected Agent"),
+            text.starts_with("# Who you are in this conversation"),
+            "{text}"
+        );
+        assert!(text.contains("Purpose: Guard the mint fixture"), "{text}");
+        assert!(
+            text.contains("# Operative orientation of the selected Agent"),
             "{text}"
         );
         let self_text = String::from_utf8_lossy(SELF_BYTES).into_owned();
@@ -780,19 +870,41 @@ mod identity_composition {
         assert_eq!(error.code(), "encounter.self_source_missing");
     }
 
+    /// An Agent made from a person's words (Messages' Make) has an accepted
+    /// profile with no pinned self sources — only its purpose and the words
+    /// it was made with. The model must still be told who it is: those words
+    /// and the World ride the turn, with no orientation and no source receipt.
     #[test]
-    fn a_profile_that_drifts_off_this_agent_or_its_self_refuses() {
-        // The accepted definition under the ref no longer carries a self.
-        let no_self = fixture(true);
-        let error = compose_agency_identity(
+    fn a_profile_without_self_sources_still_tells_the_model_who_it_is() {
+        let world = fixture(false);
+        let composed = compose_agency_identity(
             &review_runner(AGENT_REF, false, "project:mint-fixture"),
-            Some(&no_self.world),
-            &no_self.agent,
+            Some(&world.world),
+            &world.agent,
             Some(PROFILE_REF),
         )
-        .unwrap_err();
-        assert_eq!(error.code(), "encounter.self_source_changed");
+        .unwrap()
+        .expect("an accepted profile always declares who the Agent is");
+        let text = &composed.text;
+        assert!(
+            text.starts_with("# Who you are in this conversation"),
+            "{text}"
+        );
+        assert!(text.contains(AGENT_REF), "{text}");
+        assert!(text.contains("World project:mint-fixture"), "{text}");
+        assert!(text.contains("Purpose: Guard the mint fixture"), "{text}");
+        assert!(
+            text.contains("in their own words: \"Guard the mint fixture\""),
+            "{text}"
+        );
+        assert!(!text.contains("Operative orientation"), "{text}");
+        assert_eq!(composed.profile_ref, PROFILE_REF);
+        assert_eq!(composed.profile_revision, "r7");
+        assert!(composed.receipt.is_none());
+    }
 
+    #[test]
+    fn a_profile_that_drifts_off_this_agent_or_its_scope_refuses() {
         // The accepted definition now names another Agent entirely.
         let other = fixture(true);
         let error = compose_agency_identity(
