@@ -338,7 +338,27 @@ impl Fixture {
         let explicit = self.aikit("refused-compose", &["compose"]);
         let context = self.project_context("refused-project-context");
         let projection = self.aikit("refused-projection", &["context", "env"]);
-        for output in [&explicit, &projection] {
+        // The read projection (`context env`) demotes a profile ambiguity to
+        // absence since #496 (this ignored gate was not updated then); it
+        // refuses every other invalid source. Explicit composition refuses both.
+        let demoted = expected.code() == "actor_composition.ambiguous_profile";
+        if demoted {
+            succeeded(&projection);
+            // No agent is projected: neither profile's agent is guessed into
+            // the environment (the warning travels with the view, #496).
+            assert!(
+                !projection.stdout.contains("agent/first")
+                    && !projection.stdout.contains("agent/second"),
+                "an ambiguous ground projected an agent: {}",
+                projection.stdout
+            );
+        }
+        let refused: Vec<&Output> = if demoted {
+            vec![&explicit]
+        } else {
+            vec![&explicit, &projection]
+        };
+        for output in refused {
             assert_ne!(
                 output.status, 0,
                 "invalid native source became successful empty context"
@@ -578,6 +598,19 @@ fn ambiguous_native_profiles_refuse_context_and_projection_without_guessing() {
     let expected = fixture.oracle_error("ambiguous-adapter-oracle");
     assert_eq!(expected.code(), "actor_composition.ambiguous_profile");
     fixture.assert_refused_everywhere(&expected);
+    // Naming the Agent is the selection the refusal asks for: the Context is
+    // composed for that Agent's profile alone, never the other's.
+    let named = fixture.capture(
+        "named-project-context",
+        fixture
+            .command()
+            .args(["session-space", "project-context", "--agent", "agent/first"]),
+    );
+    succeeded(&named);
+    let context: Value = serde_json::from_str(&named.stdout).unwrap();
+    let text = context.to_string();
+    assert!(text.contains("agent/first"), "{context}");
+    assert!(!text.contains("agent/second"), "{context}");
     assert_eq!(fs::read(first).unwrap(), first_bytes);
     assert_eq!(fs::read(second).unwrap(), second_bytes);
 }

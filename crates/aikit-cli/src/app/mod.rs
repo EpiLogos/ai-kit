@@ -299,6 +299,10 @@ pub struct Service {
     /// An explicitly configured Central World remains the Knowledge owner for
     /// a real Project worktree even when that checkout lives outside Work/.
     knowledge_central_root: Option<PathBuf>,
+    /// The Agent the caller named for this context (`session-space
+    /// project-context --agent`): its authored profile is the one composed,
+    /// so a ground with several profiles resolves without guessing.
+    selected_agent: Option<aikit_core::ResourceRef>,
     layers: Vec<ScopeLayer>,
     trust: TrustSnapshot,
     policy: ManagedPolicy,
@@ -609,6 +613,7 @@ impl Service {
             project,
             central_meta_root,
             knowledge_central_root,
+            selected_agent: None,
             layers,
             trust,
             policy,
@@ -897,6 +902,13 @@ impl Service {
     }
 
     /// The AIKit home, for commands that plan Procedures or reach the inbox.
+    /// Compose this context for the named Agent: its authored profile, never
+    /// another's, and never a guess among several.
+    pub fn with_selected_agent(mut self, agent: aikit_core::ResourceRef) -> Self {
+        self.selected_agent = Some(agent);
+        self
+    }
+
     pub fn home(&self) -> &AikitHome {
         &self.home
     }
@@ -3852,9 +3864,14 @@ impl PaletteBackend for Service {
         let mut records = if let Some(central) = central_root.as_deref() {
             // Share the projection's native absence/error distinction: only
             // Ok(None) contributes no actor sources. Preserve any source error.
-            compose_live_actor_inputs(&SystemRunner::probe(), central, project)?
-                .map(|inputs| inputs.source_resources)
-                .unwrap_or_default()
+            aikit_adapters::actor_composition::compose_selected_actor_inputs(
+                &SystemRunner::probe(),
+                central,
+                project,
+                self.selected_agent.as_ref(),
+            )?
+            .map(|inputs| inputs.source_resources)
+            .unwrap_or_default()
         } else {
             Vec::new()
         };
