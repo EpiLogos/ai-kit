@@ -4131,6 +4131,84 @@ pub fn spine_refusal(
     (!reasons.is_empty()).then(|| refuse(&reasons)).flatten()
 }
 
+/// The `spine/<act>` context a text names, if any (`spine/…` when the act
+/// cannot be read off it).
+fn spine_context(text: &str) -> Option<String> {
+    let at = text.find("spine/")?;
+    let act: String = text[at + "spine/".len()..]
+        .chars()
+        .take_while(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || *c == '-')
+        .collect();
+    Some(if act.is_empty() {
+        "spine/…".into()
+    } else {
+        format!("spine/{act}")
+    })
+}
+
+/// The repository a commit-status endpoint in a word posts to
+/// (`repos/o/r/statuses/<sha>`, an api.github.com URL, or gh's
+/// `{owner}/{repo}` placeholders, which name the checkout's origin).
+fn statuses_repo(word: &str, origin: &dyn Fn() -> Option<String>) -> Option<String> {
+    let at = word.find("repos/")?;
+    let mut parts = word[at + "repos/".len()..].split('/');
+    let (owner, repo, endpoint) = (parts.next()?, parts.next()?, parts.next()?);
+    if endpoint != "statuses" {
+        return None;
+    }
+    if matches!(owner, "{owner}" | ":owner") || matches!(repo, "{repo}" | ":repo") {
+        return origin();
+    }
+    Some(format!("{owner}/{repo}"))
+}
+
+/// Why a command must be refused because it posts a `spine/*` commit status
+/// to the DLW repository by hand. Only the gate runner posts it
+/// (`scripts/spine-gate.sh`, run from an O-I checkout, after the act's
+/// script passes against the real programs); a status any session can post
+/// would make the close's check a formality. `read` reads an `--input` file.
+pub fn spine_post_refusal(
+    command: &str,
+    origin: &dyn Fn() -> Option<String>,
+    read: &dyn Fn(&str) -> Option<String>,
+) -> Option<String> {
+    let refusal = |context: &str| {
+        format!("posting `{context}` by hand is refused: only scripts/spine-gate.sh posts it, after the act's script passes against the real programs")
+    };
+    for words in shell_commands(command) {
+        if words
+            .first()
+            .is_some_and(|w| w == "spine-gate.sh" || w.ends_with("scripts/spine-gate.sh"))
+        {
+            continue;
+        }
+        let to_dlw = words.iter().any(|w| {
+            statuses_repo(w, origin).is_some_and(|repo| repo.eq_ignore_ascii_case(DLW_REPO))
+        });
+        if !to_dlw {
+            continue;
+        }
+        if let Some(context) = words.iter().find_map(|w| spine_context(w)) {
+            return Some(refusal(&context));
+        }
+        if let Some(input) = flag_value(&words, &["--input"]) {
+            match read(&input) {
+                Some(body) => {
+                    if let Some(context) = spine_context(&body) {
+                        return Some(refusal(&context));
+                    }
+                }
+                None => {
+                    return Some(format!(
+                        "posting `spine/…` by hand is refused: the --input `{input}` could not be read, so it may carry one; only scripts/spine-gate.sh posts it, after the act's script passes against the real programs"
+                    ))
+                }
+            }
+        }
+    }
+    None
+}
+
 /// The use check, on a PreToolUse: why this tool call's close of the
 /// session's claimed ticket must be refused, or `None`. Every other call
 /// answers from the command text alone, before any file is read.
@@ -4151,6 +4229,35 @@ pub fn check_resolution_with(
     let Some(command) = tool_command(&event.payload) else {
         return Ok(None);
     };
+    let cwd = || {
+        event
+            .cwd
+            .as_deref()
+            .map(Path::to_path_buf)
+            .or_else(|| std::env::current_dir().ok())
+    };
+    // Whoever posts it, a `spine/*` status is the gate runner's alone.
+    if command.contains("statuses") && (command.contains("spine/") || command.contains("--input")) {
+        let posted = spine_post_refusal(
+            &command,
+            &|| cwd().and_then(|checkout| checkout_repo(runner, &checkout)),
+            &|path| {
+                if path == "-" {
+                    return None;
+                }
+                let path = Path::new(path);
+                let path = if path.is_absolute() {
+                    path.to_path_buf()
+                } else {
+                    cwd()?.join(path)
+                };
+                std::fs::read_to_string(path).ok()
+            },
+        );
+        if posted.is_some() {
+            return Ok(posted);
+        }
+    }
     if !(command.contains("gh") && command.contains("close")) {
         return Ok(None);
     }
@@ -5707,6 +5814,84 @@ mod tests {
         let red = spine_forge(ACT_BODY, &status("spine/open-a-world", "failure"));
         let refused = check(&close("gh issue close 849 -c 'Landed: abc1234'"), &red).unwrap();
         assert!(refused.contains("as `failure`"), "{refused}");
+    }
+
+    #[test]
+    fn posting_a_spine_status_by_hand_is_refused() {
+        let origin = || Some("EpiLogos/O-I".to_owned());
+        let input = |path: &str| match path {
+            "green.json" => {
+                Some(r#"{"context": "spine/open-a-world", "state": "success"}"#.to_owned())
+            }
+            "vercel.json" => Some(r#"{"context": "Vercel", "state": "success"}"#.to_owned()),
+            _ => None,
+        };
+        let words = "posting `spine/open-a-world` by hand is refused: only scripts/spine-gate.sh posts it, after the act's script passes against the real programs";
+        for forged in [
+            "gh api repos/EpiLogos/O-I/statuses/abc1234 -f context=spine/open-a-world -f state=success",
+            "gh api -X POST /repos/EpiLogos/O-I/statuses/abc1234 --field context=spine/open-a-world --field state=success",
+            "cd /c/o-i && gh api --method POST 'repos/{owner}/{repo}/statuses/abc1234' -F 'context=spine/open-a-world' -F state=success",
+            "gh api repos/epilogos/o-i/statuses/abc1234 --raw-field=context=spine/open-a-world -f state=success",
+            "gh api repos/EpiLogos/O-I/statuses/abc1234 --input green.json",
+            "curl -X POST https://api.github.com/repos/EpiLogos/O-I/statuses/abc1234 -d '{\"context\":\"spine/open-a-world\",\"state\":\"success\"}'",
+        ] {
+            let refused = spine_post_refusal(forged, &origin, &input)
+                .unwrap_or_else(|| panic!("forged green went through: {forged}"));
+            assert_eq!(refused, words, "{forged}");
+        }
+        // An input the hook cannot read is not shown harmless.
+        let refused = spine_post_refusal(
+            "gh api repos/EpiLogos/O-I/statuses/abc1234 --input -",
+            &origin,
+            &input,
+        )
+        .unwrap();
+        assert!(
+            refused.starts_with("posting `spine/…` by hand is refused"),
+            "{refused}"
+        );
+        // The gate runner, other contexts, reads, and other repositories pass.
+        for allowed in [
+            "scripts/spine-gate.sh open-a-world",
+            "cd /c/worktrees/env-1/o-i && ./scripts/spine-gate.sh open-a-world",
+            "gh api repos/EpiLogos/O-I/statuses/abc1234 -f context=Vercel -f state=success",
+            "gh api repos/EpiLogos/O-I/statuses/abc1234 --input vercel.json",
+            "gh api repos/EpiLogos/O-I/commits/abc1234/status",
+            "gh api repos/EpiLogos/ai-kit/statuses/abc1234 -f context=spine/x -f state=success",
+        ] {
+            assert_eq!(
+                spine_post_refusal(allowed, &origin, &input),
+                None,
+                "{allowed}"
+            );
+        }
+        // Through the hook: refused whatever ticket the session holds.
+        let temp = tempfile::tempdir().unwrap();
+        let view = empty_view();
+        let roots = BTreeMap::new();
+        let config = EntryConfig::default();
+        let event = HookEvent::new(
+            "claude",
+            HookEventKind::PreToolUse,
+            json!({"session_id": "anyone", "tool_input": {"command": "gh api repos/EpiLogos/O-I/statuses/abc1234 -f context=spine/open-a-world -f state=success"}}),
+        )
+        .with_tool_name("Bash");
+        let refused = check_resolution_with(
+            &EntryRequest {
+                event: &event,
+                client: "claude",
+                aikit_session: None,
+                config: &config,
+                state: temp.path(),
+                central: None,
+                view: &view,
+                capsule_roots: &roots,
+            },
+            &aikit_adapters::runner::ScriptedRunner::new(),
+            Some(Path::new(GH)),
+        )
+        .unwrap();
+        assert_eq!(refused.as_deref(), Some(words));
     }
 
     #[test]
