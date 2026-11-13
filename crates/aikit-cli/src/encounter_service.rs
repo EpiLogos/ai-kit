@@ -783,6 +783,38 @@ pub(crate) fn provider_named(home: &AikitHome, id: &str) -> Result<Option<Encoun
         .transpose()
 }
 
+/// Whether a conversation opens with the harness `slug` names, decided as an
+/// open decides it before it launches anything: the provider an open by that
+/// id uses ([`provider_named`]), its connection facts reaching the child, and
+/// the launch key its profile needs ([`agency::model::launch_key_refusal`]).
+/// `{"opens": true, "protocol"}`, or `{"opens": false, "why"}` in the words
+/// the open would refuse with. AIKit's detail on each client status row; no
+/// process starts and no secret is read.
+pub(crate) fn conversation_detail(home: &AikitHome, slug: &str) -> Value {
+    let refused = |why: String| json!({"opens": false, "why": why});
+    let provider = match provider_named(home, slug) {
+        Ok(Some(provider)) => provider,
+        Ok(None) => {
+            return refused(format!(
+                "AIKit opens no conversation with {slug}: its harness profile declares no \
+                 conversation face (`[sessions] connect`) and no provider is configured \
+                 under {slug}"
+            ))
+        }
+        Err(error) => return refused(error.message().to_owned()),
+    };
+    if let Err(error) =
+        crate::encounter_profile_provider::ensure_connection_facts_reachable(&provider)
+    {
+        return refused(error.message().to_owned());
+    }
+    match agency::model::launch_key_refusal(home, &provider) {
+        Ok(None) => json!({"opens": true, "protocol": provider.protocol}),
+        Ok(Some(why)) => refused(why),
+        Err(error) => refused(error.message().to_owned()),
+    }
+}
+
 const NATIVE_STARTUP_TIMEOUT: Duration = Duration::from_secs(90);
 const NATIVE_CONTROL_TIMEOUT: Duration = Duration::from_secs(90);
 
@@ -3976,6 +4008,48 @@ mod tests {
             body_revision: None,
             now_context: None,
         }
+    }
+
+    #[test]
+    fn a_conversation_opens_only_where_an_open_would_launch() {
+        let home = test_home();
+        // A profile with an ACP face whose own login stands for its key.
+        let claude = conversation_detail(&home, "claude-code");
+        assert_eq!(
+            claude,
+            json!({"opens": true, "protocol": "acp"}),
+            "{claude}"
+        );
+        // A profile whose sessions are a process, with no conversation face.
+        let opencode = conversation_detail(&home, "opencode");
+        assert_eq!(opencode["opens"], false, "{opencode}");
+        assert!(
+            opencode["why"]
+                .as_str()
+                .unwrap()
+                .contains("no conversation face"),
+            "{opencode}"
+        );
+        // A face whose launch key is unbound and has no own-login fallback: the
+        // open's own refusal, word for word.
+        let kimi = conversation_detail(&home, "kimi");
+        assert_eq!(kimi["opens"], false, "{kimi}");
+        let provider = provider_named(&home, "kimi").unwrap().unwrap();
+        assert_eq!(
+            kimi["why"].as_str(),
+            agency::model::launch_key_refusal(&home, &provider)
+                .unwrap()
+                .as_deref(),
+        );
+        assert!(kimi["why"]
+            .as_str()
+            .unwrap()
+            .contains("credential:moonshot is not bound"));
+        // No profile and no provider under the id.
+        assert_eq!(
+            conversation_detail(&home, "no-such-harness")["opens"],
+            false
+        );
     }
 
     #[test]

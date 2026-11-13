@@ -1817,6 +1817,9 @@ fn overlaid_row(
         "probe_reason": probe_reason(&probe),
         "credential": credential.as_str(),
         "credential_reason": probe_reason(&credential),
+        // Whether a conversation opens with it, decided as an open decides it
+        // (encounter_service.rs conversation_detail).
+        "conversation": crate::encounter_service::conversation_detail(home, overlay.catalog_slug),
         "detection": detection_name,
         "detection_reason": detection_reason,
         "admission": {
@@ -1890,6 +1893,7 @@ fn generic_row(
         "probe_reason": probe_reason(&probe),
         "credential": credential.as_str(),
         "credential_reason": probe_reason(&credential),
+        "conversation": crate::encounter_service::conversation_detail(home, &entry.slug),
         "detection": detection_name,
         "detection_reason": detection_reason,
         "gap": gap,

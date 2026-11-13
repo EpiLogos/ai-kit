@@ -637,27 +637,12 @@ pub(crate) fn profile_environment(
     session: &ResourceRef,
     provider: &EncounterProvider,
 ) -> Result<Option<ModelEnvironment>> {
-    if provider.argv.is_empty() {
-        return Ok(None);
-    }
-    let Some(profile) = declared_provider_profile(provider)? else {
+    let Some(declared) = declared_key_delivery(provider)? else {
         return Ok(None);
     };
-    let Some(declared) = profile
-        .models
-        .as_ref()
-        .and_then(|models| models.key_delivery.as_ref())
-    else {
-        return Ok(None);
-    };
-    if declared.env_var.is_empty() {
-        return Ok(None);
+    if let Some(why) = launch_key_refusal(home, provider)? {
+        return Err(error(why));
     }
-    let own_login: BTreeSet<&str> = declared
-        .own_login
-        .iter()
-        .map(|fact| fact.provider_ref.as_str())
-        .collect();
     let store = CredentialBindingStore::new(home);
     let mut environment = ModelEnvironment::new();
     for entry in &declared.env_var {
@@ -666,30 +651,10 @@ pub(crate) fn profile_environment(
             .strip_prefix("provider:")
             .unwrap_or(&entry.provider_ref);
         let credential_ref = CredentialRef::new(format!("credential:{vendor}"))?;
-        let binding = store.load(&credential_ref)?;
-        let Some(binding) = binding else {
-            if own_login.contains(entry.provider_ref.as_str()) {
-                continue;
-            }
-            return Err(error(format!(
-                "The {} profile declares its native launch reads {} for {} and records no \
-                 own-login fallback, but credential:{vendor} is not bound; bind it with \
-                 `aikit credential setup credential:{vendor}` (or declare its store \
-                 location with --ref) before launching this body",
-                profile.slug, entry.env_var, entry.provider_ref,
-            )));
-        };
-        if binding.revoked
-            || binding
-                .expires_at
-                .as_deref()
-                .map(|string| string.parse::<jiff::Timestamp>().map_err(error))
-                .transpose()?
-                .is_some_and(|deadline| deadline <= jiff::Timestamp::now())
-        {
-            return Err(error(
-                "Declared key credential binding is revoked or expired; no environment bypass",
-            ));
+        // Unbound here is the harness's own login standing for the key
+        // (launch_key_refusal refused every other absence).
+        if store.load(&credential_ref)?.is_none() {
+            continue;
         }
         let use_ = ModelCredential {
             requirement_ref: SecretRequirementRef::new(format!(
@@ -704,6 +669,82 @@ pub(crate) fn profile_environment(
         environment.push_credential(entry.env_var.clone(), secret)?;
     }
     Ok(Some(environment))
+}
+
+/// The env-var key delivery a provider's profile declares for its launch.
+/// `None` when the provider runs no program, names no profile, or its profile
+/// declares no env-var delivery.
+fn declared_key_delivery(
+    provider: &EncounterProvider,
+) -> Result<Option<&'static aikit_core::harness_profile::ModelKeyDeliveryLayer>> {
+    if provider.argv.is_empty() {
+        return Ok(None);
+    }
+    let Some(profile) = declared_provider_profile(provider)? else {
+        return Ok(None);
+    };
+    Ok(profile
+        .models
+        .as_ref()
+        .and_then(|models| models.key_delivery.as_ref())
+        .filter(|declared| !declared.env_var.is_empty()))
+}
+
+/// Why a launch of `provider` is refused its key, before anything is
+/// materialised: a key its profile declares whose credential is not bound
+/// and whose harness records no own-login fallback, or a bound one that is
+/// revoked or expired. `None` when the launch may proceed. Binding records
+/// only: no secret is read. [`profile_environment`] refuses on it, and
+/// AIKit's client status reports it as whether a conversation opens
+/// (encounter_service.rs `conversation_detail`).
+pub(crate) fn launch_key_refusal(
+    home: &AikitHome,
+    provider: &EncounterProvider,
+) -> Result<Option<String>> {
+    let Some(declared) = declared_key_delivery(provider)? else {
+        return Ok(None);
+    };
+    let slug =
+        declared_provider_profile(provider)?.map_or(provider.id.as_str(), |p| p.slug.as_str());
+    let own_login: BTreeSet<&str> = declared
+        .own_login
+        .iter()
+        .map(|fact| fact.provider_ref.as_str())
+        .collect();
+    let store = CredentialBindingStore::new(home);
+    for entry in &declared.env_var {
+        let vendor = entry
+            .provider_ref
+            .strip_prefix("provider:")
+            .unwrap_or(&entry.provider_ref);
+        let credential_ref = CredentialRef::new(format!("credential:{vendor}"))?;
+        let Some(binding) = store.load(&credential_ref)? else {
+            if own_login.contains(entry.provider_ref.as_str()) {
+                continue;
+            }
+            return Ok(Some(format!(
+                "The {slug} profile declares its native launch reads {} for {} and records no \
+                 own-login fallback, but credential:{vendor} is not bound; bind it with \
+                 `aikit credential setup credential:{vendor}` (or declare its store \
+                 location with --ref) before launching this body",
+                entry.env_var, entry.provider_ref,
+            )));
+        };
+        if binding.revoked
+            || binding
+                .expires_at
+                .as_deref()
+                .map(|string| string.parse::<jiff::Timestamp>().map_err(error))
+                .transpose()?
+                .is_some_and(|deadline| deadline <= jiff::Timestamp::now())
+        {
+            return Ok(Some(
+                "Declared key credential binding is revoked or expired; no environment bypass"
+                    .to_owned(),
+            ));
+        }
+    }
+    Ok(None)
 }
 
 /// The final-exec resolution of a bound-policy launch: the scoped argv and
