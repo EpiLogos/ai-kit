@@ -1605,6 +1605,7 @@ pub fn status(service: &Service, only: Option<&str>) -> Result<Vec<serde_json::V
             reason: "no detection spawn was performed".to_string(),
         });
     let members = roster_members(&detection);
+    let carries = Carries::read(service);
     let mut rows = Vec::new();
     for member in &members {
         if let Some(only) = only {
@@ -1624,6 +1625,7 @@ pub fn status(service: &Service, only: Option<&str>) -> Result<Vec<serde_json::V
             &detection,
             &surface_probe,
             service.home(),
+            &carries,
         )?);
     }
     Ok(rows)
@@ -1637,15 +1639,97 @@ fn client_row(
     detection: &DetectionOutcome,
     surface_probe: &ProbeOutcome,
     home: &aikit_store::AikitHome,
+    carries: &Carries,
 ) -> Result<serde_json::Value> {
     match member {
         RosterMember::Broker => broker_row(rc, dirs),
         RosterMember::Descriptor { entry, overlay } => match overlay {
-            Some(overlay) => overlaid_row(overlay, rc, dirs, detection, surface_probe, home),
-            None => generic_row(entry, rc, dirs, detection, surface_probe, home),
+            Some(overlay) => {
+                overlaid_row(overlay, rc, dirs, detection, surface_probe, home, carries)
+            }
+            None => generic_row(entry, rc, dirs, detection, surface_probe, home, carries),
         },
         RosterMember::Unrecorded { overlay } => {
-            overlaid_row(overlay, rc, dirs, detection, surface_probe, home)
+            overlaid_row(overlay, rc, dirs, detection, surface_probe, home, carries)
+        }
+    }
+}
+
+/// What a harness gets from AIKit besides its detection (O-I #1003): the model AIKit asks for when a new chat opens with it
+/// (`models.default`, the one model decider: `model_defaults::for_open`), the Skill Sets the context selects, the skills of
+/// those that support it, and the instruction files its profile declares it reads (its guidance layer). Read once per status
+/// and shared by every row.
+struct Carries {
+    sets: std::result::Result<Vec<String>, String>,
+    defaults: std::result::Result<crate::model_defaults::Defaults, String>,
+}
+
+impl Carries {
+    fn read(service: &Service) -> Self {
+        Carries {
+            sets: service
+                .selected_skill_sets()
+                .map_err(|error| error.message().to_owned()),
+            defaults: crate::model_defaults::read(service.home())
+                .map_err(|error| error.message().to_owned()),
+        }
+    }
+
+    /// Lay the row's carries on `row`: `model_default` (the default's model id, its name and native provider; null where AIKit
+    /// holds none and the harness opens with its own model), `skill_sets`, `skills` (by name, only for an adapter that projects
+    /// skills natively), `guidance` (the files its profile names; none without a profile) and, where AIKit could not read the
+    /// sets or the defaults, `carries_reason` in AIKit's words.
+    fn lay(
+        &self,
+        row: &mut serde_json::Value,
+        slug: &str,
+        rc: &ResolvedContext,
+        projects_skills: bool,
+    ) {
+        let Some(row) = row.as_object_mut() else {
+            return;
+        };
+        let mut reasons = Vec::new();
+        let model = match &self.defaults {
+            Ok(defaults) => defaults
+                .get(slug)
+                .map(|default| serde_json::to_value(default).unwrap_or(serde_json::Value::Null))
+                .unwrap_or(serde_json::Value::Null),
+            Err(why) => {
+                reasons.push(format!("AIKit could not read its model defaults: {why}"));
+                serde_json::Value::Null
+            }
+        };
+        let sets = match &self.sets {
+            Ok(sets) => serde_json::json!(sets),
+            Err(why) => {
+                reasons.push(format!(
+                    "AIKit could not read the Skill Sets this context selects: {why}"
+                ));
+                serde_json::Value::Null
+            }
+        };
+        let mut skills: Vec<&str> = if projects_skills {
+            rc.view
+                .active_of_kind(Kind::Skill)
+                .into_iter()
+                .filter(|skill| skill.targets.iter().any(|target| target.as_str() == slug))
+                .map(|skill| skill.name.as_str())
+                .collect()
+        } else {
+            Vec::new()
+        };
+        skills.sort_unstable();
+        let guidance: Vec<&str> = aikit_adapters::profiles::for_slug(slug)
+            .and_then(|profile| profile.guidance.as_ref())
+            .map(|layer| layer.observe.iter().map(String::as_str).collect())
+            .unwrap_or_default();
+        row.insert("model_default".into(), model);
+        row.insert("skill_sets".into(), sets);
+        row.insert("skills".into(), serde_json::json!(skills));
+        row.insert("guidance".into(), serde_json::json!(guidance));
+        if !reasons.is_empty() {
+            row.insert("carries_reason".into(), reasons.join("; ").into());
         }
     }
 }
@@ -1689,6 +1773,7 @@ fn overlaid_row(
     detection: &DetectionOutcome,
     surface_probe: &ProbeOutcome,
     home: &aikit_store::AikitHome,
+    carries: &Carries,
 ) -> Result<serde_json::Value> {
     let leg = detection_leg(detection, overlay.catalog_slug);
     // The capability intake is this row's own probe-shaped spawn: bounded, and
@@ -1800,7 +1885,7 @@ fn overlaid_row(
     // env-var presence, the harness's own login store), never secret values.
     let credential = credential_outcome(Some(home), dirs, Some(overlay));
 
-    Ok(serde_json::json!({
+    let mut row = serde_json::json!({
         "client": overlay.name,
         "harness": overlay.catalog_slug,
         "state": state,
@@ -1830,7 +1915,14 @@ fn overlaid_row(
         "gap": gap,
         "notes": notes,
         "error": planned.as_ref().err().map(|e| e.message().to_string()),
-    }))
+    });
+    carries.lay(
+        &mut row,
+        overlay.catalog_slug,
+        rc,
+        matches!(overlay.semantic, SemanticBasis::Skills),
+    );
+    Ok(row)
 }
 
 /// A catalog slug's row when AIKit carries no overlay for it: the honest
@@ -1844,6 +1936,7 @@ fn generic_row(
     detection: &DetectionOutcome,
     surface_probe: &ProbeOutcome,
     home: &aikit_store::AikitHome,
+    carries: &Carries,
 ) -> Result<serde_json::Value> {
     let leg = detection_leg(detection, &entry.slug);
     let capability_probe = ProbeTracker::shared();
@@ -1876,7 +1969,7 @@ fn generic_row(
     // pre-check, and the row says so instead of inventing a gate.
     let credential = credential_outcome(Some(home), dirs, None);
 
-    Ok(serde_json::json!({
+    let mut row = serde_json::json!({
         "client": entry.slug,
         "harness": entry.slug,
         "state": state,
@@ -1900,7 +1993,9 @@ fn generic_row(
         "notes": ["no AIKit adapter carries this catalog slug; the row is the \
                    detection record's own disclosure"],
         "error": null,
-    }))
+    });
+    carries.lay(&mut row, &entry.slug, rc, false);
+    Ok(row)
 }
 
 /// The display names of a detection leg, shared by overlaid and generic rows.
