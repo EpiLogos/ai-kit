@@ -370,8 +370,11 @@ aikit gateway hoist --receive --force                     # over existing postur
 
 - **plan** packs the posture — connector entries (token by LOCATION, never
   value), the semantic gateway state (bindings, stream journals, Communiques),
-  the coexistence document, and the resolved agent-provider entries the
-  connectors' `--agent-backing` names — and prints exactly what would move,
+  the coexistence document, and the stored agent-provider rows the
+  connectors' `--agent-backing` names, as configured (a profile row keeps
+  `from_profile` and resolves again from the target's own profiles; a backing
+  only an embedded harness profile answers moves nothing, since the target
+  derives it in turn) — and prints exactly what would move,
   what the target must re-resolve (owner-only token files at their packed
   paths; provider argv, re-resolved at serve time), and what identity each
   thing keeps. Bindings, streams and Communiques keep their refs; the
