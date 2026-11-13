@@ -598,6 +598,27 @@ fn ambiguous_native_profiles_refuse_context_and_projection_without_guessing() {
     let expected = fixture.oracle_error("ambiguous-adapter-oracle");
     assert_eq!(expected.code(), "actor_composition.ambiguous_profile");
     fixture.assert_refused_everywhere(&expected);
+    // The Action field answers on that ground (O-I #1002: `oi act` reads it):
+    // no actor is composed, so neither Agent's sources enter, and the
+    // ambiguity stands named in the reply's warnings — nothing is guessed.
+    let field = fixture.aikit(
+        "ambiguous-act-field",
+        &["act", "discover", "--limit", "200"],
+    );
+    succeeded(&field);
+    let field: Value = serde_json::from_str(&field.stdout).unwrap();
+    assert_eq!(field["ok"], true, "{field}");
+    assert_eq!(field["data"]["schema"], "aikit.act-discovery/v1");
+    let text = field["data"].to_string();
+    assert!(
+        !text.contains("agent/first") && !text.contains("agent/second"),
+        "an ambiguous ground's Action field took an Agent's sources: {field}"
+    );
+    let warnings = field["warnings"].to_string();
+    assert!(
+        warnings.contains("profiles match this scope, so none is guessed"),
+        "the ambiguity is not named in the Action field's warnings: {field}"
+    );
     // Naming the Agent is the selection the refusal asks for: the Context is
     // composed for that Agent's profile alone, never the other's.
     let named = fixture.capture(

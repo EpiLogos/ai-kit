@@ -259,33 +259,47 @@ fn real_gitnexus_code_and_project_map_hits_obey_current_and_explicit_scope() {
             serde_json::json!({"project": member, "project_id": member}),
         );
     }
-    action(
-        "central.world-relations.save",
-        serde_json::json!({
-            "scope": "root",
-            "record": {
-                "schema": "central.world-relations/v1",
-                "ref": "control:root",
-                "revision": "fixture-world-v1",
-                "parent": null,
-                "sources": [
-                    {"ref": "central:source:control:root:Control/user/identity",
-                     "revision": "fixture-identity-v1",
-                     "authority": "controlled-test-fixture-not-personal-adoption",
-                     "treatment": "canonical"},
-                    {"ref": "central:source:control:root:Control/agents",
-                     "revision": "fixture-agents-v1",
-                     "authority": "controlled-test-fixture-not-personal-adoption",
-                     "treatment": "canonical"},
-                    {"ref": "central:source:control:root:Control/relations",
-                     "revision": "fixture-relations-v1",
-                     "authority": "controlled-test-fixture-not-personal-adoption",
-                     "treatment": "canonical"}
-                ],
-                "excluded_sources": []
-            }
-        }),
+    // `central.init` may found the root's own world-relations record; the
+    // fixture's record then replaces it on the revision the store holds.
+    let founded = action(
+        "central.world-relations.list",
+        serde_json::json!({"scope": "root"}),
     );
+    let founded_revision = founded["records"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .find(|entry| entry["record"]["ref"] == "control:root")
+        .and_then(|entry| entry["record"]["revision"].as_str())
+        .map(str::to_owned);
+    let mut root_relations = serde_json::json!({
+        "scope": "root",
+        "record": {
+            "schema": "central.world-relations/v1",
+            "ref": "control:root",
+            "revision": "fixture-world-v1",
+            "parent": null,
+            "sources": [
+                {"ref": "central:source:control:root:Control/user/identity",
+                 "revision": "fixture-identity-v1",
+                 "authority": "controlled-test-fixture-not-personal-adoption",
+                 "treatment": "canonical"},
+                {"ref": "central:source:control:root:Control/agents",
+                 "revision": "fixture-agents-v1",
+                 "authority": "controlled-test-fixture-not-personal-adoption",
+                 "treatment": "canonical"},
+                {"ref": "central:source:control:root:Control/relations",
+                 "revision": "fixture-relations-v1",
+                 "authority": "controlled-test-fixture-not-personal-adoption",
+                 "treatment": "canonical"}
+            ],
+            "excluded_sources": []
+        }
+    });
+    if let Some(revision) = founded_revision {
+        root_relations["expected_revision"] = serde_json::json!(revision);
+    }
+    action("central.world-relations.save", root_relations);
     // The real Central root also carries an AIKit marker. Its topmost profile
     // must not make a nested Git worktree outside Work/ a root-wide query.
     fs::create_dir_all(world.join(".aikit")).unwrap();
