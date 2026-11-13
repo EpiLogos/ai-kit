@@ -1280,6 +1280,10 @@ pub struct EntryLedger {
     /// (`EntryRequest::aikit_session`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub aikit_session: Option<String>,
+    /// The commits this session made, as `git commit` reported them: what
+    /// the close of a DLW ticket checks against its landing commits.
+    #[serde(default)]
+    pub authored: BTreeSet<String>,
 }
 
 fn ledger_work_owner(
@@ -2293,6 +2297,10 @@ fn prepare(
             .aikit_session
             .map(str::to_owned)
             .or_else(|| prior.as_ref().and_then(|l| l.aikit_session.clone())),
+        authored: prior
+            .as_ref()
+            .map(|l| l.authored.clone())
+            .unwrap_or_default(),
     };
     store_ledger(request.state, &ledger);
     if let Some(launched) = &ledger.aikit_session {
@@ -2743,6 +2751,9 @@ pub struct ClaimedTicket {
     pub method: Option<String>,
     /// What could not be read or resolved, in words.
     pub gaps: Vec<String>,
+    /// The person's act its body names on its `Act:` line (DLW tickets).
+    #[serde(default)]
+    pub act: Option<String>,
 }
 
 impl ClaimedTicket {
@@ -3030,6 +3041,7 @@ pub fn read_ticket(
         by_work: Vec::new(),
         method: None,
         gaps: Vec::new(),
+        act: ticket_act(issue["body"].as_str().unwrap_or_default()),
     };
     match type_practice(kind, catalogue) {
         Ok(name) => ticket.method = Some(name),
@@ -3202,6 +3214,13 @@ fn ticket_lines(ticket: &ClaimedTicket, mandated: &[PraxisCandidate]) -> Vec<Str
         ));
     }
     lines.push(format!("resolution: {RESOLUTION_WORDS}"));
+    if ticket.repo.eq_ignore_ascii_case(DLW_REPO) && ticket.map == Some(DLW_MAP) {
+        lines.push(DLW_TEMPLATE.into());
+        lines.push(match &ticket.act {
+            Some(act) => format!("this ticket's act: `{act}` — closing it is refused until `spine/{act}` is `success` at the landed commit (`Landed: <sha>` in the close, or its merged PR), and refused to every session that claimed it or authored its landing commits"),
+            None => "this ticket names no act: add `Act: <act-id>` to its body before any work; closing it is refused until it does".into(),
+        });
+    }
     lines
 }
 
@@ -3747,10 +3766,387 @@ fn practice_of(state: &Path, catalogue: &[PraxisCandidate], session: &str) -> Re
     }))
 }
 
+// The DLW close (map #706). A ticket closed by the session that built it, on
+// "Landed: <commits>", is the gap the owner's audit found: nothing outside the
+// builder could say "not done". So the close of a ticket on the DLW map is
+// refused unless the person's act its body names passed at the landed commit
+// — a `spine/<act>` commit status of `success`, which only the spine gate
+// posts — and the closing session is not one that claimed the ticket or
+// authored its landing commits. A refusal, an unread status, a pending one:
+// none of them is a pass.
+
+/// The repository and map whose tickets the spine close gates.
+pub const DLW_REPO: &str = "EpiLogos/O-I";
+pub const DLW_MAP: u64 = 706;
+
+/// The template the entry hands out with a DLW ticket.
+pub const DLW_TEMPLATE: &str = "DLW ticket template (map #706) — the body carries:
+  **Act:** one act a person does on a fresh Mac, on a line `Act: <act-id>` (open-a-world, list-my-agents, talk-to-an-agent, run-a-factory-task, day-fills-and-closes)
+  **Owner:** the one product that owns it
+  **Existing code for this job:** paths, which must be deleted or folded into the owner in the same change
+  **Done:** `spine/<act>` is green at the landed commit, and a session that did not build it closes the ticket";
+
+/// What every refusal of a DLW close ends with.
+const DLW_DONE: &str = "Done for a DLW ticket: `spine/<act>` is green at the landed commit, and a session that did not build it closes the ticket.";
+
+/// The forge reads a spine close may make together: the ticket, its map,
+/// comments, timeline, PR, PR commits and the status.
+const SPINE_BUDGET: Duration = Duration::from_secs(12);
+
+/// The forge a check reads through: the runner seam and `gh`.
+pub struct Forge<'a> {
+    pub runner: &'a dyn CommandRunner,
+    pub gh: Option<&'a Path>,
+    pub deadline: Instant,
+}
+
+/// The session making a close: its harness identity (`client`, the hook's
+/// `session_id`) and its entry record, when one is kept.
+pub struct Closer<'a> {
+    pub client: &'a str,
+    pub session: &'a str,
+    pub ledger: Option<&'a EntryLedger>,
+}
+
+/// The rest of a line `<key>: …` (`- **Act:** x`, `Landed: x`), for the
+/// first line naming the key; the key is matched without case.
+fn keyed_line(text: &str, key: &str) -> Option<String> {
+    text.lines().find_map(|raw| {
+        let line = raw.trim().trim_start_matches(['-', '*', '>', ' ']);
+        let head = line.get(..key.len())?;
+        if !head.eq_ignore_ascii_case(key) {
+            return None;
+        }
+        let rest = line[key.len()..].trim_start_matches('*');
+        let rest = rest.strip_prefix(':')?;
+        Some(rest.trim().trim_start_matches('*').trim().to_owned())
+    })
+}
+
+/// The act a ticket's body names on its `Act:` line: an id `[a-z0-9-]+`.
+pub fn ticket_act(body: &str) -> Option<String> {
+    let rest = keyed_line(body, "act")?;
+    let word = rest.split_whitespace().next()?;
+    let id = word.trim_matches(['`', '*', '.', ',', ';']);
+    (!id.is_empty()
+        && id
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-'))
+    .then(|| id.to_owned())
+}
+
+fn commit_sha(word: &str) -> Option<String> {
+    let word = word.trim_matches(|c: char| !c.is_ascii_alphanumeric());
+    ((7..=40).contains(&word.len()) && word.chars().all(|c| c.is_ascii_hexdigit()))
+        .then(|| word.to_ascii_lowercase())
+}
+
+/// The commit a resolution's `Landed:` line names: its first commit sha.
+pub fn landed_commit(text: &str) -> Option<String> {
+    keyed_line(text, "landed")?
+        .split_whitespace()
+        .find_map(commit_sha)
+}
+
+/// The commits a `git commit` reported making (`[branch abc1234] subject`).
+pub fn reported_commits(stdout: &str) -> Vec<String> {
+    stdout
+        .lines()
+        .filter_map(|line| {
+            let inner = line.trim().strip_prefix('[')?.split_once(']')?.0;
+            commit_sha(inner.split_whitespace().last()?)
+        })
+        .collect()
+}
+
+/// The text a finished tool call answered with, whichever harness raised it.
+fn tool_stdout(payload: &Value) -> Option<String> {
+    let response = payload
+        .get("tool_response")
+        .or_else(|| payload.get("tool_output"))?;
+    match response {
+        Value::String(text) => Some(text.clone()),
+        other => other
+            .get("stdout")
+            .or_else(|| other.get("output"))
+            .and_then(Value::as_str)
+            .map(str::to_owned),
+    }
+}
+
+/// One session that built a ticket, and how.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BuilderMark {
+    pub client: String,
+    pub session: String,
+    pub how: String,
+}
+
+/// Where the sessions that built one ticket are kept. It outlives the
+/// sessions' records (`retain` takes only receipts, records and aliases):
+/// a builder whose record is gone is still a builder.
+fn builders_path(state: &Path, repo: &str, number: u64) -> PathBuf {
+    state
+        .join("development-entry")
+        .join("builders")
+        .join(format!(
+            "{}.json",
+            blake3::hash(format!("{}#{number}", repo.to_lowercase()).as_bytes()).to_hex()
+        ))
+}
+
+/// The sessions recorded as having built a ticket.
+pub fn ticket_builders(state: &Path, repo: &str, number: u64) -> Vec<BuilderMark> {
+    std::fs::read(builders_path(state, repo, number))
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
+        .and_then(|kept| serde_json::from_value(kept["builders"].clone()).ok())
+        .unwrap_or_default()
+}
+
+/// Record that a session built a ticket (it claimed it, or committed while
+/// working it).
+pub fn record_builder(
+    state: &Path,
+    repo: &str,
+    number: u64,
+    client: &str,
+    session: &str,
+    how: &str,
+) {
+    let mut builders = ticket_builders(state, repo, number);
+    let mark = BuilderMark {
+        client: client.to_owned(),
+        session: session.to_owned(),
+        how: how.to_owned(),
+    };
+    if builders.contains(&mark) {
+        return;
+    }
+    builders.push(mark);
+    let path = builders_path(state, repo, number);
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let body = json!({
+        "schema": "aikit.development-entry-builders/v1",
+        "ticket": format!("{repo}#{number}"),
+        "builders": builders,
+    });
+    if let Ok(bytes) = serde_json::to_vec_pretty(&body) {
+        let _ = std::fs::write(path, bytes);
+    }
+}
+
+/// Why a close of a DLW ticket must be refused, or `None` when the command
+/// closes no ticket on the DLW map. `origin` names the repository a close
+/// without `--repo` acts on.
+pub fn spine_refusal(
+    forge: &Forge<'_>,
+    state: &Path,
+    closer: &Closer<'_>,
+    command: &str,
+    origin: &dyn Fn() -> Option<String>,
+) -> Option<String> {
+    let (close, repo, number) = shell_commands(command)
+        .into_iter()
+        .find_map(|words| gh_issue_target(&words, "close").map(|(r, n)| (words, r, n)))?;
+    let repo = repo.or_else(origin)?;
+    if !repo.eq_ignore_ascii_case(DLW_REPO) {
+        return None;
+    }
+    let refuse = |reasons: &[String]| {
+        Some(format!(
+            "closing {DLW_REPO}#{number} is refused: {}. {DLW_DONE}",
+            reasons.join("; ")
+        ))
+    };
+    let unconfirmed = |what: String, error: String| {
+        refuse(&[format!(
+            "{what} could not be read ({error}); a close the forge cannot confirm is refused"
+        )])
+    };
+    let Some(gh) = forge.gh else {
+        return unconfirmed(
+            format!("whether #{number} is on the DLW map and its act passed"),
+            "no `gh` is on PATH (or AIKIT_GH_BIN)".into(),
+        );
+    };
+    let read = |path: String| forge_json(forge.runner, gh, &["api".into(), path], forge.deadline);
+    match read(format!("repos/{DLW_REPO}/issues/{number}/parent")) {
+        Ok(parent) if parent["number"].as_u64() == Some(DLW_MAP) => {}
+        Ok(_) => return None,
+        Err(error) if error.contains("HTTP 404") => return None,
+        Err(error) => return unconfirmed(format!("#{number}'s map"), error),
+    }
+    let issue = match read(format!("repos/{DLW_REPO}/issues/{number}")) {
+        Ok(issue) => issue,
+        Err(error) => return unconfirmed(format!("#{number}"), error),
+    };
+    let mut reasons = Vec::new();
+
+    // Who built it: the sessions that claimed it or committed working it.
+    let hows: Vec<String> = ticket_builders(state, DLW_REPO, number)
+        .into_iter()
+        .filter(|mark| mark.client == closer.client && mark.session == closer.session)
+        .map(|mark| mark.how)
+        .collect();
+    if !hows.is_empty() {
+        reasons.push(format!(
+            "this session ({}:{}) built it: it {}",
+            closer.client,
+            closer.session,
+            hows.join(", ")
+        ));
+    }
+
+    // The act.
+    let Some(act) = ticket_act(issue["body"].as_str().unwrap_or_default()) else {
+        reasons.push("its body names no act: add a line `Act: <act-id>` naming the person's act — one act a person does on a fresh Mac (open-a-world, list-my-agents, talk-to-an-agent, run-a-factory-task, day-fills-and-closes)".into());
+        return refuse(&reasons);
+    };
+
+    // The landed commit: the close's `Landed:` line, the ticket's latest
+    // comment's, else the latest merged PR that references the ticket.
+    let mut landing: Vec<String> = Vec::new();
+    let mut landed = flag_value(&close, &["--comment", "-c"])
+        .as_deref()
+        .and_then(landed_commit);
+    let mut unread = Vec::new();
+    if landed.is_none() {
+        match read(format!(
+            "repos/{DLW_REPO}/issues/{number}/comments?per_page=100"
+        )) {
+            Ok(comments) => {
+                landed = comments
+                    .as_array()
+                    .and_then(|all| all.last())
+                    .and_then(|last| last["body"].as_str())
+                    .and_then(landed_commit)
+            }
+            Err(error) => unread.push(format!("its comments ({error})")),
+        }
+    }
+    if landed.is_none() {
+        let prs = read(format!(
+            "repos/{DLW_REPO}/issues/{number}/timeline?per_page=100"
+        ));
+        let merged = prs.as_ref().ok().and_then(|events| {
+            events
+                .as_array()?
+                .iter()
+                .filter(|e| e["event"] == "cross-referenced")
+                .map(|e| &e["source"]["issue"])
+                .filter(|i| {
+                    i["repository_url"].as_str().is_some_and(|url| {
+                        url.to_lowercase()
+                            .ends_with(&format!("/repos/{}", DLW_REPO.to_lowercase()))
+                    })
+                })
+                .filter_map(|i| {
+                    Some((
+                        i["pull_request"]["merged_at"].as_str()?,
+                        i["number"].as_u64()?,
+                    ))
+                })
+                .max()
+                .map(|(_, pr)| pr)
+        });
+        if let Err(error) = &prs {
+            unread.push(format!("its timeline ({error})"));
+        }
+        if let Some(pr) = merged {
+            match read(format!("repos/{DLW_REPO}/pulls/{pr}")) {
+                Ok(pull) => landed = pull["merge_commit_sha"].as_str().and_then(commit_sha),
+                Err(error) => unread.push(format!("PR #{pr} ({error})")),
+            }
+            if let Ok(commits) = read(format!("repos/{DLW_REPO}/pulls/{pr}/commits?per_page=100")) {
+                landing.extend(
+                    commits
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .filter_map(|c| c["sha"].as_str().and_then(commit_sha)),
+                );
+            }
+        }
+    }
+    let Some(sha) = landed else {
+        let mut words = format!(
+            "no landed commit is named for act `{act}`: put a line `Landed: <sha>` in the close's --comment, or merge a PR that references #{number}"
+        );
+        if !unread.is_empty() {
+            words.push_str(&format!(" ({} could not be read)", unread.join(", ")));
+        }
+        reasons.push(words);
+        return refuse(&reasons);
+    };
+    let short: String = sha.chars().take(7).collect();
+    landing.push(sha.clone());
+
+    // The act passed at the landed commit.
+    let gate = format!(
+        "the spine gate posts spine/{act} when the act's script passes against the real programs"
+    );
+    match read(format!("repos/{DLW_REPO}/commits/{sha}/status")) {
+        Ok(combined) => {
+            landing.extend(combined["sha"].as_str().and_then(commit_sha));
+            let context = format!("spine/{act}");
+            let state = combined["statuses"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .find(|s| s["context"].as_str() == Some(context.as_str()))
+                .map(|s| s["state"].as_str().unwrap_or("unreadable").to_owned());
+            match state.as_deref() {
+                Some("success") => {}
+                Some(state) => reasons.push(format!(
+                    "the landed commit {short} carries `{context}` as `{state}`, not `success`; {gate}"
+                )),
+                None => reasons.push(format!(
+                    "the landed commit {short} carries no `{context}` status; {gate}"
+                )),
+            }
+        }
+        Err(error) => reasons.push(format!(
+            "the statuses of the landed commit {short} could not be read ({error}), so `spine/{act}` is not shown green; {gate}"
+        )),
+    }
+
+    // The closer authored none of the landing commits.
+    if let Some(ledger) = closer.ledger {
+        for own in &ledger.authored {
+            let own = own.to_ascii_lowercase();
+            if landing
+                .iter()
+                .any(|c| c.starts_with(&own) || own.starts_with(c.as_str()))
+            {
+                reasons.push(format!(
+                    "this session ({}:{}) authored the landing commit {own}",
+                    closer.client, closer.session
+                ));
+            }
+        }
+    }
+    (!reasons.is_empty()).then(|| refuse(&reasons)).flatten()
+}
+
 /// The use check, on a PreToolUse: why this tool call's close of the
 /// session's claimed ticket must be refused, or `None`. Every other call
 /// answers from the command text alone, before any file is read.
 pub fn check_resolution(request: &EntryRequest<'_>) -> Result<Option<String>> {
+    let runner = SystemRunner::new().with_timeout(FORGE_CALL);
+    let gh = forge_binary();
+    check_resolution_with(request, &runner, gh.as_deref())
+}
+
+/// [`check_resolution`] through a given runner and `gh`: the seam the
+/// forge reads go through.
+pub fn check_resolution_with(
+    request: &EntryRequest<'_>,
+    runner: &dyn CommandRunner,
+    gh: Option<&Path>,
+) -> Result<Option<String>> {
     let event = request.event;
     let Some(command) = tool_command(&event.payload) else {
         return Ok(None);
@@ -3761,15 +4157,39 @@ pub fn check_resolution(request: &EntryRequest<'_>) -> Result<Option<String>> {
     let Some(session) = crate::refocus::hook_session(&event.payload) else {
         return Ok(None);
     };
-    let Some(ledger) = load_ledger(request.state, request.client, &session) else {
-        return Ok(None);
+    let ledger = load_ledger(request.state, request.client, &session);
+    // A DLW close is checked whatever record the closer keeps: an
+    // independent closer need not have claimed anything.
+    let spine = spine_refusal(
+        &Forge {
+            runner,
+            gh,
+            deadline: Instant::now() + SPINE_BUDGET,
+        },
+        request.state,
+        &Closer {
+            client: request.client,
+            session: &session,
+            ledger: ledger.as_ref(),
+        },
+        &command,
+        &|| {
+            ledger
+                .as_ref()
+                .map(|l| l.checkout.clone())
+                .or_else(|| event.cwd.as_deref().map(Path::to_path_buf))
+                .or_else(|| std::env::current_dir().ok())
+                .and_then(|checkout| checkout_repo(runner, &checkout))
+        },
+    );
+    let Some(ledger) = ledger else {
+        return Ok(spine);
     };
-    let runner = SystemRunner::new().with_timeout(FORGE_CALL);
     let check = resolution_check(&command, &ledger, |ticket| {
-        let gh = forge_binary().ok_or_else(|| "no `gh` is on PATH".to_owned())?;
+        let gh = gh.ok_or_else(|| "no `gh` is on PATH".to_owned())?;
         let comments = forge_json(
-            &runner,
-            &gh,
+            runner,
+            gh,
             &[
                 "api".into(),
                 format!(
@@ -3785,8 +4205,12 @@ pub fn check_resolution(request: &EntryRequest<'_>) -> Result<Option<String>> {
             .and_then(|last| last["body"].as_str())
             .map(str::to_owned))
     });
-    let Some(check) = check else {
-        return Ok(None);
+    let Some(mut check) = check else {
+        return Ok(spine);
+    };
+    check.refusal = match (check.refusal.take(), spine.clone()) {
+        (Some(practice), Some(spine)) => Some(format!("{practice}\n{spine}")),
+        (practice, spine) => practice.or(spine),
     };
     // A close that goes through leaves the session's evidence of its
     // practice; a refused one leaves only the refusal.
@@ -3808,7 +4232,7 @@ pub fn check_resolution(request: &EntryRequest<'_>) -> Result<Option<String>> {
             "ticket": ledger.ticket.as_ref().map(ClaimedTicket::label),
             "loaded": ledger.loaded, "invoked": ledger.invoked,
             "relied_upon": check.relied_upon, "findings": findings,
-            "refused": check.refusal,
+            "spine": spine, "refused": check.refusal,
         }),
     );
     Ok(check.refusal)
@@ -3830,15 +4254,64 @@ fn observe(request: &EntryRequest<'_>, session: &str) -> Result<Option<String>> 
                 .filter(|words| words.iter().any(|w| w.contains("claim:")))
                 .find_map(|words| gh_issue_target(words, "edit"))
         });
-    if used.is_empty() && claim.is_none() {
+    let committed = command
+        .as_deref()
+        .filter(|c| c.contains("git") && c.contains("commit"))
+        .and_then(|_| tool_stdout(&event.payload))
+        .map(|stdout| reported_commits(&stdout))
+        .unwrap_or_default();
+    if used.is_empty() && claim.is_none() && committed.is_empty() {
         return Ok(None);
     }
-    let Some(mut ledger) = load_ledger(request.state, request.client, session) else {
+    let ledger = load_ledger(request.state, request.client, session);
+    // A claim makes its session a builder of the ticket, whatever record the
+    // session keeps; the DLW close refuses it (`spine_refusal`).
+    let claimed = command.as_deref().and_then(|c| {
+        shell_commands(c).iter().find_map(|words| {
+            flag_value(words, &["--add-label"])
+                .filter(|labels| labels.contains("claim:"))
+                .and_then(|_| gh_issue_target(words, "edit"))
+        })
+    });
+    if let Some((repo, number)) = &claimed {
+        let repo = repo.clone().or_else(|| {
+            let runner = SystemRunner::new().with_timeout(FORGE_CALL);
+            ledger
+                .as_ref()
+                .map(|l| l.checkout.clone())
+                .or_else(|| event.cwd.as_deref().map(Path::to_path_buf))
+                .and_then(|checkout| checkout_repo(&runner, &checkout))
+        });
+        if let Some(repo) = repo {
+            record_builder(
+                request.state,
+                &repo,
+                *number,
+                request.client,
+                session,
+                &format!("claimed #{number}"),
+            );
+        }
+    }
+    let Some(mut ledger) = ledger else {
         return Ok(None);
     };
-    let before = ledger.loaded.len() + ledger.invoked.len();
+    let before = ledger.loaded.len() + ledger.invoked.len() + ledger.authored.len();
     ledger.loaded.extend(used);
     ledger.invoked.extend(practice_invoked(event));
+    if let Some(ticket) = &ledger.ticket {
+        for sha in &committed {
+            record_builder(
+                request.state,
+                &ticket.repo,
+                ticket.number,
+                request.client,
+                session,
+                &format!("committed {sha} while working it"),
+            );
+        }
+    }
+    ledger.authored.extend(committed);
     let mut text = None;
     if let Some((repo, number)) = claim {
         let held = ledger.ticket.as_ref().is_some_and(|t| t.number == number);
@@ -3893,7 +4366,9 @@ fn observe(request: &EntryRequest<'_>, session: &str) -> Result<Option<String>> 
             }
         }
     }
-    if ledger.loaded.len() + ledger.invoked.len() != before || text.is_some() {
+    if ledger.loaded.len() + ledger.invoked.len() + ledger.authored.len() != before
+        || text.is_some()
+    {
         store_ledger(request.state, &ledger);
     }
     Ok(text)
@@ -4039,6 +4514,7 @@ mod tests {
             loaded: BTreeSet::new(),
             invoked: BTreeSet::new(),
             tickets_read: BTreeSet::new(),
+            authored: BTreeSet::new(),
             aikit_session: None,
         };
         store_ledger(temp.path(), &ledger);
@@ -4469,6 +4945,7 @@ mod tests {
             loaded: loaded.iter().map(|n| (*n).to_owned()).collect(),
             invoked: BTreeSet::new(),
             tickets_read: BTreeSet::new(),
+            authored: BTreeSet::new(),
             aikit_session: None,
         }
     }
@@ -4831,6 +5308,12 @@ mod tests {
                 on($event, &config, temp.path(), &view, &roots)
             };
         }
+        // No forge answers here: the checkout's origin cannot be read, so the
+        // DLW close gate is not this test's, and nothing reaches GitHub.
+        let offline = aikit_adapters::runner::ScriptedRunner::new();
+        let check_resolution = |request: &EntryRequest<'_>| {
+            check_resolution_with(request, &offline, Some(Path::new(GH)))
+        };
         let close = tool(
             HookEventKind::PreToolUse,
             "Bash",
@@ -4890,6 +5373,362 @@ mod tests {
             json!({"command": "cargo test"}),
         );
         assert_eq!(check_resolution(&run!(&other)).unwrap(), None);
+    }
+
+    // The DLW close (map #706): the act passed at the landed commit, and the
+    // closer did not build it.
+
+    const GH: &str = "/usr/bin/gh";
+    const LANDED: &str = "abc1234def5678abc1234def5678abc1234def56";
+
+    fn ticket_849(body: &str) -> String {
+        json!({"number": 849, "title": "Open a world on a fresh Mac", "body": body,
+            "labels": [{"name": "wayfinder:task"}, {"name": "claim:account-1"}]})
+        .to_string()
+    }
+
+    fn status(context: &str, state: &str) -> String {
+        json!({"sha": LANDED, "state": state,
+            "statuses": [{"context": "Vercel", "state": "failure"}, {"context": context, "state": state}]})
+        .to_string()
+    }
+
+    /// The forge for O-I 849 under map 706, its act passed at `LANDED`.
+    fn spine_forge(body: &str, status_body: &str) -> aikit_adapters::runner::ScriptedRunner {
+        aikit_adapters::runner::ScriptedRunner::new()
+            .on(
+                "remote get-url origin",
+                "https://github.com/EpiLogos/O-I.git\n",
+            )
+            .on("repos/EpiLogos/O-I/issues/849", &ticket_849(body))
+            .on(
+                "repos/EpiLogos/O-I/issues/849/parent",
+                &json!({"number": 706, "labels": [{"name": "wayfinder:map"}], "body": MAP_706_BODY}).to_string(),
+            )
+            .on("repos/EpiLogos/O-I/issues/849/comments", "[]")
+            .on("repos/EpiLogos/O-I/issues/849/timeline", "[]")
+            .on("repos/EpiLogos/O-I/commits/abc1234/status", status_body)
+            .failing(
+                "repos/EpiLogos/O-I/issues/850/parent",
+                1,
+                "gh: No parent issue found (HTTP 404)",
+            )
+    }
+
+    const ACT_BODY: &str = "**Act:** `open-a-world`\n**Owner:** O:I\n**Existing code for this job:** none\n**Done:** spine/open-a-world green";
+
+    fn spine(
+        runner: &aikit_adapters::runner::ScriptedRunner,
+        state: &Path,
+        session: &str,
+        ledger: Option<&EntryLedger>,
+        command: &str,
+    ) -> Option<String> {
+        spine_refusal(
+            &Forge {
+                runner,
+                gh: Some(Path::new(GH)),
+                deadline: Instant::now() + Duration::from_secs(30),
+            },
+            state,
+            &Closer {
+                client: "claude",
+                session,
+                ledger,
+            },
+            command,
+            &|| Some("EpiLogos/O-I".to_owned()),
+        )
+    }
+
+    #[test]
+    fn a_dlw_close_without_an_act_line_is_refused_with_words_to_name_the_act() {
+        let temp = tempfile::tempdir().unwrap();
+        let forge = spine_forge(
+            "Build the open-a-world journey.",
+            &status("spine/open-a-world", "success"),
+        );
+        let close = "gh issue close 849 --comment 'Landed: abc1234'";
+        let refused = spine(&forge, temp.path(), "verifier", None, close)
+            .expect("a DLW ticket that names no act is never closed");
+        assert!(
+            refused.starts_with("closing EpiLogos/O-I#849 is refused: its body names no act"),
+            "{refused}"
+        );
+        assert!(
+            refused.contains("add a line `Act: <act-id>` naming the person's act"),
+            "{refused}"
+        );
+        assert!(refused.contains("open-a-world, list-my-agents, talk-to-an-agent, run-a-factory-task, day-fills-and-closes"), "{refused}");
+        // The act parses from the template's own spelling, and any id shape.
+        assert_eq!(ticket_act(ACT_BODY).as_deref(), Some("open-a-world"));
+        assert_eq!(
+            ticket_act("- Act: talk-to-an-agent").as_deref(),
+            Some("talk-to-an-agent")
+        );
+        assert_eq!(
+            ticket_act("Act: some-new-act-2.").as_deref(),
+            Some("some-new-act-2")
+        );
+        assert_eq!(ticket_act("Actions: none\nAct: Open A World"), None);
+    }
+
+    #[test]
+    fn a_dlw_close_is_refused_when_the_spine_status_is_missing_or_not_success() {
+        let temp = tempfile::tempdir().unwrap();
+        let close = "gh issue close 849 --comment 'Verified on a fresh Mac.\nLanded: `abc1234`'";
+        let gate = "the spine gate posts spine/open-a-world when the act's script passes against the real programs";
+
+        let missing = spine_forge(ACT_BODY, &status("spine/list-my-agents", "success"));
+        let refused = spine(&missing, temp.path(), "verifier", None, close).unwrap();
+        assert!(
+            refused.contains("the landed commit abc1234 carries no `spine/open-a-world` status"),
+            "{refused}"
+        );
+        assert!(refused.contains(gate), "{refused}");
+
+        for state in ["failure", "pending", "error"] {
+            let failed = spine_forge(ACT_BODY, &status("spine/open-a-world", state));
+            let refused = spine(&failed, temp.path(), "verifier", None, close).unwrap();
+            assert!(
+                refused.contains(&format!("the landed commit abc1234 carries `spine/open-a-world` as `{state}`, not `success`")),
+                "{refused}"
+            );
+            assert!(refused.contains(gate), "{refused}");
+        }
+
+        // No `Landed:` line and no merged PR: nothing to read a status from.
+        let unnamed = spine_forge(ACT_BODY, &status("spine/open-a-world", "success"));
+        let refused = spine(
+            &unnamed,
+            temp.path(),
+            "verifier",
+            None,
+            "gh issue close 849",
+        )
+        .unwrap();
+        assert!(refused.contains("no landed commit is named for act `open-a-world`: put a line `Landed: <sha>` in the close's --comment, or merge a PR that references #849"), "{refused}");
+
+        // A status the forge cannot read is a refusal, never a pass.
+        let unread = spine_forge(ACT_BODY, &status("spine/open-a-world", "success")).failing(
+            "repos/EpiLogos/O-I/commits/abc1234/status",
+            1,
+            "HTTP 502",
+        );
+        let refused = spine(&unread, temp.path(), "verifier", None, close).unwrap();
+        assert!(refused.contains("could not be read"), "{refused}");
+    }
+
+    #[test]
+    fn a_dlw_close_by_the_session_that_built_it_is_refused() {
+        let temp = tempfile::tempdir().unwrap();
+        let state = temp.path();
+        let view = empty_view();
+        let roots = BTreeMap::new();
+        let config = EntryConfig::default();
+        let post = |session: &str, input: Value, response: Value| {
+            HookEvent::new(
+                "claude",
+                HookEventKind::PostToolUse,
+                json!({"session_id": session, "tool_input": input, "tool_response": response}),
+            )
+            .with_tool_name("Bash")
+        };
+        // The builder's entry held 849; it claimed it, then committed.
+        let mut ticket = claimed_723();
+        ticket.number = 849;
+        let mut ledger = ledger_with(ticket, &[]);
+        ledger.session = "builder".into();
+        store_ledger(state, &ledger);
+        let claim = post(
+            "builder",
+            json!({"command": "gh issue edit 849 -R EpiLogos/O-I --add-label claim:account-1"}),
+            json!({"stdout": "https://github.com/EpiLogos/O-I/issues/849\n"}),
+        );
+        let commit = post(
+            "builder",
+            json!({"command": "git commit -m 'Open a world on a fresh Mac'"}),
+            json!({"stdout": "[dlw/open-a-world abc1234] Open a world on a fresh Mac\n 2 files changed\n"}),
+        );
+        for event in [&claim, &commit] {
+            let request = EntryRequest {
+                event,
+                client: "claude",
+                aikit_session: None,
+                config: &config,
+                state,
+                central: None,
+                view: &view,
+                capsule_roots: &roots,
+            };
+            assert_eq!(deliver(&request).unwrap(), None);
+        }
+        let kept = load_ledger(state, "claude", "builder").unwrap();
+        assert_eq!(kept.authored, BTreeSet::from(["abc1234".to_owned()]));
+
+        let close = "gh issue close 849 --comment 'Landed: abc1234'";
+        let green = spine_forge(ACT_BODY, &status("spine/open-a-world", "success"));
+        let refused = spine(&green, state, "builder", Some(&kept), close)
+            .expect("the session that built it never closes it");
+        assert!(
+            refused.contains("this session (claude:builder) built it: it claimed #849"),
+            "{refused}"
+        );
+        assert!(
+            refused.contains("this session (claude:builder) authored the landing commit abc1234"),
+            "{refused}"
+        );
+        assert!(refused.ends_with("Done for a DLW ticket: `spine/<act>` is green at the landed commit, and a session that did not build it closes the ticket."), "{refused}");
+
+        // A session whose record is gone is still known by the claim it made.
+        let refused = spine(&green, state, "builder", None, close).unwrap();
+        assert!(refused.contains("built it: it claimed #849"), "{refused}");
+    }
+
+    #[test]
+    fn a_dlw_close_goes_through_when_the_act_passed_and_another_session_closes() {
+        let temp = tempfile::tempdir().unwrap();
+        let state = temp.path();
+        record_builder(
+            state,
+            "EpiLogos/O-I",
+            849,
+            "claude",
+            "builder",
+            "claimed #849",
+        );
+        let green = spine_forge(ACT_BODY, &status("spine/open-a-world", "success"));
+        assert_eq!(
+            spine(
+                &green,
+                state,
+                "verifier",
+                None,
+                "gh issue close 849 --comment 'Landed: abc1234'"
+            ),
+            None
+        );
+
+        // The landed commit read from the merged PR that references the ticket.
+        let by_pr = spine_forge(ACT_BODY, &status("spine/open-a-world", "success"))
+            .on(
+                "repos/EpiLogos/O-I/issues/849/timeline",
+                &json!([
+                    {"event": "cross-referenced", "source": {"issue": {"number": 12, "repository_url": "https://api.github.com/repos/EpiLogos/ai-kit", "pull_request": {"merged_at": "2026-11-12T00:00:00Z"}}}},
+                    {"event": "cross-referenced", "source": {"issue": {"number": 990, "repository_url": "https://api.github.com/repos/EpiLogos/O-I", "pull_request": {"merged_at": "2026-11-12T10:00:00Z"}}}},
+                    {"event": "cross-referenced", "source": {"issue": {"number": 991, "repository_url": "https://api.github.com/repos/EpiLogos/O-I", "pull_request": {"merged_at": null}}}}
+                ]).to_string(),
+            )
+            .on("repos/EpiLogos/O-I/pulls/990", &json!({"number": 990, "merge_commit_sha": "abc1234"}).to_string())
+            .on("repos/EpiLogos/O-I/pulls/990/commits", &json!([{"sha": "fedcba9876543210fedcba9876543210fedcba98"}]).to_string());
+        assert_eq!(
+            spine(&by_pr, state, "verifier", None, "gh issue close 849"),
+            None
+        );
+        // ...and its commits are the landing commits the closer must not own.
+        let mut ledger = ledger_with(claimed_723(), &[]);
+        ledger.session = "verifier".into();
+        ledger.authored.insert("fedcba9".into());
+        let refused = spine(
+            &by_pr,
+            state,
+            "verifier",
+            Some(&ledger),
+            "gh issue close 849",
+        )
+        .unwrap();
+        assert!(
+            refused.contains("authored the landing commit fedcba9"),
+            "{refused}"
+        );
+
+        // Not on the map, another repository, or no close: not this gate.
+        assert_eq!(
+            spine(&green, state, "verifier", None, "gh issue close 850"),
+            None
+        );
+        assert_eq!(
+            spine(
+                &green,
+                state,
+                "verifier",
+                None,
+                "gh issue close 849 -R EpiLogos/ai-kit"
+            ),
+            None
+        );
+        assert_eq!(
+            spine(&green, state, "verifier", None, "gh issue view 849"),
+            None
+        );
+
+        // The whole hook path: a session with no entry record is still checked.
+        let view = empty_view();
+        let roots = BTreeMap::new();
+        let config = EntryConfig::default();
+        let close = |command: &str| {
+            HookEvent::new(
+                "claude",
+                HookEventKind::PreToolUse,
+                json!({"session_id": "verifier", "tool_input": {"command": command}}),
+            )
+            .with_tool_name("Bash")
+            .in_cwd("/c/worktrees/env-2/o-i")
+        };
+        let check = |event: &HookEvent, runner: &aikit_adapters::runner::ScriptedRunner| {
+            check_resolution_with(
+                &EntryRequest {
+                    event,
+                    client: "claude",
+                    aikit_session: None,
+                    config: &config,
+                    state,
+                    central: None,
+                    view: &view,
+                    capsule_roots: &roots,
+                },
+                runner,
+                Some(Path::new(GH)),
+            )
+            .unwrap()
+        };
+        assert_eq!(
+            check(&close("gh issue close 849 -c 'Landed: abc1234'"), &green),
+            None
+        );
+        assert!(
+            green
+                .call_lines()
+                .iter()
+                .any(|l| l.contains("commits/abc1234/status")),
+            "the passing close read the status: {:?}",
+            green.call_lines()
+        );
+        let red = spine_forge(ACT_BODY, &status("spine/open-a-world", "failure"));
+        let refused = check(&close("gh issue close 849 -c 'Landed: abc1234'"), &red).unwrap();
+        assert!(refused.contains("as `failure`"), "{refused}");
+    }
+
+    #[test]
+    fn a_dlw_ticket_s_entry_hands_out_the_template() {
+        let mut ticket = claimed_723();
+        ticket.act = Some("open-a-world".into());
+        let lines = ticket_lines(&ticket, &[]).join("\n");
+        assert!(!DLW_TEMPLATE.is_empty());
+        assert!(lines.contains(DLW_TEMPLATE), "{lines}");
+        for field in ["Act:", "Owner:", "Existing code for this job:", "Done:"] {
+            assert!(DLW_TEMPLATE.contains(field), "{field}");
+        }
+        assert!(
+            lines.contains("this ticket's act: `open-a-world`"),
+            "{lines}"
+        );
+        ticket.act = None;
+        let lines = ticket_lines(&ticket, &[]).join("\n");
+        assert!(lines.contains("this ticket names no act"), "{lines}");
+        // Off the DLW map the template is not handed out.
+        ticket.map = Some(1);
+        assert!(!ticket_lines(&ticket, &[]).join("\n").contains(DLW_TEMPLATE));
     }
 
     fn native_work_scratch() -> tempfile::TempDir {
@@ -5004,6 +5843,7 @@ mod tests {
             loaded: BTreeSet::new(),
             invoked: BTreeSet::new(),
             tickets_read: BTreeSet::new(),
+            authored: BTreeSet::new(),
             aikit_session: None,
         };
         let state = world.join("owned-entry-state");
