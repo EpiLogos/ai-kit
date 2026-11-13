@@ -90,7 +90,7 @@ First commands:
 aikit world status          # where am I: the effective context reading
 aikit search <name>         # find a capability, Skill or resource by name
 aikit explain <ref>         # why a capability has its current state
-aikit client status         # what AIKit does for each harness on this machine
+aikit client status         # each harness: detected, AIKit integration, credential (own login counts)
 aikit praxis list           # the Skills / Methods this scope carries
 aikit ui                    # the terminal application
 ```

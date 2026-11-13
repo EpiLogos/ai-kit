@@ -6147,7 +6147,17 @@ pub enum ClientSub {
     Install(ClientInstallArgs),
     /// Launch a client with the current context's projection.
     Launch(ClientLaunchArgs),
-    /// Report a client's installation and projection status.
+    /// Report each client's detection, AIKit integration, credential and
+    /// projection status.
+    ///
+    /// `detection` says whether the harness is on this machine.
+    /// `aikit_integration` says whether AIKit's entries stand in its install
+    /// seam (installed | outdated | absent | unknown); `installed` is its
+    /// deprecated boolean alias and never meant the harness is installed.
+    /// `credential` is ok when each provider is reached by a binding, its env
+    /// var, or the harness's own login (its declared logged-in check, the
+    /// same read as `aikit harness auth <harness> --check`), and
+    /// `credential_via` names which path reached each provider.
     Status(ClientStatusArgs),
 }
 

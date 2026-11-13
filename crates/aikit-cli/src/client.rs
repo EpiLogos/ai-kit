@@ -47,6 +47,7 @@ use aikit_adapters::clients::{
     opencode::OpencodeAdapter, pi::PiAdapter, qoder::QoderAdapter, qwen::QwenAdapter,
     zcode::ZcodeAdapter, ClientAdapter,
 };
+use aikit_adapters::runner::CommandRunner;
 use aikit_adapters::tool_sources::{
     plan_tools_projection, ToolSourceEntry, ToolsProjectionOutcome,
 };
@@ -1605,6 +1606,8 @@ pub fn status(service: &Service, only: Option<&str>) -> Result<Vec<serde_json::V
             reason: "no detection spawn was performed".to_string(),
         });
     let members = roster_members(&detection);
+    // The bounded probe runner the harnesses' own logged-in checks run on.
+    let runner = aikit_adapters::runner::SystemRunner::probe();
     let mut rows = Vec::new();
     for member in &members {
         if let Some(only) = only {
@@ -1623,7 +1626,8 @@ pub fn status(service: &Service, only: Option<&str>) -> Result<Vec<serde_json::V
             &dirs,
             &detection,
             &surface_probe,
-            service.home(),
+            service,
+            &runner,
         )?);
     }
     Ok(rows)
@@ -1636,16 +1640,27 @@ fn client_row(
     dirs: &ClientDirs,
     detection: &DetectionOutcome,
     surface_probe: &ProbeOutcome,
-    home: &aikit_store::AikitHome,
+    service: &Service,
+    runner: &dyn CommandRunner,
 ) -> Result<serde_json::Value> {
     match member {
         RosterMember::Broker => broker_row(rc, dirs),
         RosterMember::Descriptor { entry, overlay } => match overlay {
-            Some(overlay) => overlaid_row(overlay, rc, dirs, detection, surface_probe, home),
-            None => generic_row(entry, rc, dirs, detection, surface_probe, home),
+            Some(overlay) => {
+                overlaid_row(overlay, rc, dirs, detection, surface_probe, service, runner)
+            }
+            None => generic_row(
+                entry,
+                rc,
+                dirs,
+                detection,
+                surface_probe,
+                service.home(),
+                runner,
+            ),
         },
         RosterMember::Unrecorded { overlay } => {
-            overlaid_row(overlay, rc, dirs, detection, surface_probe, home)
+            overlaid_row(overlay, rc, dirs, detection, surface_probe, service, runner)
         }
     }
 }
@@ -1661,6 +1676,10 @@ fn broker_row(rc: &ResolvedContext, dirs: &ClientDirs) -> Result<serde_json::Val
         "state": "self",
         "dispatch": "self",
         "config_dir": config_dir.display().to_string(),
+        "config_dir_exists": config_dir.exists(),
+        "aikit_integration": "self",
+        "aikit_integration_reason": null,
+        // Deprecated alias: the broker is AIKit itself, standing when its home does.
         "installed": config_dir.exists(),
         "effect": planned.as_ref().ok().map(|p| adapter.activation_effect(None, p).describe()),
         "items": planned.as_ref().ok().map(|_| rc.view.active.len()),
@@ -1672,6 +1691,7 @@ fn broker_row(rc: &ResolvedContext, dirs: &ClientDirs) -> Result<serde_json::Val
         "probe_reason": null,
         "credential": "self",
         "credential_reason": null,
+        "credential_via": [],
         "detection": "self",
         "detection_reason": null,
         "gap": null,
@@ -1688,8 +1708,10 @@ fn overlaid_row(
     dirs: &ClientDirs,
     detection: &DetectionOutcome,
     surface_probe: &ProbeOutcome,
-    home: &aikit_store::AikitHome,
+    service: &Service,
+    runner: &dyn CommandRunner,
 ) -> Result<serde_json::Value> {
+    let home = service.home();
     let leg = detection_leg(detection, overlay.catalog_slug);
     // The capability intake is this row's own probe-shaped spawn: bounded, and
     // classified into the shared vocabulary so a hanging or missing
@@ -1716,6 +1738,12 @@ fn overlaid_row(
     // descriptor's seam wins when it resolved; the detection probe is the
     // read-model fallback for adapter-only harnesses; the adapter's default
     // home is the dispatch clients' fallback.
+    // Whether AIKit's integration stands in the harness's install seam, read
+    // where AIKit has one to read (a dispatch client with its descriptor).
+    let mut integration = Integration::unknown(
+        "AIKit has no install seam to read for this harness here: its capability \
+         descriptor did not resolve or it is not a dispatch client",
+    );
     let (adapter, config_dir): (Box<dyn TargetAdapter>, Option<PathBuf>) = match overlay.reach {
         Reach::SelfOwned { build } => {
             let (adapter, config_dir) = build(dirs)?;
@@ -1726,7 +1754,17 @@ fn overlaid_row(
                 Some(CapabilityOutcome::Descriptor(capability)) => Some((**capability).clone()),
                 _ => None,
             };
+            let has_seam = resolved.is_some();
             let (adapter, config_dir) = build(dirs, resolved)?;
+            if has_seam {
+                let install_dir = effective_config_dir(overlay.name, config_dir.clone());
+                integration = match service.working_hook_events(overlay.name) {
+                    Ok(working) => {
+                        aikit_integration(adapter.as_ref(), overlay.name, &install_dir, &working)
+                    }
+                    Err(error) => Integration::unknown(error.message()),
+                };
+            }
             (adapter as Box<dyn TargetAdapter>, Some(config_dir))
         }
         Reach::AdapterOnly { build } => {
@@ -1796,9 +1834,10 @@ fn overlaid_row(
         Reach::Client { .. } => "client",
         Reach::AdapterOnly { .. } => "adapter-only",
     };
-    // The credential pre-check: presence facts only (binding records, ambient
-    // env-var presence, the harness's own login store), never secret values.
-    let credential = credential_outcome(Some(home), dirs, Some(overlay));
+    // The credential pre-check: binding records, ambient env-var presence and
+    // the harness's own login (its declared logged-in check), never secret
+    // values.
+    let credential = credential_outcome(Some(home), dirs, Some(overlay), runner);
 
     Ok(serde_json::json!({
         "client": overlay.name,
@@ -1806,7 +1845,13 @@ fn overlaid_row(
         "state": state,
         "dispatch": dispatch_name,
         "config_dir": config_dir.as_ref().map(|d| d.display().to_string()),
-        "installed": config_dir.as_ref().map(|d| d.exists()),
+        "config_dir_exists": config_dir.as_ref().map(|d| d.exists()),
+        "aikit_integration": integration.state,
+        "aikit_integration_reason": integration.reason,
+        // Deprecated alias of `aikit_integration`: true when AIKit's entries
+        // are in the harness's install seam. It never meant the harness is
+        // installed; `detection` says that.
+        "installed": integration.added(),
         "effect": planned.as_ref().ok().map(|p| adapter.activation_effect(None, p).describe()),
         "items": planned.as_ref().ok().map(|_| semantic_items),
         "materialization_items": planned.as_ref().ok().map(|p| p.items.len()),
@@ -1815,8 +1860,9 @@ fn overlaid_row(
         "capability_reason": capability_reason,
         "probe": probe.as_str(),
         "probe_reason": probe_reason(&probe),
-        "credential": credential.as_str(),
-        "credential_reason": probe_reason(&credential),
+        "credential": credential.outcome.as_str(),
+        "credential_reason": probe_reason(&credential.outcome),
+        "credential_via": credential.via,
         "detection": detection_name,
         "detection_reason": detection_reason,
         "admission": {
@@ -1841,6 +1887,7 @@ fn generic_row(
     detection: &DetectionOutcome,
     surface_probe: &ProbeOutcome,
     home: &aikit_store::AikitHome,
+    runner: &dyn CommandRunner,
 ) -> Result<serde_json::Value> {
     let leg = detection_leg(detection, &entry.slug);
     let capability_probe = ProbeTracker::shared();
@@ -1871,7 +1918,7 @@ fn generic_row(
         .map(|spec| expand_seam(&spec, &dirs.home, &dirs.tree));
     // No overlay means no AIKit profile: there are no credential facts to
     // pre-check, and the row says so instead of inventing a gate.
-    let credential = credential_outcome(Some(home), dirs, None);
+    let credential = credential_outcome(Some(home), dirs, None, runner);
 
     Ok(serde_json::json!({
         "client": entry.slug,
@@ -1879,7 +1926,12 @@ fn generic_row(
         "state": state,
         "dispatch": "adapter-only",
         "config_dir": config_dir.as_ref().map(|d| d.display().to_string()),
-        "installed": config_dir.as_ref().map(|d| d.exists()),
+        "config_dir_exists": config_dir.as_ref().map(|d| d.exists()),
+        "aikit_integration": "unknown",
+        "aikit_integration_reason": "no AIKit adapter carries this catalog slug; there is no \
+                                     integration to install or read",
+        // Deprecated alias of `aikit_integration`.
+        "installed": false,
         "effect": null,
         "items": null,
         "materialization_items": null,
@@ -1888,8 +1940,9 @@ fn generic_row(
         "capability_reason": capability_reason,
         "probe": probe.as_str(),
         "probe_reason": probe_reason(&probe),
-        "credential": credential.as_str(),
-        "credential_reason": probe_reason(&credential),
+        "credential": credential.outcome.as_str(),
+        "credential_reason": probe_reason(&credential.outcome),
+        "credential_via": credential.via,
         "detection": detection_name,
         "detection_reason": detection_reason,
         "gap": gap,
@@ -1897,6 +1950,105 @@ fn generic_row(
                    detection record's own disclosure"],
         "error": null,
     }))
+}
+
+/// Whether AIKit's integration — its hook dispatcher entries — stands in a
+/// harness's install seam: `installed` (an install now would change nothing),
+/// `outdated` (AIKit's entries are there but an install now writes them
+/// differently), `absent` (none of AIKit's entries are there), or `unknown`
+/// with the reason. Says nothing about whether the harness itself is
+/// installed; the detection leg answers that.
+struct Integration {
+    state: &'static str,
+    reason: Option<String>,
+}
+
+impl Integration {
+    fn unknown(reason: &str) -> Self {
+        Self {
+            state: "unknown",
+            reason: Some(reason.to_string()),
+        }
+    }
+
+    /// The deprecated `installed` alias: AIKit's entries were added.
+    fn added(&self) -> bool {
+        matches!(self.state, "installed" | "outdated")
+    }
+}
+
+/// Read the integration state by planning the install `aikit client install`
+/// would write (nothing is written) and comparing it with the seam on disk.
+/// JSON documents compare by value, so a harness reformatting its own
+/// settings file does not read as drift.
+fn aikit_integration(
+    adapter: &dyn ClientAdapter,
+    client: &str,
+    install_dir: &Path,
+    working: &std::collections::BTreeSet<aikit_core::hooks::HookEventKind>,
+) -> Integration {
+    let items = match adapter.install_working(install_dir, working) {
+        Ok(items) => items,
+        Err(error) => return Integration::unknown(error.message()),
+    };
+    if items.is_empty() {
+        return Integration::unknown("the adapter installs no durable configuration");
+    }
+    // AIKit's dispatcher entries are known by their command, whatever the
+    // event (`aikit hook dispatch <client> <event>`, layers::dispatch_command).
+    let marker = format!("aikit hook dispatch {client} ");
+    let (mut current, mut ours) = (true, false);
+    let mut seams = Vec::new();
+    for item in &items {
+        let ProjectionItem::Write { path, contents } = item else {
+            return Integration::unknown("the adapter's install is not a configuration write");
+        };
+        let target = install_dir.join(path);
+        seams.push(target.display().to_string());
+        let existing = match std::fs::read_to_string(&target) {
+            Ok(existing) => existing,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                current = false;
+                continue;
+            }
+            Err(error) => {
+                return Integration::unknown(&format!(
+                    "could not read {}: {error}",
+                    target.display()
+                ))
+            }
+        };
+        ours |= existing.contains(&marker);
+        let same = match (
+            serde_json::from_str::<serde_json::Value>(&existing),
+            serde_json::from_str::<serde_json::Value>(contents),
+        ) {
+            (Ok(on_disk), Ok(planned)) => on_disk == planned,
+            _ => existing == *contents,
+        };
+        current &= same;
+    }
+    match (current, ours) {
+        (true, _) => Integration {
+            state: "installed",
+            reason: None,
+        },
+        (false, true) => Integration {
+            state: "outdated",
+            reason: Some(format!(
+                "AIKit's entries are in {} but an install now writes them differently; \
+                 `aikit client install {client}` brings them current",
+                seams.join(", ")
+            )),
+        },
+        (false, false) => Integration {
+            state: "absent",
+            reason: Some(format!(
+                "AIKit's entries are not in {}; `aikit client install {client}` adds them",
+                seams.join(", ")
+            )),
+        },
+    }
 }
 
 /// The display names of a detection leg, shared by overlaid and generic rows.
@@ -1967,33 +2119,53 @@ fn generic_gap_disclosure(entry: &DetectionEntry) -> Option<serde_json::Value> {
     serde_json::to_value(&gap).ok()
 }
 
-/// The credential pre-check for one row: cheap presence facts only — binding
-/// records in the credential store, ambient env-var presence, and the
-/// harness's own login store on disk. Secret values are never read or
-/// rendered; the point is to answer "would a model call have anything to
-/// authenticate with" *before* one is attempted, so the surface reports
-/// `credential-gated` naming what is missing instead of letting the live call
-/// hang or fail opaquely (the expired-OAuth class). A row AIKit has no
-/// credential facts for is `unsupported`, never silently "ok".
+/// One row's credential leg: the outcome, and for each provider the path that
+/// reached it (`binding`, `environment`, `own-login`, `own-login-store`).
+struct CredentialLeg {
+    outcome: ProbeOutcome,
+    via: Vec<serde_json::Value>,
+}
+
+impl CredentialLeg {
+    fn unsupported(reason: String) -> Self {
+        Self {
+            outcome: ProbeOutcome::Unsupported { reason },
+            via: Vec::new(),
+        }
+    }
+}
+
+/// The credential pre-check for one row: whether each provider the harness
+/// declares has something to authenticate with — a binding record in the
+/// credential store, its env var present in the environment, or the harness's
+/// own login. Secret values are never read or rendered. Where the harness
+/// declares its own logged-in check (`claude auth status --json`, `codex login
+/// status`), that bounded read is the own-login fact — the same one `aikit
+/// harness auth <harness> --check` makes; otherwise the login store's presence
+/// on disk is. A provider is ready when any one path delivers. The point is to
+/// answer "would a model call have anything to authenticate with" *before* one
+/// is attempted, so the surface reports `credential-gated` naming what is
+/// missing instead of letting the live call hang or fail opaquely (the
+/// expired-OAuth class). A row AIKit has no credential facts for is
+/// `unsupported`, never silently "ok".
 fn credential_outcome(
     home: Option<&aikit_store::AikitHome>,
     dirs: &ClientDirs,
     overlay: Option<&'static ClientOverlay>,
-) -> ProbeOutcome {
+    runner: &dyn CommandRunner,
+) -> CredentialLeg {
     let Some(overlay) = overlay else {
-        return ProbeOutcome::Unsupported {
-            reason: "no AIKit adapter carries this catalog slug; its credential \
-                     path cannot be pre-checked"
+        return CredentialLeg::unsupported(
+            "no AIKit adapter carries this catalog slug; its credential \
+             path cannot be pre-checked"
                 .to_string(),
-        };
+        );
     };
     let Some(profile) = aikit_adapters::profiles::for_slug(overlay.catalog_slug) else {
-        return ProbeOutcome::Unsupported {
-            reason: format!(
-                "no harness profile carries {}; AIKit has no credential facts to pre-check",
-                overlay.catalog_slug
-            ),
-        };
+        return CredentialLeg::unsupported(format!(
+            "no harness profile carries {}; AIKit has no credential facts to pre-check",
+            overlay.catalog_slug
+        ));
     };
     let Some(delivery) = profile
         .models
@@ -2001,23 +2173,18 @@ fn credential_outcome(
         .and_then(|models| models.key_delivery.as_ref())
         .filter(|delivery| !delivery.env_var.is_empty() || !delivery.own_login.is_empty())
     else {
-        return ProbeOutcome::Unsupported {
-            reason: format!(
-                "the {} profile declares no key-delivery facts; the harness's own \
-                 credential store stands unverified",
-                overlay.name
-            ),
-        };
+        return CredentialLeg::unsupported(format!(
+            "the {} profile declares no key-delivery facts; the harness's own \
+             credential store stands unverified",
+            overlay.name
+        ));
     };
 
     let store = home.map(CredentialBindingStore::new);
     // Whether `credential:<provider>` has a binding record. `None` means the
     // store could not be read — an unreadable store is not evidence of
     // absence, so the whole leg discloses instead of gating.
-    let bound = |provider_ref: &str| -> Option<bool> {
-        let slug = provider_ref
-            .strip_prefix("provider:")
-            .unwrap_or(provider_ref);
+    let bound = |slug: &str| -> Option<bool> {
         let credential_ref = CredentialRef::new(format!("credential:{slug}")).ok()?;
         match store.as_ref().map(|store| store.load(&credential_ref)) {
             None => Some(false),
@@ -2025,71 +2192,141 @@ fn credential_outcome(
             Some(Err(_)) => None,
         }
     };
-    let store_unreadable = || ProbeOutcome::Unsupported {
-        reason: "the credential binding store could not be read; credential \
-                 presence cannot be checked"
-            .to_string(),
+    let store_unreadable = || CredentialLeg {
+        outcome: ProbeOutcome::Unsupported {
+            reason: "the credential binding store could not be read; credential \
+                     presence cannot be checked"
+                .to_string(),
+        },
+        via: Vec::new(),
     };
+    let own_store_path = profile
+        .presence
+        .as_ref()
+        .and_then(|presence| presence.config_dir.as_deref());
+
+    // One provider is ready when any one of its declared paths delivers: a
+    // binding, its env var, or the harness's own login. The paths are
+    // alternatives, never all required — a harness signed in by its own login
+    // needs no API key, and a bound key needs no login.
+    let mut providers: Vec<&str> = Vec::new();
+    for provider_ref in delivery
+        .env_var
+        .iter()
+        .map(|entry| entry.provider_ref.as_str())
+        .chain(
+            delivery
+                .own_login
+                .iter()
+                .map(|entry| entry.provider_ref.as_str()),
+        )
+    {
+        if !providers.contains(&provider_ref) {
+            providers.push(provider_ref);
+        }
+    }
 
     let mut missing: Vec<String> = Vec::new();
-    for entry in &delivery.env_var {
-        match bound(&entry.provider_ref) {
-            Some(true) => continue,
+    let mut via: Vec<serde_json::Value> = Vec::new();
+    for provider_ref in providers {
+        let slug = provider_ref
+            .strip_prefix("provider:")
+            .unwrap_or(provider_ref);
+        let mut reached = |how: &str| {
+            via.push(serde_json::json!({ "provider_ref": provider_ref, "via": how }));
+        };
+        match bound(slug) {
+            Some(true) => {
+                reached("binding");
+                continue;
+            }
             Some(false) => {}
             None => return store_unreadable(),
         }
+        let env_vars: Vec<&str> = delivery
+            .env_var
+            .iter()
+            .filter(|entry| entry.provider_ref == provider_ref)
+            .map(|entry| entry.env_var.as_str())
+            .collect();
         // Presence only: the variable's value is never read into anything.
-        let ambient = std::env::var_os(&entry.env_var).is_some_and(|value| !value.is_empty());
-        if ambient {
+        if env_vars
+            .iter()
+            .any(|name| std::env::var_os(name).is_some_and(|value| !value.is_empty()))
+        {
+            reached("environment");
             continue;
         }
-        let slug = entry
-            .provider_ref
-            .strip_prefix("provider:")
-            .unwrap_or(&entry.provider_ref);
-        missing.push(format!(
-            "credential:{slug} is unbound and {} is absent from the environment; \
-             bind it with `aikit credential setup credential:{slug}`",
-            entry.env_var
-        ));
-    }
-    for entry in &delivery.own_login {
-        match bound(&entry.provider_ref) {
-            Some(true) => continue,
-            Some(false) => {}
-            None => return store_unreadable(),
+        let mut why: Vec<String> = Vec::new();
+        if !env_vars.is_empty() {
+            why.push(format!(
+                "{} is absent from the environment",
+                env_vars.join(", ")
+            ));
         }
-        let own_store = profile
-            .presence
-            .as_ref()
-            .and_then(|presence| presence.config_dir.as_deref())
-            .map(|spec| expand_seam(spec, &dirs.home, &dirs.tree).exists())
-            .unwrap_or(false);
-        if own_store {
+        let mut signed_in = false;
+        for fact in delivery
+            .own_login
+            .iter()
+            .filter(|entry| entry.provider_ref == provider_ref)
+        {
+            // The harness's own logged-in check where it declares one — the
+            // same bounded read `aikit harness auth <harness> --check` makes;
+            // it asks the login store and never prompts or calls a model.
+            if let Some(check) = crate::harness_auth::check_login(runner, fact) {
+                match (check.signed_in, check.unread) {
+                    (Some(true), _) => {
+                        signed_in = true;
+                        reached("own-login");
+                        break;
+                    }
+                    (Some(false), _) => why.push(format!(
+                        "the harness says it is not signed in ({}) — {}",
+                        check.argv.join(" "),
+                        fact.note
+                    )),
+                    (None, unread) => why.push(format!(
+                        "the harness's own login could not be read: {}",
+                        unread.unwrap_or_else(|| "no answer".to_string())
+                    )),
+                }
+                continue;
+            }
+            // No native check declared: the login store's presence is the
+            // only fact AIKit has.
+            if own_store_path
+                .map(|spec| expand_seam(spec, &dirs.home, &dirs.tree).exists())
+                .unwrap_or(false)
+            {
+                signed_in = true;
+                reached("own-login-store");
+                break;
+            }
+            why.push(format!(
+                "the harness's own login store at {} is absent — {}",
+                own_store_path.unwrap_or("its config directory"),
+                fact.note
+            ));
+        }
+        if signed_in {
             continue;
         }
-        let slug = entry
-            .provider_ref
-            .strip_prefix("provider:")
-            .unwrap_or(&entry.provider_ref);
-        let store_path = profile
-            .presence
-            .as_ref()
-            .and_then(|presence| presence.config_dir.as_deref())
-            .unwrap_or("its config directory");
         missing.push(format!(
-            "credential:{slug} is unbound and the harness's own login store at \
-             {store_path} is absent — {}",
-            entry.note
+            "credential:{slug} is unbound and {}; bind it with `aikit credential setup \
+             credential:{slug}`",
+            why.join(" and ")
         ));
     }
 
-    if missing.is_empty() {
-        ProbeOutcome::Ok
-    } else {
-        ProbeOutcome::CredentialGated {
-            missing: missing.join("; "),
-        }
+    CredentialLeg {
+        outcome: if missing.is_empty() {
+            ProbeOutcome::Ok
+        } else {
+            ProbeOutcome::CredentialGated {
+                missing: missing.join("; "),
+            }
+        },
+        via,
     }
 }
 

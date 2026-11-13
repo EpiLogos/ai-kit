@@ -35,7 +35,7 @@ use std::process::Command;
 use aikit_adapters::profiles;
 use aikit_adapters::runner::{CommandRunner, Output};
 use aikit_core::credential::CredentialRef;
-use aikit_core::harness_profile::{HarnessProfile, ModelLoginStatus};
+use aikit_core::harness_profile::{HarnessProfile, ModelLoginStatus, ModelOwnLogin};
 use aikit_core::{AikitError, Result};
 use aikit_store::{AikitHome, CredentialBindingStore};
 use serde::{Deserialize, Serialize};
@@ -115,35 +115,40 @@ pub fn check_logins(runner: &dyn CommandRunner, harness: &str) -> Result<LoginCh
             delivery
                 .own_login
                 .iter()
-                .filter_map(|fact| {
-                    let status = fact.status.as_ref()?;
-                    let (signed_in, unread) = match runner.run(&status.argv) {
-                        Ok(output) => match signed_in_by(status, &output) {
-                            Ok(answer) => (Some(answer), None),
-                            Err(why) => (None, Some(why)),
-                        },
-                        Err(error) => (
-                            None,
-                            Some(format!(
-                                "{} did not answer: {}",
-                                status.argv.join(" "),
-                                error.message()
-                            )),
-                        ),
-                    };
-                    Some(LoginCheck {
-                        provider_ref: fact.provider_ref.clone(),
-                        argv: status.argv.clone(),
-                        signed_in,
-                        unread,
-                    })
-                })
+                .filter_map(|fact| check_login(runner, fact))
                 .collect()
         })
         .unwrap_or_default();
     Ok(LoginChecks {
         slug: profile.slug.clone(),
         checks,
+    })
+}
+
+/// Run one own-login fact's declared native check and read its declared
+/// answer; `None` when the fact declares no check. The one reading both
+/// `harness auth --check` and `client status` use.
+pub(crate) fn check_login(runner: &dyn CommandRunner, fact: &ModelOwnLogin) -> Option<LoginCheck> {
+    let status = fact.status.as_ref()?;
+    let (signed_in, unread) = match runner.run(&status.argv) {
+        Ok(output) => match signed_in_by(status, &output) {
+            Ok(answer) => (Some(answer), None),
+            Err(why) => (None, Some(why)),
+        },
+        Err(error) => (
+            None,
+            Some(format!(
+                "{} did not answer: {}",
+                status.argv.join(" "),
+                error.message()
+            )),
+        ),
+    };
+    Some(LoginCheck {
+        provider_ref: fact.provider_ref.clone(),
+        argv: status.argv.clone(),
+        signed_in,
+        unread,
     })
 }
 

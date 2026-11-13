@@ -666,20 +666,22 @@ fn every_status_row_carries_the_probe_vocabulary_with_its_old_keys_intact() {
     assert_eq!(broker["credential"], "self");
 }
 
-#[test]
-fn an_absent_credential_is_credential_gated_without_spawning_the_harness() {
-    let home = scenario_with_partial_intake();
-    // A sentinel `claude` that leaves a marker if anything ever runs it: the
-    // credential pre-check is presence facts only, so a status read must not
-    // need the harness binary at all — that is the whole point of gating
-    // before a model call instead of after.
-    let marker = home.path().join("claude-was-spawned.marker");
-    let sentinel = home.path().join("sentinel-bin");
-    fs::create_dir_all(&sentinel).unwrap();
-    let script = sentinel.join("claude");
+/// A stand-in `claude` that records every argv it is asked and answers
+/// `auth status --json` with the given login state, exactly as Claude Code
+/// prints it. Anything else it is asked fails, so a model call or a login
+/// would show in the record and in the row.
+fn stage_claude(home: &Path, logged_in: bool) -> (PathBuf, PathBuf) {
+    let asked = home.join("claude-asked.log");
+    let bin = home.join("claude-bin");
+    fs::create_dir_all(&bin).unwrap();
+    let script = bin.join("claude");
     fs::write(
         &script,
-        format!("#!/bin/sh\ntouch '{}'\n", marker.display()),
+        format!(
+            "#!/bin/sh\necho \"$*\" >> '{}'\nif [ \"$*\" = \"auth status --json\" ]; then\n\x20 echo '{{\"loggedIn\": {logged_in}, \"authMethod\": \"claude.ai\"}}'\n\x20 exit {}\nfi\nexit 9\n",
+            asked.display(),
+            if logged_in { 0 } else { 1 }
+        ),
     )
     .unwrap();
     #[cfg(unix)]
@@ -687,7 +689,12 @@ fn an_absent_credential_is_credential_gated_without_spawning_the_harness() {
         use std::os::unix::fs::PermissionsExt;
         fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
     }
+    (bin, asked)
+}
 
+/// `aikit client status claude` with the stand-in `claude` first on PATH and
+/// no ambient key.
+fn claude_row_with(home: &tempfile::TempDir, claude_bin: &Path) -> Value {
     let mut command = Command::cargo_bin("aikit").unwrap();
     command
         .env("AIKIT_HOME", home.path().join("aikit-home"))
@@ -697,11 +704,11 @@ fn an_absent_credential_is_credential_gated_without_spawning_the_harness() {
             "PATH",
             format!(
                 "{}:{}:/usr/bin:/bin",
-                sentinel.display(),
+                claude_bin.display(),
                 home.path().join("actuation-bin").display()
             ),
         )
-        // Presence facts, decided in isolation: no ambient key may leak in.
+        // Decided in isolation: no ambient key may leak in.
         .env_remove("ANTHROPIC_API_KEY")
         .arg("--json")
         .args(["client", "status", "claude"])
@@ -714,11 +721,40 @@ fn an_absent_credential_is_credential_gated_without_spawning_the_harness() {
     );
     let value: Value =
         serde_json::from_str(String::from_utf8_lossy(&output.stdout).trim()).unwrap();
-    let rows = value["data"]["clients"].as_array().unwrap();
-    let claude = by_name(rows, "claude");
+    by_name(value["data"]["clients"].as_array().unwrap(), "claude")
+}
+
+#[test]
+fn a_harness_signed_in_by_its_own_login_is_ready_without_an_api_key() {
+    let home = scenario_with_partial_intake();
+    let (bin, asked) = stage_claude(home.path(), true);
+    let claude = claude_row_with(&home, &bin);
+    assert_eq!(
+        claude["credential"], "ok",
+        "Claude Code signed in by its own login needs no ANTHROPIC_API_KEY: {claude}"
+    );
+    assert_eq!(claude["credential_reason"], Value::Null);
+    assert_eq!(
+        claude["credential_via"],
+        serde_json::json!([{"provider_ref": "provider:anthropic", "via": "own-login"}]),
+        "{claude}"
+    );
+    // Only the declared logged-in check ran: never a login, never a model call.
+    assert_eq!(
+        fs::read_to_string(&asked).unwrap(),
+        "auth status --json\n",
+        "the status read asks the harness's own login check alone"
+    );
+}
+
+#[test]
+fn an_absent_credential_is_credential_gated_naming_every_path() {
+    let home = scenario_with_partial_intake();
+    let (bin, asked) = stage_claude(home.path(), false);
+    let claude = claude_row_with(&home, &bin);
     assert_eq!(
         claude["credential"], "credential-gated",
-        "an unbound credential with no ambient key gates the row: {claude}"
+        "unbound, no ambient key and not signed in gates the row: {claude}"
     );
     let reason = claude["credential_reason"]
         .as_str()
@@ -732,9 +768,11 @@ fn an_absent_credential_is_credential_gated_without_spawning_the_harness() {
         "the gate names the credential to bind: {reason}"
     );
     assert!(
-        !marker.exists(),
-        "the credential pre-check must never spawn the harness binary"
+        reason.contains("not signed in (claude auth status --json)"),
+        "the gate names the harness's own answer: {reason}"
     );
+    assert_eq!(claude["credential_via"], serde_json::json!([]));
+    assert_eq!(fs::read_to_string(&asked).unwrap(), "auth status --json\n");
 }
 
 #[test]
@@ -795,4 +833,85 @@ fn a_hanging_actuation_is_timed_out_within_the_budget_instead_of_stalling() {
         reason.contains('1'),
         "the timeout names the bound it violated: {reason}"
     );
+}
+
+// --- AIKit's integration ------------------------------------------------------
+//
+// `aikit_integration` says whether AIKit's entries stand in the harness's
+// install seam; `installed` is its deprecated alias. Neither says whether the
+// harness itself is installed: `detection` does.
+
+#[test]
+fn aikit_integration_reads_the_install_seam_not_the_harness_presence() {
+    let home = scenario_with_partial_intake();
+    // A descriptor whose events AIKit routes, so an install has entries.
+    let descriptor = home
+        .path()
+        .join("actuation-fixtures/descriptors/claude-code.json");
+    let routed = fs::read_to_string(&descriptor).unwrap().replace(
+        r#""native_events": []"#,
+        r#""native_events": [
+            {"event": "session-start", "native_name": "SessionStart", "transport": "settings-json-hooks-map", "can_block": false, "context_channel": "stdout-additional-context"},
+            {"event": "stop", "native_name": "Stop", "transport": "settings-json-hooks-map", "can_block": true, "context_channel": "none"}
+        ]"#,
+    );
+    fs::write(&descriptor, routed).unwrap();
+    // The harness's own config home exists: that is not AIKit's integration.
+    fs::create_dir_all(home.path().join("user-home/seams")).unwrap();
+    let claude = |home: &tempfile::TempDir| {
+        by_name(
+            &rows_with_fixtures_env(home, &["client", "status", "claude"]),
+            "claude",
+        )
+    };
+
+    let before = claude(&home);
+    assert_eq!(before["detection"], "detected");
+    assert_eq!(before["config_dir_exists"], true, "{before}");
+    assert_eq!(before["aikit_integration"], "absent", "{before}");
+    assert_eq!(
+        before["installed"], false,
+        "the alias follows the integration, not the config home: {before}"
+    );
+    assert!(before["aikit_integration_reason"]
+        .as_str()
+        .unwrap()
+        .contains("aikit client install claude"));
+
+    let mut install = Command::cargo_bin("aikit").unwrap();
+    install
+        .env("AIKIT_HOME", home.path().join("aikit-home"))
+        .env("HOME", home.path().join("user-home"))
+        .env(
+            "PATH",
+            format!(
+                "{}:/usr/bin:/bin",
+                home.path().join("actuation-bin").display()
+            ),
+        )
+        .env("FIXTURES", home.path().join("actuation-fixtures"))
+        .arg("--json")
+        .args(["client", "install", "claude"])
+        .current_dir(home.path().join("project"));
+    let output = install.output().unwrap();
+    assert!(
+        output.status.success(),
+        "install must succeed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let after = claude(&home);
+    assert_eq!(after["aikit_integration"], "installed", "{after}");
+    assert_eq!(after["aikit_integration_reason"], Value::Null);
+    assert_eq!(after["installed"], true);
+
+    // An AIKit entry an install now writes differently is outdated.
+    fs::write(
+        home.path().join("user-home/seams/claude-code.json"),
+        r#"{"hooks": {"Stop": [{"hooks": [{"type": "command", "command": "aikit hook dispatch claude stop"}]}]}}"#,
+    )
+    .unwrap();
+    let drifted = claude(&home);
+    assert_eq!(drifted["aikit_integration"], "outdated", "{drifted}");
+    assert_eq!(drifted["installed"], true);
 }
