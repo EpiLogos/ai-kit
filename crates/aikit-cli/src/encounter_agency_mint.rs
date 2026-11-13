@@ -198,8 +198,18 @@ pub fn mint_request_document(
 
 /// Resolve the project identity from `project_cwd` through the same
 /// application resolution `aikit session-space project-context` uses.
-fn resolve_project(home: &AikitHome, project_cwd: &Path) -> Result<ProjectRef> {
+/// The named Agent, when the caller names one, is the Agent the context is
+/// composed for: a ground with several profiles resolves without a guess.
+fn resolve_project(
+    home: &AikitHome,
+    project_cwd: &Path,
+    agent: Option<&ResourceRef>,
+) -> Result<ProjectRef> {
     let project_service = Service::open(home.clone(), project_cwd, |key| std::env::var(key).ok())?;
+    let project_service = match agent {
+        Some(agent) => project_service.with_selected_agent(agent.clone()),
+        None => project_service,
+    };
     let resolution = aikit_tui::project_world_service::context_resolution(&project_service)
         .map_err(|error| {
             mint_error(
@@ -582,7 +592,7 @@ fn mint_per_project_agency_with_intent(
             ),
         ));
     }
-    let world = resolve_project(home, project_cwd)?;
+    let world = resolve_project(home, project_cwd, explicit_agent_ref.as_ref())?;
     let world_ref = ResourceRef::parse(canonical_world_ref(world.as_str()))?;
     let ResolvedAgentIdentity {
         agent_ref,

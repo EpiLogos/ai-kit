@@ -431,7 +431,13 @@ enum Command {
         socket: Option<PathBuf>,
     },
     /// Read the current canonical Project + ContextResolution binding for typed stage intent.
-    ProjectContext,
+    ProjectContext {
+        /// The Agent this context is for (`agent:<id>`). A ground with several
+        /// authored profiles composes only the named one; without it, several
+        /// profiles are refused rather than guessed.
+        #[arg(long)]
+        agent: Option<String>,
+    },
     /// List persisted SessionSpaces.
     List,
     /// Show one canonical SessionSpace semantic state.
@@ -638,10 +644,16 @@ fn run(cli: Cli) -> Result<()> {
         Command::AgentSessionSkills
             | Command::AgentSessionScope
             | Command::AgentSessionPrepare { .. }
-            | Command::ProjectContext
+            | Command::ProjectContext { .. }
     );
     let service = if needs_service {
-        Some(Service::discover(&cwd)?)
+        let service = Service::discover(&cwd)?;
+        Some(match &cli.command {
+            Command::ProjectContext { agent: Some(agent) } => {
+                service.with_selected_agent(aikit_core::ResourceRef::parse(agent)?)
+            }
+            _ => service,
+        })
     } else {
         None
     };
@@ -1325,7 +1337,7 @@ fn run(cli: Cli) -> Result<()> {
             &socket.unwrap_or_else(|| crate::encounter_service::socket_path(home)),
             &parse_json_arg(&request_json)?,
         )?),
-        Command::ProjectContext => {
+        Command::ProjectContext { .. } => {
             let resolution = aikit_tui::project_world_service::context_resolution(serviced())?;
             let context = ContextResolutionEvidence::from_resolution(&resolution)?;
             let binding =
