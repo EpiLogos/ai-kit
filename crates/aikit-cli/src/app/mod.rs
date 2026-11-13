@@ -3863,15 +3863,39 @@ impl PaletteBackend for Service {
             .or_else(|| process_central_root(Some(project)));
         let mut records = if let Some(central) = central_root.as_deref() {
             // Share the projection's native absence/error distinction: only
-            // Ok(None) contributes no actor sources. Preserve any source error.
-            aikit_adapters::actor_composition::compose_selected_actor_inputs(
+            // Ok(None) contributes no actor sources. Preserve any source error,
+            // except the one the view itself demotes (above): several authored
+            // profiles in this scope and no Agent selected. That ground is a
+            // normal lived-in one, and the field read here — `act discover`,
+            // search, the surface — never uses the actor; it contributes no
+            // actor's sources, the ambiguity stands named in the view's
+            // warnings, and no profile is guessed. An Agent selected among
+            // several profiles of its own still refuses.
+            match aikit_adapters::actor_composition::compose_selected_actor_inputs(
                 &SystemRunner::probe(),
                 central,
                 project,
                 self.selected_agent.as_ref(),
-            )?
-            .map(|inputs| inputs.source_resources)
-            .unwrap_or_default()
+            ) {
+                Ok(inputs) => inputs
+                    .map(|inputs| inputs.source_resources)
+                    .unwrap_or_default(),
+                Err(error)
+                    if self.selected_agent.is_none()
+                        && error.code() == "actor_composition.ambiguous_profile" =>
+                {
+                    let note = format!(
+                        "actor composition did not resolve: {message}; this field carries no Agent's sources, and none was guessed",
+                        message = error.message()
+                    );
+                    let mut notes = self.context_composition_notes.borrow_mut();
+                    if !notes.contains(&note) {
+                        notes.push(note);
+                    }
+                    Vec::new()
+                }
+                Err(error) => return Err(error),
+            }
         } else {
             Vec::new()
         };

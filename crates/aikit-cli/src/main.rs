@@ -5062,6 +5062,37 @@ fn cmd_act(cwd: &std::path::Path, a: ActGroup, json_mode: bool) -> Result<Reply>
                 }
                 Ok(Reply::Status(0))
             }
+            // A route Action's answer is the route's own JSON reply, on stdout as it came;
+            // the invocation receipt goes to stderr, as above.
+            aikit_cli::act::ActOutcome::Route {
+                action,
+                argv,
+                output,
+                digest,
+            } => {
+                for line in output.lines() {
+                    println!("{line}");
+                }
+                if json_mode {
+                    eprintln!(
+                        "{}",
+                        json::line(&json::success(
+                            &EnvelopeContext::default(),
+                            jval!({
+                                "schema": "aikit.act-invocation/v1",
+                                "action": action,
+                                "owner": "ai-kit",
+                                "route": argv,
+                                "status": "ok",
+                                "detached": false,
+                                "result_digest": digest,
+                            }),
+                            vec![],
+                        ))
+                    );
+                }
+                Ok(Reply::Status(0))
+            }
         },
     }
 }
