@@ -457,10 +457,11 @@ pub struct ActInvokeArgs {
     /// The ref to invoke, exactly as describe/search returned it.
     #[arg(value_name = "REF")]
     pub reference: String,
-    /// The action input as inline JSON, or `@FILE` to read it. Contributed to
-    /// the invoked operation as one argument, verbatim — the existing native
-    /// seam speaks argv, and this doorway adds no second input grammar.
-    #[arg(long, value_name = "JSON|@FILE")]
+    /// The action input as inline JSON, `@FILE` to read it, or `-` for the
+    /// JSON on stdin. Contributed to the invoked operation as one argument,
+    /// verbatim — the existing native seam speaks argv, and this doorway adds
+    /// no second input grammar.
+    #[arg(long, value_name = "JSON|@FILE|-")]
     pub input: Option<String>,
     /// Confirm running an executable whose revision has not been reviewed
     /// (the same trust gate `aikit run` applies).

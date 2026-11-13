@@ -48,7 +48,8 @@ struct RouteAction {
 
 /// The operations the modes' cores write through (docs/architecture/world-shell.md §9.3 in O-I):
 /// send a Communique, control a binding's conversation (`new` starts one, `stop` ends it), cross a
-/// Communique into work, and the population those act on.
+/// Communique into work, the population those act on, and whether a sent Communique was heard —
+/// the read a send is checked by.
 const ROUTE_ACTIONS: &[RouteAction] = &[
     RouteAction {
         id: "aikit.gateway.send",
@@ -72,6 +73,12 @@ const ROUTE_ACTIONS: &[RouteAction] = &[
         id: "aikit.gateway.who",
         title: "Who is here",
         route: &["gateway", "who"],
+        mutation_class: "read-only",
+    },
+    RouteAction {
+        id: "aikit.gateway.heard",
+        title: "Whether a Communique was heard",
+        route: &["gateway", "heard"],
         mutation_class: "read-only",
     },
 ];
@@ -161,8 +168,14 @@ fn route_row(action: &RouteAction) -> Option<serde_json::Value> {
 
 /// The argv a route Action's input makes: the route, its positionals in order, then each flag
 /// the input names. An input the route does not take, a required input missing, or a value of
-/// the wrong shape is refused by name before anything runs.
-fn route_argv(action: &RouteAction, input: &serde_json::Value) -> Result<Vec<String>> {
+/// the wrong shape is refused by name before anything runs. Words the route can also read from
+/// a file (`--body` beside `--body-file`) travel on the route's stdin as `--body-file -`, never
+/// in argv: a process listing does not show them and no length meets the argv limit. One input
+/// at most takes stdin; the second is the route's own refusal.
+fn route_argv(
+    action: &RouteAction,
+    input: &serde_json::Value,
+) -> Result<(Vec<String>, Option<String>)> {
     let command = route_command(action.route).ok_or_else(|| {
         AikitError::new(
             "act.route_unparsed",
@@ -195,6 +208,7 @@ fn route_argv(action: &RouteAction, input: &serde_json::Value) -> Result<Vec<Str
     }
     let mut positionals: Vec<(u64, String)> = Vec::new();
     let mut flags: Vec<String> = Vec::new();
+    let mut stdin: Option<String> = None;
     for input in &inputs {
         let name = input["name"].as_str().unwrap_or_default();
         let Some(value) = given.get(name).filter(|value| !value.is_null()) else {
@@ -243,8 +257,19 @@ fn route_argv(action: &RouteAction, input: &serde_json::Value) -> Result<Vec<Str
                 }
             }
             _ => {
-                flags.push(input["flag"].as_str().unwrap_or_default().to_owned());
-                flags.push(text(value)?);
+                let flag = input["flag"].as_str().unwrap_or_default().to_owned();
+                let words = text(value)?;
+                let file_flag = format!("{flag}-file");
+                if stdin.is_none()
+                    && inputs
+                        .iter()
+                        .any(|other| other["flag"] == file_flag.as_str())
+                {
+                    flags.extend([file_flag, "-".to_owned()]);
+                    stdin = Some(words);
+                } else {
+                    flags.extend([flag, words]);
+                }
             }
         }
     }
@@ -253,13 +278,13 @@ fn route_argv(action: &RouteAction, input: &serde_json::Value) -> Result<Vec<Str
     argv.extend(positionals.into_iter().map(|(_, value)| value));
     argv.extend(flags);
     argv.push("--json".to_owned());
-    Ok(argv)
+    Ok((argv, stdin))
 }
 
 /// Run a route Action: exactly that route of this binary, once, with the argv its input makes.
 /// The route's answer is the result; its refusal is the owner's words, never a substituted one.
 fn invoke_route(action: &RouteAction, input: &serde_json::Value) -> Result<(String, String)> {
-    let argv = route_argv(action, input)?;
+    let (argv, words) = route_argv(action, input)?;
     let executable = std::env::current_exe().map_err(|error| {
         AikitError::new(
             "act.route_unavailable",
@@ -269,31 +294,66 @@ fn invoke_route(action: &RouteAction, input: &serde_json::Value) -> Result<(Stri
             ),
         )
     })?;
-    let output = std::process::Command::new(executable)
+    let unstarted = |error: std::io::Error| {
+        AikitError::new(
+            "act.route_unavailable",
+            format!("`{}` could not start: {error}", action.id),
+        )
+    };
+    let mut child = std::process::Command::new(executable)
         .args(&argv)
-        .stdin(std::process::Stdio::null())
-        .output()
-        .map_err(|error| {
-            AikitError::new(
-                "act.route_unavailable",
-                format!("`{}` could not start: {error}", action.id),
-            )
-        })?;
+        .stdin(match words {
+            Some(_) => std::process::Stdio::piped(),
+            None => std::process::Stdio::null(),
+        })
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .map_err(unstarted)?;
+    if let (Some(words), Some(mut pipe)) = (words, child.stdin.take()) {
+        // A route that stops reading early says so itself; its exit is the outcome.
+        let _ = std::io::Write::write_all(&mut pipe, words.as_bytes());
+    }
+    let output = child.wait_with_output().map_err(unstarted)?;
     let stdout = String::from_utf8_lossy(&output.stdout).trim().to_owned();
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
         let words = if stdout.is_empty() { stderr } else { stdout };
-        return Err(AikitError::new(
+        let (words, code) = routed_refusal(words);
+        let mut refused = AikitError::new(
             "act.route_refused",
             format!(
-                "`aikit {}` answered with exit {}: {words}",
+                "`aikit {}` refused (exit {}): {words}",
                 action.route.join(" "),
                 output.status.code().unwrap_or(1)
             ),
         )
-        .with("action", action.id));
+        .with("action", action.id);
+        if let Some(code) = code {
+            refused = refused.with("route_code", code);
+        }
+        return Err(refused);
     }
     Ok((argv.join(" "), stdout))
+}
+
+/// A routed command's refusal in its own words: a route that refuses in AIKit's envelope (`{ok: false, error: {code, message}}`)
+/// is carried by its message and its code, never as the envelope, so the person reads what the route said; any other words come as
+/// they are.
+fn routed_refusal(words: String) -> (String, Option<String>) {
+    let routed = serde_json::from_str::<serde_json::Value>(&words)
+        .ok()
+        .and_then(|envelope| {
+            let message = envelope["error"]["message"].as_str()?.to_owned();
+            Some((
+                message,
+                envelope["error"]["code"].as_str().map(str::to_owned),
+            ))
+        });
+    match routed {
+        Some((message, code)) => (message, code),
+        None => (words, None),
+    }
 }
 
 /// The kebab-case standing of a source state. [`SourceState`] carries its
@@ -858,18 +918,31 @@ fn contextual_dispatch(
 /// `aikit act invoke <ref>` — resolve, then perform once through the existing
 /// native runner. The returned handle carries the real status and output;
 /// unknown or ambiguous refs are refused before any effect.
+/// An `--input` as given: inline JSON, `@FILE`, or `-` for the JSON on stdin (what the O:I
+/// kernel's `act` hands every invocation, so no input meets the argv limit).
+fn read_input(raw: &str) -> Result<String> {
+    let unreadable = |from: &str, error: std::io::Error| {
+        AikitError::new(
+            "act.input_unreadable",
+            format!("could not read the action input from {from}: {error}"),
+        )
+    };
+    if raw == "-" {
+        let mut text = String::new();
+        std::io::Read::read_to_string(&mut std::io::stdin(), &mut text)
+            .map_err(|error| unreadable("stdin", error))?;
+        return Ok(text);
+    }
+    match raw.strip_prefix('@') {
+        Some(path) => std::fs::read_to_string(path).map_err(|error| unreadable(path, error)),
+        None => Ok(raw.to_owned()),
+    }
+}
+
 pub fn invoke(service: &mut Service, args: ActInvokeArgs) -> Result<ActOutcome> {
     if let Some(action) = route_action(&args.reference) {
         let raw = match args.input.as_deref() {
-            Some(raw) => match raw.strip_prefix('@') {
-                Some(path) => std::fs::read_to_string(path).map_err(|error| {
-                    AikitError::new(
-                        "act.input_unreadable",
-                        format!("could not read the action input from {path}: {error}"),
-                    )
-                })?,
-                None => raw.to_owned(),
-            },
+            Some(raw) => read_input(raw)?,
             None => "{}".to_owned(),
         };
         let input: serde_json::Value = serde_json::from_str(raw.trim()).map_err(|error| {
@@ -914,15 +987,7 @@ pub fn invoke(service: &mut Service, args: ActInvokeArgs) -> Result<ActOutcome> 
     }
 
     let input = match &args.input {
-        Some(raw) => match raw.strip_prefix('@') {
-            Some(path) => Some(std::fs::read_to_string(path).map_err(|error| {
-                AikitError::new(
-                    "act.input_unreadable",
-                    format!("could not read the action input from {path}: {error}"),
-                )
-            })?),
-            None => Some(raw.clone()),
-        },
+        Some(raw) => Some(read_input(raw)?),
         None => None,
     };
     let mut argv = Vec::with_capacity(input.is_some() as usize + args.args.len());
@@ -967,6 +1032,22 @@ pub fn invoke(service: &mut Service, args: ActInvokeArgs) -> Result<ActOutcome> 
 
 #[cfg(test)]
 mod tests {
+    /// A route's refusal reaches the person in the route's words, not AIKit's JSON envelope around them (O-I #1002: the kernel
+    /// shows the owner's words).
+    #[test]
+    fn a_routed_refusal_is_the_route_s_words_not_its_envelope() {
+        assert_eq!(
+            super::routed_refusal(
+                r#"{"ok":false,"error":{"code":"gateway.position_unknown","message":"No Position answers to @nobody"}}"#.to_owned()
+            ),
+            ("No Position answers to @nobody".to_owned(), Some("gateway.position_unknown".to_owned()))
+        );
+        assert_eq!(
+            super::routed_refusal("error: unexpected argument '--nope'".to_owned()),
+            ("error: unexpected argument '--nope'".to_owned(), None)
+        );
+    }
+
     use super::*;
     use crate::app::Service;
     use aikit_store::AikitHome;
@@ -1038,22 +1119,29 @@ mod tests {
         assert_eq!(body["flag"], "--body");
         assert_eq!(body["type"], "string");
 
-        let argv = route_argv(
+        let (argv, words) = route_argv(
             send,
             &serde_json::json!({"to": "central:position:w:desk", "body": "Hello", "handling": "steer"}),
         )
         .unwrap();
         assert_eq!(argv[..2], ["gateway", "send"]);
+        assert_eq!(words.as_deref(), Some("Hello"), "the words travel on stdin");
+        assert!(
+            !argv.iter().any(|word| word == "Hello")
+                && argv.windows(2).any(|pair| pair == ["--body-file", "-"]),
+            "never in argv: {argv:?}"
+        );
         assert_eq!(argv.last().map(String::as_str), Some("--json"));
         crate::cli::Cli::try_parse_from(std::iter::once("aikit".to_owned()).chain(argv.clone()))
             .unwrap_or_else(|error| panic!("{argv:?} does not parse: {error}"));
 
         let agent = route_action("aikit.gateway.agent").unwrap();
-        let argv = route_argv(
+        let (argv, words) = route_argv(
             agent,
             &serde_json::json!({"binding": "gateway-binding/x", "operation": "new"}),
         )
         .unwrap();
+        assert_eq!(words, None);
         assert_eq!(
             argv[..3],
             ["gateway", "agent", "new"],

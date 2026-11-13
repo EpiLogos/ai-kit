@@ -507,6 +507,17 @@ pub fn conversation_operation(args: &GatewayAgentArgs) -> Result<GatewayConversa
         })?),
         None => None,
     };
+    // A value rides only the operation that takes it: a model given to any
+    // other is refused before the gateway is asked, never silently dropped.
+    if args.model.is_some() && args.operation != "model" {
+        return Err(AikitError::new(
+            "cli.gateway_agent_value_misplaced",
+            format!(
+                "`{}` takes no --model; only `model` carries one",
+                args.operation
+            ),
+        ));
+    }
     match args.operation.as_str() {
         "status" => Ok(GatewayConversationOperation::Status),
         "stop" => Ok(GatewayConversationOperation::Stop),
@@ -758,5 +769,44 @@ mod ingress_rule_tests {
         ]))
         .unwrap_err();
         assert_eq!(decision.code(), "cli.gateway_ingress_decision_unknown");
+    }
+}
+
+#[cfg(test)]
+mod conversation_operation_tests {
+    use super::*;
+    use crate::cli::{GatewayAgentArgs, GatewayQueryArgs};
+
+    fn args(operation: &str, model: Option<&str>) -> GatewayAgentArgs {
+        GatewayAgentArgs {
+            operation: operation.to_owned(),
+            binding_ref: "gateway-binding/t".to_owned(),
+            connector_ref: None,
+            model: model.map(str::to_owned),
+            carrier: GatewayQueryArgs {
+                unix_socket: None,
+                websocket_bind: None,
+                websocket_path: "/".to_owned(),
+                websocket_token: None,
+            },
+        }
+    }
+
+    /// A value rides only the operation that takes it (O-I #1002: the kernel's own harness control
+    /// refused a model on `stop`; the rule is the owner's, so it holds by every door).
+    #[test]
+    fn a_model_rides_only_the_model_operation_and_an_unknown_operation_is_refused() {
+        assert!(matches!(
+            conversation_operation(&args("model", Some("gpt-5"))).unwrap(),
+            GatewayConversationOperation::Model { model: Some(_) }
+        ));
+        assert!(matches!(
+            conversation_operation(&args("stop", None)).unwrap(),
+            GatewayConversationOperation::Stop
+        ));
+        let misplaced = conversation_operation(&args("stop", Some("gpt-5"))).unwrap_err();
+        assert_eq!(misplaced.code(), "cli.gateway_agent_value_misplaced");
+        let unknown = conversation_operation(&args("configure", None)).unwrap_err();
+        assert_eq!(unknown.code(), "cli.gateway_agent_operation_unknown");
     }
 }
