@@ -861,9 +861,7 @@ impl EncounterService {
         let service = Self::new(home.clone())?;
         service.require_attached(session)?;
         let provider = service
-            .providers()?
-            .into_iter()
-            .find(|p| p.id == provider_id)
+            .provider(provider_id)?
             .ok_or_else(|| error("Selected native model provider configuration was removed"))?;
         let model = prepare(home, session, &provider)?
             .ok_or_else(|| error("Model binding was removed; no unselected fallback"))?;

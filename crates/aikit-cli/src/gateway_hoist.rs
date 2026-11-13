@@ -57,7 +57,6 @@ use aikit_store::home::AikitHome;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
-use crate::encounter_profile_provider::resolve_provider;
 use crate::gateway_contact::{load_remotes, now_unix_ms, three_part, GatewayRemote, WORKCELL_ENV};
 use crate::secret_location::SecretLocation;
 
@@ -206,38 +205,40 @@ pub fn pack(home: &AikitHome, args: &HoistArgs) -> Result<PackedPosture> {
         .then(|| load_coexistence(&coexistence_path))
         .transpose()?;
 
-    // The resolved agent-provider entries the connectors' backings need. A
-    // declared backing no provider answers refuses here, at pack time, the
-    // same law serve applies at startup: the gateway must not move carrying a
-    // conversation it could never answer.
+    // The agent-provider rows the connectors' backings need. A declared
+    // backing no provider answers refuses here, at pack time, the same law
+    // serve applies at startup (the one lookup an open uses): the gateway must
+    // not move carrying a conversation it could never answer. What moves is a
+    // stored row as it was configured — a profile row keeps `from_profile`
+    // and resolves again from the target's own profiles, never a resolved
+    // snapshot the target's registry would refuse. A backing no row is
+    // stored for is the harness profile's own row, which the target derives
+    // in turn: nothing of it moves.
     let mut agent_providers = Vec::new();
     let backings: Vec<&str> = connectors
         .iter()
         .filter_map(|entry| entry.agent_backing.as_deref())
         .collect();
-    if !backings.is_empty() {
-        let providers = load_resolved_providers(home)?;
-        for backing in backings {
-            let provider = providers
-                .iter()
-                .find(|provider| provider.id == backing)
-                .ok_or_else(|| {
-                    three_part(
-                        "gateway.hoist_backing_unresolved",
-                        format!(
-                            "Connector backing {backing:?} has no encounter provider declared in {}.",
-                            home.state().join("encounter-providers").display()
-                        ),
-                        "The posture was not packed; nothing moved.",
-                        "Declare the provider with `aikit encounter providers add` (or remove \
-                         --agent-backing), then hoist again."
-                            .to_owned(),
-                    )
-                })?;
-            agent_providers.push(serde_json::to_value(provider).map_err(|error| {
+    for backing in backings {
+        if crate::encounter_service::provider_named(home, backing)?.is_none() {
+            return Err(three_part(
+                "gateway.hoist_backing_unresolved",
+                format!(
+                    "Connector backing {backing:?} has no encounter provider declared in {}, \
+                     and no embedded harness profile of that name connects.",
+                    home.state().join("encounter-providers").display()
+                ),
+                "The posture was not packed; nothing moved.",
+                "Declare the provider with `aikit encounter providers add` (or remove \
+                 --agent-backing), then hoist again."
+                    .to_owned(),
+            ));
+        }
+        if let Some(row) = crate::encounter_service::stored_row(home, backing)? {
+            agent_providers.push(serde_json::to_value(&row).map_err(|error| {
                 AikitError::new(
                     "gateway.hoist_provider_encode",
-                    format!("encode provider {}: {error}", provider.id),
+                    format!("encode provider {}: {error}", row.id),
                 )
             })?);
         }
@@ -258,54 +259,6 @@ pub fn pack(home: &AikitHome, args: &HoistArgs) -> Result<PackedPosture> {
         agent_providers,
         target_declared_bind: None,
     })
-}
-
-/// The encounter plane's own provider load for the posture: every
-/// `encounter-providers/*.json` of this home, resolved from embedded profiles
-/// at load, exactly as the serve path resolves them.
-fn load_resolved_providers(
-    home: &AikitHome,
-) -> Result<Vec<crate::encounter_service::EncounterProvider>> {
-    let root = home.state().join("encounter-providers");
-    if !root.exists() {
-        return Ok(Vec::new());
-    }
-    let mut rows = Vec::new();
-    for entry in std::fs::read_dir(&root).map_err(|error| {
-        AikitError::new(
-            "gateway.hoist_providers_unreadable",
-            format!("read {}: {error}", root.display()),
-        )
-    })? {
-        let path = entry
-            .map_err(|error| {
-                AikitError::new(
-                    "gateway.hoist_providers_unreadable",
-                    format!("read {}: {error}", root.display()),
-                )
-            })?
-            .path();
-        if path.extension().and_then(|s| s.to_str()) != Some("json") {
-            continue;
-        }
-        let provider: crate::encounter_service::EncounterProvider =
-            serde_json::from_slice(&std::fs::read(&path).map_err(|error| {
-                AikitError::new(
-                    "gateway.hoist_providers_unreadable",
-                    format!("read {}: {error}", path.display()),
-                )
-            })?)
-            .map_err(|error| {
-                AikitError::new(
-                    "gateway.hoist_providers_unreadable",
-                    format!("decode {}: {error}", path.display()),
-                )
-            })?;
-        rows.push(resolve_provider(provider).map_err(|failure| {
-            AikitError::new(failure.code(), format!("{}: {failure}", path.display()))
-        })?);
-    }
-    Ok(rows)
 }
 
 /// The `file:` token locations the posture names, with whether the file
@@ -350,6 +303,7 @@ pub fn plan_value(posture: &PackedPosture) -> Result<Value> {
                 "id": provider.get("id"),
                 "protocol": provider.get("protocol"),
                 "argv": provider.get("argv"),
+                "from_profile": provider.get("from_profile"),
                 "cwd_note": "the launch working directory re-resolves on the target at serve time unless the provider names one",
             })
         })

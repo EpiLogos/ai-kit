@@ -266,27 +266,22 @@ fn one_authority(refs: &Value) -> Fact<ResourceRef> {
 }
 
 /// An encounter provider as it was configured: its raw row, so a profile
-/// row keeps `from_profile` and resolves again where the task runs.
+/// row keeps `from_profile` and resolves again where the task runs. With no
+/// row stored under the id, the row an embedded harness profile stands for
+/// (an open may name a harness's slug without one being stored).
 fn configured(home: &AikitHome, id: &str) -> Fact<EncounterProvider> {
-    let withdrawn = || {
-        format!(
-            "the agent the session opened on ({id}) is no longer a configured encounter provider"
-        )
-    };
-    if id.is_empty()
-        || !id
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
-    {
-        return Err(withdrawn());
-    }
-    let path = home
-        .state()
-        .join("encounter-providers")
-        .join(format!("{id}.json"));
-    let bytes = std::fs::read(&path).map_err(|_| withdrawn())?;
-    serde_json::from_slice(&bytes)
-        .map_err(|refused| format!("the configured provider {id} is unreadable ({refused})"))
+    crate::encounter_service::configured_row(home, id)
+        .map_err(|refused| {
+            format!(
+                "the configured providers are unreadable ({})",
+                refused.message()
+            )
+        })?
+        .ok_or_else(|| {
+            format!(
+                "the agent the session opened on ({id}) is no longer a configured encounter provider"
+            )
+        })
 }
 
 /// The World a working directory stands in: the Central root whose `Work`
@@ -572,5 +567,19 @@ mod tests {
             .provider
             .unwrap_err();
         assert!(withdrawn.contains("derive"), "{withdrawn}");
+        // Opened on a harness by its slug with no row stored, the session's
+        // agent is the row that harness's profile stands for, unresolved, so
+        // it resolves again where the task runs.
+        EncounterStore::open(&world.home)
+            .unwrap()
+            .append(
+                &session,
+                &json!({"kind": "binding", "provider": "gemini", "cwd": place}),
+            )
+            .unwrap();
+        let derived = standing(&world.home, &session).unwrap().provider.unwrap();
+        assert_eq!(derived.id, "gemini");
+        assert_eq!(derived.from_profile.as_deref(), Some("gemini"));
+        assert!(derived.argv.is_empty(), "{:?}", derived.argv);
     }
 }

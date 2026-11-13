@@ -94,7 +94,7 @@ fn coexistence_add(home: &Path) {
 }
 
 /// An agent provider the connector's --agent-backing names, so the posture
-/// carries the resolved registry entry. The registry is
+/// carries its registry entry as configured. The registry is
 /// `state/encounter-providers/<id>.json`, read the same way serve reads it.
 fn provider_add(home: &Path) {
     let dir = home.join("state/encounter-providers");
@@ -362,6 +362,8 @@ fn plan_names_every_posture_item_and_never_a_token_value() {
 fn plan_refuses_a_connector_backing_no_provider_names_the_fact() {
     let source = TempDir::new().unwrap();
     let token = write_token(source.path(), "telegram.token");
+    // No row is stored under the id, and no embedded harness profile is
+    // named by it either: nothing would answer the connector's conversations.
     let (ok, _, _) = run(
         source.path(),
         &[
@@ -375,7 +377,7 @@ fn plan_refuses_a_connector_backing_no_provider_names_the_fact() {
             "--token-location",
             &format!("file:{}", token.display()),
             "--agent-backing",
-            "pi",
+            "no-such-harness",
         ],
     );
     assert!(ok);
@@ -388,6 +390,68 @@ fn plan_refuses_a_connector_backing_no_provider_names_the_fact() {
         envelope["error"]["code"],
         "gateway.hoist_backing_unresolved"
     );
+}
+
+/// A backing named by a harness's slug with no row stored is answered the way
+/// an open is answered — by the row the harness profile stands for — so the
+/// posture packs; that row is derived on the target in turn, so nothing of
+/// it moves.
+#[test]
+fn plan_packs_a_backing_a_harness_profile_answers_and_moves_no_row_for_it() {
+    let source = TempDir::new().unwrap();
+    let token = write_token(source.path(), "telegram.token");
+    connector_add(source.path(), &token, Some("gemini"));
+    seed_state(source.path());
+
+    let (ok, envelope, _) = run(
+        source.path(),
+        &["gateway", "hoist", "--to", "workcell:omarchy"],
+    );
+    assert!(ok, "a harness slug backs the connector: {envelope}");
+    let plan = &envelope["data"];
+    assert_eq!(plan["moves"]["agent_providers"], json!([]), "{plan}");
+    assert!(
+        !source.path().join("state/encounter-providers").exists(),
+        "packing writes no provider row"
+    );
+}
+
+/// A stored profile row moves as it was configured — `from_profile` and no
+/// argv of its own — so the target resolves it from its own profiles; a
+/// resolved snapshot carrying both would be refused by the target's registry.
+#[test]
+fn plan_packs_a_stored_profile_row_as_configured() {
+    let source = TempDir::new().unwrap();
+    let token = write_token(source.path(), "telegram.token");
+    connector_add(source.path(), &token, Some("gemini"));
+    let dir = source.path().join("state/encounter-providers");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("gemini.json"),
+        serde_json::to_vec_pretty(&json!({
+            "protocol": "acp",
+            "id": "gemini",
+            "label": "My Gemini",
+            "argv": [],
+            "from_profile": "gemini",
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    seed_state(source.path());
+
+    let (ok, envelope, _) = run(
+        source.path(),
+        &["gateway", "hoist", "--to", "workcell:omarchy"],
+    );
+    assert!(ok, "{envelope}");
+    let providers = envelope["data"]["moves"]["agent_providers"]
+        .as_array()
+        .unwrap();
+    assert_eq!(providers.len(), 1, "{providers:?}");
+    assert_eq!(providers[0]["id"], "gemini");
+    assert_eq!(providers[0]["from_profile"], "gemini");
+    assert_eq!(providers[0]["argv"], json!([]));
 }
 
 // ---------------------------------------------------------------------------

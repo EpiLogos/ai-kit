@@ -712,6 +712,78 @@ fn error(message: impl std::fmt::Display) -> AikitError {
     AikitError::new("encounter.runtime", message.to_string())
 }
 
+/// The provider registry as stored: every `state/encounter-providers/*.json`
+/// row of `home` with its file, unresolved (a profile row keeps
+/// `from_profile` and no argv of its own). The one read of the registry —
+/// the encounter plane, the gateway's agent backings and its hoist, and task
+/// derivation all read it through the functions below.
+fn stored_rows(home: &AikitHome) -> Result<Vec<(PathBuf, EncounterProvider)>> {
+    let root = home.state().join("encounter-providers");
+    if !root.exists() {
+        return Ok(Vec::new());
+    }
+    let unreadable = |path: &Path, failure: &dyn std::fmt::Display| {
+        error(format!("{}: {failure}", path.display()))
+    };
+    let mut rows = Vec::new();
+    for entry in std::fs::read_dir(&root).map_err(|failure| unreadable(&root, &failure))? {
+        let path = entry.map_err(|failure| unreadable(&root, &failure))?.path();
+        if path.extension().and_then(|s| s.to_str()) == Some("json") {
+            let bytes = std::fs::read(&path).map_err(|failure| unreadable(&path, &failure))?;
+            let row: EncounterProvider =
+                serde_json::from_slice(&bytes).map_err(|failure| unreadable(&path, &failure))?;
+            rows.push((path, row));
+        }
+    }
+    Ok(rows)
+}
+
+/// The stored provider rows, each resolved at load. Profile-derived
+/// providers resolve their connection facts here, at load, from the embedded
+/// profile — never a hand-copied snapshot. A provider that cannot resolve
+/// refuses naming its file.
+pub(crate) fn stored_providers(home: &AikitHome) -> Result<Vec<EncounterProvider>> {
+    stored_rows(home)?
+        .into_iter()
+        .map(|(path, row)| {
+            crate::encounter_profile_provider::resolve_provider(row).map_err(|failure| {
+                AikitError::new(failure.code(), format!("{}: {failure}", path.display()))
+            })
+        })
+        .collect()
+}
+
+/// The stored row an id names, as it was configured (unresolved). `None`
+/// when no row is stored under the id.
+pub(crate) fn stored_row(home: &AikitHome, id: &str) -> Result<Option<EncounterProvider>> {
+    Ok(stored_rows(home)?
+        .into_iter()
+        .map(|(_, row)| row)
+        .find(|row| row.id == id))
+}
+
+/// The provider row an id names as configured (unresolved): the stored row
+/// under it — a stored row always wins — else the row an embedded harness
+/// profile stands for ([`crate::encounter_profile_provider::profile_row`]),
+/// written nowhere. `None` when neither names it.
+pub(crate) fn configured_row(home: &AikitHome, id: &str) -> Result<Option<EncounterProvider>> {
+    Ok(stored_row(home, id)?.or_else(|| crate::encounter_profile_provider::profile_row(id)))
+}
+
+/// The provider an id names, resolved: the stored row configured under it —
+/// a stored row always wins — else the row an embedded harness profile
+/// stands for, resolved exactly as a stored profile row and written nowhere.
+/// `None` when neither names it. Every lookup of a provider by id — an open,
+/// a gateway connector's agent backing, a hoist — is this one.
+pub(crate) fn provider_named(home: &AikitHome, id: &str) -> Result<Option<EncounterProvider>> {
+    if let Some(row) = stored_providers(home)?.into_iter().find(|row| row.id == id) {
+        return Ok(Some(row));
+    }
+    crate::encounter_profile_provider::profile_row(id)
+        .map(crate::encounter_profile_provider::resolve_provider)
+        .transpose()
+}
+
 const NATIVE_STARTUP_TIMEOUT: Duration = Duration::from_secs(90);
 const NATIVE_CONTROL_TIMEOUT: Duration = Duration::from_secs(90);
 
@@ -1193,11 +1265,7 @@ impl EncounterService {
         let provider = crate::encounter_take_body::agent_provider(
             opened,
             &Self::read_task(home, session)?,
-            |id| {
-                service
-                    .providers()
-                    .is_ok_and(|rows| rows.iter().any(|row| row.id == id))
-            },
+            |id| service.provider(id).is_ok_and(|row| row.is_some()),
         );
         let model = service
             .store
@@ -1218,17 +1286,14 @@ impl EncounterService {
         home: &AikitHome,
         provider: &str,
     ) -> std::result::Result<(String, String), String> {
-        let rows = Self::new(home.clone())
-            .and_then(|service| service.providers())
+        let row = Self::new(home.clone())
+            .and_then(|service| service.provider(provider))
             .map_err(|error| {
                 format!(
                     "The encounter providers could not be read: {}",
                     error.message()
                 )
-            })?;
-        let row = rows
-            .iter()
-            .find(|row| row.id == provider)
+            })?
             .ok_or_else(|| format!("AIKit keeps no encounter provider {provider}"))?;
         let profile = match row.from_profile.as_deref() {
             Some(slug) => aikit_adapters::profiles::for_slug(slug),
@@ -1261,34 +1326,15 @@ impl EncounterService {
             )),
         }
     }
+    /// The provider an id names, resolved: [`provider_named`] in this
+    /// service's home.
+    pub(crate) fn provider(&self, id: &str) -> Result<Option<EncounterProvider>> {
+        provider_named(&self.home, id)
+    }
+    /// The stored provider rows, each resolved at load: [`stored_providers`]
+    /// in this service's home.
     pub(crate) fn providers(&self) -> Result<Vec<EncounterProvider>> {
-        let root = self.home.state().join("encounter-providers");
-        if !root.exists() {
-            return Ok(Vec::new());
-        }
-        let mut rows = Vec::new();
-        for entry in std::fs::read_dir(root).map_err(error)? {
-            let path = entry.map_err(error)?.path();
-            if path.extension().and_then(|s| s.to_str()) == Some("json") {
-                let bytes = std::fs::read(&path).map_err(error)?;
-                let provider: EncounterProvider = serde_json::from_slice(&bytes).map_err(error)?;
-                // Profile-derived providers resolve their connection facts
-                // here, at load, from the embedded profile — never a
-                // hand-copied snapshot. A provider that cannot resolve
-                // refuses naming its file.
-                rows.push(
-                    crate::encounter_profile_provider::resolve_provider(provider).map_err(
-                        |failure| {
-                            AikitError::new(
-                                failure.code(),
-                                format!("{}: {failure}", path.display()),
-                            )
-                        },
-                    )?,
-                );
-            }
-        }
-        Ok(rows)
+        stored_providers(&self.home)
     }
     /// The send guard (OpenRig `session-transport.ts:1012-1050`): only
     /// positive evidence that the session waits on the person refuses a send —
@@ -1477,7 +1523,7 @@ impl EncounterService {
         deadline: Option<Instant>,
     ) -> Result<()> {
         crate::direct_agent_session::check(&self.home, session, &resident.cwd)?;
-        let current = self.providers()?.into_iter().find(|p| p.id == resident.provider)
+        let current = self.provider(&resident.provider)?
             .ok_or_else(|| AikitError::new("encounter.provider_removed", "The resident provider configuration was removed; reopen explicitly before further effects"))?;
         if current.required_context != resident.required_context
             || current.protocol != resident.protocol
@@ -2083,9 +2129,7 @@ impl EncounterService {
             ));
         }
         let configured = self
-            .providers()?
-            .into_iter()
-            .find(|p| p.id == provider)
+            .provider(&provider)?
             .ok_or_else(|| error("ACP provider is not configured in AIKit"))?;
         // A declared connection env/cwd cannot reach the provider child today;
         // launching anyway would accept and silently drop them. Refuse naming
@@ -2720,9 +2764,7 @@ impl EncounterService {
             .check_agency_before(&agent_session, deadline)?
             .map(|(binding, _)| binding);
         let current_provider = self
-            .providers()?
-            .into_iter()
-            .find(|p| p.id == provider)
+            .provider(&provider)?
             .ok_or_else(|| error("Native provider was removed during startup"))?;
         let (current_body, current_task_bound) =
             self.selected_model_provider_before(&agent_session, &current_provider, &cwd, deadline)?;
@@ -3272,7 +3314,10 @@ impl EncounterService {
                     && !self
                         .shutdown_requested
                         .load(std::sync::atomic::Ordering::SeqCst)
-                    && !self.providers()?.is_empty();
+                    && (!self.providers()?.is_empty()
+                        || crate::encounter_profile_provider::profile_rows()
+                            .next()
+                            .is_some());
                 view["actions"] = json!([
                     {"ref":"aikit.encounter.open","enabled":can_open,"reason":if can_open{None}else{Some("A current resident/startup or unresolved native cleanup prevents another open")}},
                     {"ref":"aikit.encounter.reconcile-native-open","enabled":matches!(view["connection"]["state"].as_str(),Some("RecoveryRequired"|"CleanupUncertain")) && view["connection"]["opening"]["kind"]!="native-release-requested","reason":"Exact retained generation, explicit native cleanup confirmation and evidence are required; attestation does not claim provider success"},
@@ -3953,6 +3998,116 @@ mod tests {
             "the derived fallback variants ride the resolved provider into every open"
         );
         assert_eq!(provider.from_profile.as_deref(), Some("gemini"));
+    }
+
+    /// An open may name a harness's slug with no row stored under it: the
+    /// embedded profile's connection facts stand for the row, resolved as a
+    /// stored profile row is, and nothing is written.
+    #[test]
+    fn an_open_may_name_a_harness_slug_without_a_stored_row() {
+        let home = test_home();
+        let service = EncounterService::new(home.clone()).unwrap();
+
+        let gemini = service
+            .provider("gemini")
+            .unwrap()
+            .expect("an embedded profile with an ACP face names a provider");
+        assert_eq!(gemini.id, "gemini");
+        assert_eq!(gemini.label, "Gemini");
+        assert_eq!(gemini.protocol, EncounterProtocol::Acp);
+        assert_eq!(gemini.argv, ["gemini", "--acp"]);
+        assert_eq!(gemini.argv_fallback, [["gemini", "--experimental-acp"]]);
+        assert_eq!(gemini.from_profile.as_deref(), Some("gemini"));
+        let pi = service.provider("pi").unwrap().expect("rpc with connect");
+        assert_eq!(pi.protocol, EncounterProtocol::PiRpc);
+        assert_eq!(pi.argv, ["pi", "--mode", "rpc"]);
+        assert!(
+            !home.state().join("encounter-providers").exists(),
+            "a derived provider writes no row"
+        );
+        assert!(service.providers().unwrap().is_empty());
+
+        // A process-protocol harness, a harness with no connection facts and
+        // an unknown id name no provider.
+        for unnamed in ["droid", "zcode", "no-such-harness"] {
+            assert!(service.provider(unnamed).unwrap().is_none(), "{unnamed}");
+        }
+    }
+
+    /// A stored row under the slug wins over the harness it names.
+    #[test]
+    fn a_stored_row_wins_over_the_harness_slug_it_shares() {
+        let home = test_home();
+        let mut stored = profile_provider("gemini", "gemini");
+        stored.label = "My Gemini".into();
+        EncounterService::configure(&home, stored).unwrap();
+        let service = EncounterService::new(home).unwrap();
+        let gemini = service.provider("gemini").unwrap().unwrap();
+        assert_eq!(gemini.label, "My Gemini");
+        assert_eq!(gemini.argv, ["gemini", "--acp"]);
+    }
+
+    /// The open's model choice is keyed by the provider the open names, so a
+    /// derived provider takes the person's default exactly as a stored row
+    /// does: the same `for_open` read and the same launch flags.
+    #[test]
+    fn a_derived_provider_takes_the_model_default_a_stored_row_would() {
+        let home = test_home();
+        crate::model_defaults::write(
+            &home,
+            &crate::model_defaults::from_value(
+                &json!({"pi": {"model_id": "glm-4.6", "native_provider": "zai"}}),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let derived = EncounterService::new(home.clone())
+            .unwrap()
+            .provider("pi")
+            .unwrap()
+            .unwrap();
+        let chosen = crate::model_defaults::for_open(&home, &derived, false).unwrap();
+        assert_eq!(
+            chosen.as_ref().map(|chosen| chosen.model_id.as_str()),
+            Some("glm-4.6")
+        );
+        assert_eq!(
+            crate::model_defaults::launch_argv(&derived, chosen.as_ref()).unwrap(),
+            [
+                "pi",
+                "--mode",
+                "rpc",
+                "--provider",
+                "zai",
+                "--model",
+                "glm-4.6"
+            ]
+        );
+
+        // The same choice for the same harness configured as a stored row.
+        let stored_home = test_home();
+        crate::model_defaults::write(
+            &stored_home,
+            &crate::model_defaults::from_value(
+                &json!({"pi": {"model_id": "glm-4.6", "native_provider": "zai"}}),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let mut row = profile_provider("pi", "pi");
+        row.protocol = EncounterProtocol::PiRpc;
+        EncounterService::configure(&stored_home, row).unwrap();
+        let stored = EncounterService::new(stored_home.clone())
+            .unwrap()
+            .provider("pi")
+            .unwrap()
+            .unwrap();
+        let stored_choice = crate::model_defaults::for_open(&stored_home, &stored, false).unwrap();
+        assert_eq!(stored_choice, chosen);
+        assert_eq!(
+            crate::model_defaults::launch_argv(&stored, stored_choice.as_ref()).unwrap(),
+            crate::model_defaults::launch_argv(&derived, chosen.as_ref()).unwrap()
+        );
     }
 
     #[test]
