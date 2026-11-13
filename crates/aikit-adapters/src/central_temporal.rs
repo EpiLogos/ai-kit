@@ -12,8 +12,9 @@
 //!
 //! A session makes its own NOW (O-I #1016): its start allocates one clearing
 //! for the session (`central.now.allocate`, idempotent per task) and its end
-//! closes it (`central.now.lifecycle`). The session's ground names that NOW and
-//! its scratch place, never other sessions' NOW items.
+//! closes it (`central.now.lifecycle`); a resumed session re-enters it. The
+//! session's ground names that NOW and its scratch place, never other
+//! sessions' NOW items.
 
 use std::path::{Component, Path};
 
@@ -32,6 +33,8 @@ pub const NOW_LIST_ACTION: &str = "central.now.list";
 pub const WORK_POLICY_ACTION: &str = "central.work.policy";
 pub const CENTRAL_TEMPORAL_PROVIDER_VERSION: &str = "aikit.central-temporal/v1";
 
+const MAX_HUMAN_REFS: usize = 8;
+const MAX_DAY_REFS: usize = 3;
 const MAX_RENDERED_CHARS: usize = 9_000;
 
 /// The ref one harness session is known by in Central, as its NOW's task and
@@ -229,9 +232,10 @@ pub fn read_control_unpushed<R: CommandRunner>(
 #[derive(Debug, Clone, PartialEq)]
 pub struct CentralTemporalGround {
     pub project: String,
-    /// Central's NOW inspection of the Project, kept for readers that map it
-    /// (techne_temporal). The rendered ground carries none of it: other
-    /// sessions' handoffs and old DAY records do not ride a session's turns.
+    /// Central's NOW inspection of the Project. The rendered ground carries
+    /// its status, the human's current-source refs and the recent DAY refs,
+    /// never its active items: other sessions' handoffs do not ride a
+    /// session's turns.
     pub now: Value,
     pub day: Option<CentralDayPointer>,
     /// Control is ahead of its remote. `None` when it is in step or unreadable.
@@ -242,7 +246,9 @@ pub struct CentralTemporalGround {
 
 impl CentralTemporalGround {
     /// Render an orientation fragment, not an authority or activation grant:
-    /// the Project, this session's own NOW and scratch place, and today's Day.
+    /// the Project and its NOW's status, this session's own NOW and scratch
+    /// place, the human's current-source refs, the recent DAY refs, and
+    /// today's Day.
     pub fn render(&self) -> String {
         let mut lines = vec![
             "[Central temporal ground]".to_owned(),
@@ -254,9 +260,40 @@ impl CentralTemporalGround {
         if let Some(unpushed) = &self.control_unpushed {
             lines.push(unpushed.warning());
         }
+
+        let exists = self
+            .now
+            .get("exists")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        lines.push(format!(
+            "NOW: {}",
+            if exists { "present" } else { "not initialized" }
+        ));
         if let Some(session_now) = &self.session_now {
             lines.extend(session_now.lines());
         }
+
+        if let Some(refs) = self.now.get("human_scratch").and_then(Value::as_array) {
+            let refs = refs
+                .iter()
+                .filter_map(Value::as_str)
+                .take(MAX_HUMAN_REFS)
+                .collect::<Vec<_>>();
+            if !refs.is_empty() {
+                lines.push(format!("human-current-source refs: {}", refs.join(", ")));
+            }
+        }
+
+        if let Some(days) = self.now.get("day_records").and_then(Value::as_array) {
+            let mut refs = days.iter().filter_map(Value::as_str).collect::<Vec<_>>();
+            refs.sort();
+            let start = refs.len().saturating_sub(MAX_DAY_REFS);
+            if !refs[start..].is_empty() {
+                lines.push(format!("recent DAY refs: {}", refs[start..].join(", ")));
+            }
+        }
+
         lines.push(day_line(self.day.as_ref()));
         bounded(&lines.join("\n"), MAX_RENDERED_CHARS)
     }
@@ -309,7 +346,9 @@ pub fn read_day_pointer<R: CommandRunner>(
 
 /// Open the session's own NOW: read the placement policy's revision, then
 /// allocate one clearing whose task and only participant is the session's
-/// ref. Allocation is idempotent per task, so a replay answers the same NOW.
+/// ref. Allocation is idempotent per task while that NOW is active, so a
+/// replay of a live session answers the same NOW. A NOW the session's end
+/// closed is not allocated again: [`reopen_session_now`] re-enters it.
 /// `project` is `None` for a session in the root register.
 pub fn open_session_now<R: CommandRunner>(
     runner: &R,
@@ -319,6 +358,40 @@ pub fn open_session_now<R: CommandRunner>(
     session_ref: &str,
 ) -> Result<SessionNow> {
     let policy = policy_revision(runner, central_root, project)?;
+    allocate_session_now(runner, central_root, project, client, session_ref, &policy)
+}
+
+/// Open the NOW of a session that may have held one before: a session
+/// resumed after its end, or one whose start this record never saw. Central
+/// refuses another allocation of a NOW that is no longer active and asks for
+/// explicit lifecycle re-entry, which keeps the NOW's identity: the session's
+/// NOW is found among the clearings naming it, moved back to `active` at the
+/// revision just listed, and answered by its allocation with its scratch
+/// place. An active NOW is answered as it stands; a session with no NOW in
+/// this scope gets one. Central's refusal comes back in its own words.
+pub fn reopen_session_now<R: CommandRunner>(
+    runner: &R,
+    central_root: &Path,
+    project: Option<&str>,
+    client: &str,
+    session_ref: &str,
+) -> Result<SessionNow> {
+    let listed = listed_session_now(runner, central_root, project, session_ref)?;
+    let policy = policy_revision(runner, central_root, project)?;
+    if let Some(listed) = listed.filter(|listed| listed.lifecycle != "active") {
+        move_session_now(runner, central_root, project, &listed, &policy, "active")?;
+    }
+    allocate_session_now(runner, central_root, project, client, session_ref, &policy)
+}
+
+fn allocate_session_now<R: CommandRunner>(
+    runner: &R,
+    central_root: &Path,
+    project: Option<&str>,
+    client: &str,
+    session_ref: &str,
+    policy: &str,
+) -> Result<SessionNow> {
     let purpose = format!("{client} session in {}", project.unwrap_or("the root"));
     let allocation = action(
         runner,
@@ -362,6 +435,32 @@ pub fn close_session_now<R: CommandRunner>(
     project: Option<&str>,
     session_ref: &str,
 ) -> Result<Option<String>> {
+    let Some(listed) = listed_session_now(runner, central_root, project, session_ref)?
+        .filter(|listed| listed.lifecycle == "active")
+    else {
+        return Ok(None);
+    };
+    let policy = policy_revision(runner, central_root, project)?;
+    move_session_now(runner, central_root, project, &listed, &policy, "closed")?;
+    Ok(Some(listed.now_ref))
+}
+
+/// The session's NOW as `central.now.list` lists it in one scope.
+struct ListedNow {
+    now_ref: String,
+    revision: String,
+    lifecycle: String,
+}
+
+/// The NOW whose task is the session's ref, among the clearings naming the
+/// session as participant, whatever its lifecycle. One task has one NOW in a
+/// scope.
+fn listed_session_now<R: CommandRunner>(
+    runner: &R,
+    central_root: &Path,
+    project: Option<&str>,
+    session_ref: &str,
+) -> Result<Option<ListedNow>> {
     let listing = action(
         runner,
         central_root,
@@ -373,10 +472,7 @@ pub fn close_session_now<R: CommandRunner>(
         .and_then(Value::as_array)
         .into_iter()
         .flatten()
-        .find(|record| {
-            record.get("task_ref").and_then(Value::as_str) == Some(session_ref)
-                && record.get("lifecycle").and_then(Value::as_str) == Some("active")
-        })
+        .find(|record| record.get("task_ref").and_then(Value::as_str) == Some(session_ref))
     else {
         return Ok(None);
     };
@@ -388,7 +484,25 @@ pub fn close_session_now<R: CommandRunner>(
         .get("revision")
         .and_then(|revision| revision.get("revision").unwrap_or(revision).as_str())
         .ok_or_else(|| invalid_output(NOW_LIST_ACTION, "lists a record with no revision"))?;
-    let policy = policy_revision(runner, central_root, project)?;
+    Ok(Some(ListedNow {
+        now_ref: now_ref.to_owned(),
+        revision: revision.to_owned(),
+        lifecycle: record
+            .get("lifecycle")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_owned(),
+    }))
+}
+
+fn move_session_now<R: CommandRunner>(
+    runner: &R,
+    central_root: &Path,
+    project: Option<&str>,
+    listed: &ListedNow,
+    policy: &str,
+    lifecycle: &str,
+) -> Result<Value> {
     action(
         runner,
         central_root,
@@ -396,14 +510,13 @@ pub fn close_session_now<R: CommandRunner>(
         scoped(
             project,
             json!({
-                "now_ref": now_ref,
-                "expected_revision": revision,
+                "now_ref": listed.now_ref,
+                "expected_revision": listed.revision,
                 "expected_policy_revision": policy,
-                "lifecycle": "closed",
+                "lifecycle": lifecycle,
             }),
         ),
-    )?;
-    Ok(Some(now_ref.to_owned()))
+    )
 }
 
 fn policy_revision<R: CommandRunner>(
@@ -644,20 +757,18 @@ mod tests {
             !rendered.contains("THE WHOLE DAY DOCUMENT"),
             "a pointer, never the body"
         );
-        // The retired NOW ritual: other sessions' handoffs, old DAY records
-        // and the human scratch list no longer ride a session's ground.
-        for retired in [
-            "Current work",
-            "continue from live state",
-            "agent:Epii",
-            "ProjectCentral/now/day/2026-09-01.md",
-            "recent DAY refs",
-            "ProjectCentral/now/user/current.md",
+        // The NOW's status, the human's current-source refs and the recent
+        // DAY refs still orient the session…
+        for kept in [
+            "NOW: present",
+            "human-current-source refs: ProjectCentral/now/user/current.md",
+            "recent DAY refs: ProjectCentral/now/day/2026-09-01.md",
         ] {
-            assert!(
-                !rendered.contains(retired),
-                "{retired} rendered: {rendered}"
-            );
+            assert!(rendered.contains(kept), "{kept} missing: {rendered}");
+        }
+        // …while another session's handoff never rides it.
+        for other in ["Current work", "continue from live state", "agent:Epii"] {
+            assert!(!rendered.contains(other), "{other} rendered: {rendered}");
         }
         assert!(
             !runner
@@ -853,6 +964,7 @@ mod tests {
         let rendered = ground.render();
         assert!(rendered.chars().count() <= MAX_RENDERED_CHARS);
         let warning_at = rendered.find("WARNING: Control is 6 commits").unwrap();
+        assert!(warning_at < rendered.find("NOW: present").unwrap());
         assert!(
             warning_at
                 < rendered
@@ -1198,6 +1310,109 @@ mod tests {
             None
         );
         assert_eq!(runner.calls().len(), 1, "only the listing is read");
+    }
+
+    fn listed_as(lifecycle: &str) -> String {
+        success(json!({"records": [
+            {"now_ref": "central:now:project:example:k1", "task_ref": REF, "lifecycle": lifecycle,
+             "participant_refs": [REF], "revision": {"byte_len": 9, "revision": "rev-closed"}}
+        ]}))
+    }
+
+    #[test]
+    fn a_resumed_session_re_enters_its_closed_now_rather_than_allocating_again() {
+        let runner = ScriptedRunner::new()
+            .on(NOW_LIST_ACTION, &listed_as("closed"))
+            .on(WORK_POLICY_ACTION, &policy("rev-policy-3"))
+            .on(
+                NOW_LIFECYCLE_ACTION,
+                &success(json!({"lifecycle": "active"})),
+            )
+            .on(NOW_ALLOCATE_ACTION, &allocation());
+        let now =
+            reopen_session_now(&runner, Path::new(ROOT), Some("example"), "claude", REF).unwrap();
+        assert_eq!(
+            now,
+            SessionNow {
+                now_ref: "central:now:project:example:k1".into(),
+                scratch: Some(SCRATCH.into()),
+            }
+        );
+        let calls = runner.calls();
+        assert_eq!(calls.len(), 4, "{calls:?}");
+        assert_eq!(
+            ctrl_call(&calls[0]),
+            (
+                NOW_LIST_ACTION.into(),
+                json!({"project": "example", "participant_refs": [REF]})
+            )
+        );
+        assert_eq!(ctrl_call(&calls[1]).0, WORK_POLICY_ACTION);
+        // Re-entry keeps the NOW's identity, at the revision just listed…
+        assert_eq!(
+            ctrl_call(&calls[2]),
+            (
+                NOW_LIFECYCLE_ACTION.into(),
+                json!({
+                    "project": "example",
+                    "now_ref": "central:now:project:example:k1",
+                    "expected_revision": "rev-closed",
+                    "expected_policy_revision": "rev-policy-3",
+                    "lifecycle": "active",
+                })
+            )
+        );
+        // …and the allocation, idempotent again, answers it with its scratch.
+        let (id, input) = ctrl_call(&calls[3]);
+        assert_eq!(id, NOW_ALLOCATE_ACTION);
+        assert_eq!(input["task_ref"], REF);
+        assert_eq!(input["expected_policy_revision"], "rev-policy-3");
+    }
+
+    #[test]
+    fn reopening_an_active_now_or_none_moves_no_lifecycle() {
+        for listing in [listed_as("active"), success(json!({"records": []}))] {
+            let runner = ScriptedRunner::new()
+                .on(NOW_LIST_ACTION, &listing)
+                .on(WORK_POLICY_ACTION, &policy("rev"))
+                .on(NOW_ALLOCATE_ACTION, &allocation());
+            reopen_session_now(&runner, Path::new(ROOT), Some("example"), "claude", REF).unwrap();
+            let ids = runner
+                .calls()
+                .iter()
+                .map(|call| ctrl_call(call).0)
+                .collect::<Vec<_>>();
+            assert_eq!(
+                ids,
+                [NOW_LIST_ACTION, WORK_POLICY_ACTION, NOW_ALLOCATE_ACTION]
+            );
+        }
+    }
+
+    #[test]
+    fn a_refused_re_entry_is_centrals_refusal_and_allocates_nothing() {
+        let runner = Refusing {
+            inner: ScriptedRunner::new()
+                .on(NOW_LIST_ACTION, &listed_as("closed"))
+                .on(WORK_POLICY_ACTION, &policy("rev"))
+                .on(NOW_ALLOCATE_ACTION, &allocation()),
+            action: NOW_LIFECYCLE_ACTION,
+            envelope: json!({"ok": false, "status": "denied", "action": NOW_LIFECYCLE_ACTION,
+                "error": {"code": "denied", "message": "missing bounded CENTRAL_NATIVE_TOKEN"}})
+            .to_string(),
+        };
+        let error = reopen_session_now(&runner, Path::new(ROOT), Some("example"), "claude", REF)
+            .unwrap_err();
+        assert!(
+            error.message().contains("CENTRAL_NATIVE_TOKEN"),
+            "{}",
+            error.message()
+        );
+        assert!(!runner
+            .inner
+            .call_lines()
+            .iter()
+            .any(|line| line.contains(NOW_ALLOCATE_ACTION)));
     }
 
     #[test]

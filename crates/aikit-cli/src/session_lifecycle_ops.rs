@@ -170,26 +170,35 @@ pub fn harness_session(session_ref: &str) -> Result<SessionId> {
     ))
 }
 
-/// Record a harness session's start, once (O-I #1016). A session that already
-/// has a history — resumed, cleared or compacted, or ended — gets no second
-/// start: the lifecycle has no restart event and its end is terminal.
-/// `Ok(true)` when this call recorded the start. The event's origin is the
-/// session ref, which is also the session's NOW task in Central.
-pub fn record_harness_start(home: &AikitHome, session_ref: &str) -> Result<bool> {
+/// What a harness session's start found in its lifecycle (O-I #1016).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HarnessStart {
+    /// The session's first start: recorded.
+    First,
+    /// The session had ended and is resumed (`claude --resume`, `/resume`,
+    /// `codex resume` reuse its id): its start is recorded again.
+    Resumed,
+    /// A start replayed for a live session (resume, clear, compact), or for a
+    /// cancelled one, whose cancellation is terminal: nothing recorded.
+    Replayed,
+}
+
+/// Record a harness session's start (O-I #1016): its first start, and the
+/// start of each resume after an end. A start replayed for a live session is
+/// no second start. The event's origin is the session ref, which is also the
+/// session's NOW task in Central.
+pub fn record_harness_start(home: &AikitHome, session_ref: &str) -> Result<HarnessStart> {
     let session = harness_session(session_ref)?;
-    match home.session_lifecycle_history(&session) {
-        Ok(_) => Ok(false),
-        Err(error) if error.code() == "session_lifecycle.unknown_session" => {
-            home.session_lifecycle_record(
-                session,
-                SessionLifecycleRecord::Start,
-                None,
-                session_ref,
-            )?;
-            Ok(true)
-        }
-        Err(error) => Err(error),
-    }
+    let found = match home.session_lifecycle_history(&session) {
+        Ok(history) => match history.last().map(|event| event.kind) {
+            Some(SessionLifecycleEventKind::SessionEnded) => HarnessStart::Resumed,
+            _ => return Ok(HarnessStart::Replayed),
+        },
+        Err(error) if error.code() == "session_lifecycle.unknown_session" => HarnessStart::First,
+        Err(error) => return Err(error),
+    };
+    home.session_lifecycle_record(session, SessionLifecycleRecord::Start, None, session_ref)?;
+    Ok(found)
 }
 
 /// Record a harness session's end. `Ok(false)` when this store never saw the

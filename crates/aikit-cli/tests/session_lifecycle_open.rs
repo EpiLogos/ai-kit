@@ -377,7 +377,8 @@ fn binary_lifecycle_records_and_reopens_with_the_same_identities() {
 
 /// O-I #1016: a harness session's SessionStart and SessionEnd, dispatched
 /// through the Service as `aikit hook dispatch` dispatches them, land in that
-/// Service's own home. A resumed start of the live session is no second start.
+/// Service's own home. A resumed start of the live session is no second start;
+/// a resume after the end starts the session again.
 /// The project stands outside any Central world, so no NOW is asked for.
 #[test]
 fn hook_dispatch_records_a_harness_sessions_start_and_end_in_the_services_home() {
@@ -393,11 +394,7 @@ fn hook_dispatch_records_a_harness_sessions_start_and_end_in_the_services_home()
         )
         .in_cwd(project_dir.path())
     };
-    for (kind, source) in [
-        (HookEventKind::SessionStart, "startup"),
-        (HookEventKind::SessionStart, "resume"),
-        (HookEventKind::SessionEnd, "exit"),
-    ] {
+    let dispatch = |kind: HookEventKind, source: &str| {
         let decision = service.dispatch_hook(&event(kind, source)).unwrap();
         assert!(decision.allowed);
         assert!(
@@ -408,6 +405,13 @@ fn hook_dispatch_records_a_harness_sessions_start_and_end_in_the_services_home()
             "{:?}",
             decision.warnings
         );
+    };
+    for (kind, source) in [
+        (HookEventKind::SessionStart, "startup"),
+        (HookEventKind::SessionStart, "resume"),
+        (HookEventKind::SessionEnd, "exit"),
+    ] {
+        dispatch(kind, source);
     }
     let session =
         aikit_cli::session_lifecycle_ops::harness_session("aikit:session:claude:lifecycle-hook-1")
@@ -422,4 +426,16 @@ fn hook_dispatch_records_a_harness_sessions_start_and_end_in_the_services_home()
         model.event_count, 2,
         "a resumed start is not a second start"
     );
+
+    // Resumed after its end (`claude --resume` reuses the id): it runs again
+    // on its own history, and ends again.
+    dispatch(HookEventKind::SessionStart, "resume");
+    let model = service.session_lifecycle_read_model(&session).unwrap();
+    assert_eq!(model.state, SessionLifecycleState::Running);
+    assert_eq!(model.event_count, 3);
+    dispatch(HookEventKind::SessionEnd, "exit");
+    let model = service.session_lifecycle_read_model(&session).unwrap();
+    assert_eq!(model.state, SessionLifecycleState::Ended);
+    assert_eq!(model.event_count, 4);
+    assert_eq!(service.session_lifecycle_list().unwrap(), vec![session]);
 }

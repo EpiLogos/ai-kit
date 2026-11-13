@@ -13,21 +13,23 @@
 //!
 //! A session makes its own NOW (O-I #1016, [`session_boundary`]): its start is
 //! recorded in AIKit's lifecycle and opens one NOW for it in Central; its end
-//! is recorded and closes that NOW. The ground then names the session's own
-//! NOW and scratch place, and no other session's NOW items.
+//! is recorded and closes that NOW, and a resume re-enters it. The ground then
+//! names the session's own NOW and scratch place, and no other session's NOW
+//! items.
 
 use std::path::{Path, PathBuf};
 
 use aikit_adapters::central_temporal::{
     close_session_now, open_session_now, project_member, read_central_temporal_ground,
-    read_control_unpushed, read_day_pointer, render_root_ground, session_ref, SessionNow,
+    read_control_unpushed, read_day_pointer, render_root_ground, reopen_session_now, session_ref,
+    SessionNow,
 };
 use aikit_adapters::runner::CommandRunner;
 use aikit_core::hooks::{HookDecision, HookEvent, HookEventKind};
 use aikit_store::AikitHome;
 use serde::{Deserialize, Serialize};
 
-use crate::session_lifecycle_ops::{record_harness_end, record_harness_start};
+use crate::session_lifecycle_ops::{record_harness_end, record_harness_start, HarnessStart};
 
 pub fn event_needs_reground(kind: &HookEventKind) -> bool {
     matches!(
@@ -72,6 +74,7 @@ pub fn reground<R: CommandRunner>(
     let session_now = ledger
         .zip(session.as_deref())
         .and_then(|(ledger, session)| ledger.session_now(session))
+        .filter(|held| !held.closed)
         .map(|held| held.now);
     let rendered = match read_central_temporal_ground(runner, &central_root, project_root) {
         Ok(Some(mut ground)) => {
@@ -203,8 +206,9 @@ impl FloorLedger {
         ))
     }
 
-    /// The NOW Central allocated for this session at its start, and where.
-    /// Kept for the session's life: it changes only at a start or an end.
+    /// The NOW Central opened for this session, and where. Kept past the
+    /// session's end, marked closed, so a resume re-enters that NOW: it
+    /// changes only at a start or an end.
     pub fn session_now(&self, session: &str) -> Option<HeldNow> {
         let text = std::fs::read_to_string(self.now_path(session)).ok()?;
         serde_json::from_str(&text).ok()
@@ -216,10 +220,6 @@ impl FloorLedger {
                 let _ = std::fs::write(self.now_path(session), text);
             }
         }
-    }
-
-    fn release_session_now(&self, session: &str) {
-        let _ = std::fs::remove_file(self.now_path(session));
     }
 }
 
@@ -249,6 +249,9 @@ impl SessionWorld {
 pub struct HeldNow {
     pub world: SessionWorld,
     pub now: SessionNow,
+    /// The session's end closed this NOW in Central; a resume re-enters it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub closed: bool,
 }
 
 /// A session's own start and end (O-I #1016). SessionStart records the start
@@ -257,9 +260,12 @@ pub struct HeldNow {
 /// unavailable, Central's refusal — is a warning on the decision, never a
 /// verdict change, and nothing is retried.
 ///
-/// A start replayed for a live session (resume, clear, compact) records no
-/// second start and allocates nothing when the session already holds its NOW
-/// in this world. `world` is `None` outside any Central world: the lifecycle
+/// One session holds one NOW. A start replayed for a live session (resume,
+/// clear, compact) records no second start and opens nothing: the session
+/// keeps the NOW it holds, wherever its start opened it. A session resumed
+/// after its end (`claude --resume`, `/resume`, `codex resume` reuse the id)
+/// starts again in the lifecycle and re-enters the NOW its end closed, where
+/// it was opened. `world` is `None` outside any Central world: the lifecycle
 /// is still recorded, and there is no NOW.
 pub fn session_boundary<R: CommandRunner>(
     decision: &mut HookDecision,
@@ -281,30 +287,56 @@ pub fn session_boundary<R: CommandRunner>(
     let reference = session_ref(&event.client, &session);
     let held = ledger.and_then(|ledger| ledger.session_now(&session));
     if event.kind == HookEventKind::SessionStart {
-        let started = match home.map(|home| record_harness_start(home, &reference)) {
-            Some(Ok(started)) => started,
+        let start = match home.map(|home| record_harness_start(home, &reference)) {
+            Some(Ok(start)) => Some(start),
             Some(Err(error)) => {
                 decision.warnings.push(format!(
                     "session lifecycle start not recorded for {reference}: {}",
                     error.message()
                 ));
-                false
+                None
             }
-            None => false,
+            None => None,
         };
         let Some(world) = world else {
             return;
         };
-        if !started && held.as_ref().is_some_and(|held| &held.world == world) {
-            return;
-        }
-        match open_session_now(
-            runner,
-            &world.central_root,
-            world.project.as_deref(),
-            &event.client,
-            &reference,
-        ) {
+        let (world, opened) = match &held {
+            Some(held) if !held.closed => return,
+            Some(held) => (
+                &held.world,
+                reopen_session_now(
+                    runner,
+                    &held.world.central_root,
+                    held.world.project.as_deref(),
+                    &event.client,
+                    &reference,
+                ),
+            ),
+            // Only a first start is known to have no NOW yet: any other may
+            // find one, closed, where it stands.
+            None if start == Some(HarnessStart::First) => (
+                world,
+                open_session_now(
+                    runner,
+                    &world.central_root,
+                    world.project.as_deref(),
+                    &event.client,
+                    &reference,
+                ),
+            ),
+            None => (
+                world,
+                reopen_session_now(
+                    runner,
+                    &world.central_root,
+                    world.project.as_deref(),
+                    &event.client,
+                    &reference,
+                ),
+            ),
+        };
+        match opened {
             Ok(now) => {
                 if let Some(ledger) = ledger {
                     ledger.hold_session_now(
@@ -312,6 +344,7 @@ pub fn session_boundary<R: CommandRunner>(
                         &HeldNow {
                             world: world.clone(),
                             now,
+                            closed: false,
                         },
                     );
                 }
@@ -329,23 +362,46 @@ pub fn session_boundary<R: CommandRunner>(
             error.message()
         ));
     }
+    if held.as_ref().is_some_and(|held| held.closed) {
+        return;
+    }
     // Closed where it was opened; a session whose start predates this record
     // is looked for where it ends.
-    if let Some(world) = held.as_ref().map(|held| &held.world).or(world) {
-        if let Err(error) = close_session_now(
-            runner,
-            &world.central_root,
-            world.project.as_deref(),
-            &reference,
-        ) {
-            decision.warnings.push(format!(
-                "this session's NOW was not closed in Central: {}",
-                error.message()
-            ));
+    let Some(world) = held.as_ref().map(|held| &held.world).or(world) else {
+        return;
+    };
+    match close_session_now(
+        runner,
+        &world.central_root,
+        world.project.as_deref(),
+        &reference,
+    ) {
+        // Kept, closed, so a resume re-enters it where it was opened. A
+        // refused close leaves the NOW active and held: a resume keeps it.
+        Ok(closed) => {
+            let now = match (&held, closed) {
+                (Some(held), _) => Some(held.now.clone()),
+                (None, Some(now_ref)) => Some(SessionNow {
+                    now_ref,
+                    scratch: None,
+                }),
+                (None, None) => None,
+            };
+            if let (Some(ledger), Some(now)) = (ledger, now) {
+                ledger.hold_session_now(
+                    &session,
+                    &HeldNow {
+                        world: world.clone(),
+                        now,
+                        closed: true,
+                    },
+                );
+            }
         }
-    }
-    if let Some(ledger) = ledger {
-        ledger.release_session_now(&session);
+        Err(error) => decision.warnings.push(format!(
+            "this session's NOW was not closed in Central: {}",
+            error.message()
+        )),
     }
 }
 
@@ -1005,6 +1061,11 @@ mod tests {
     /// Central as the session's start, turns and end meet it. The Project's
     /// NOW holds another session's handoff, which must never ride this one.
     fn owner_runner() -> ScriptedRunner {
+        owner_runner_listing(&[&listed("active")])
+    }
+
+    /// [`owner_runner`], with `central.now.list` answering `listings` in turn.
+    fn owner_runner_listing(listings: &[&str]) -> ScriptedRunner {
         ScriptedRunner::new()
             .on(
                 "central.work.policy",
@@ -1016,7 +1077,7 @@ mod tests {
                     json!({"created": true, "now_ref": NOW_REF, "writable_destination": SCRATCH}),
                 ),
             )
-            .on("central.now.list", &listed("active"))
+            .sequence("central.now.list", listings)
             .on(
                 "central.now.lifecycle",
                 &success(json!({"lifecycle": "closed"})),
@@ -1174,7 +1235,8 @@ mod tests {
         ] {
             assert!(closes[0].contains(part), "{part} missing: {}", closes[0]);
         }
-        assert!(ledger.session_now("sess-1").is_none());
+        // Kept, closed, for a resume to re-enter; no turn names it now.
+        assert!(ledger.session_now("sess-1").is_some_and(|held| held.closed));
 
         // An end replayed for an ended session records nothing more.
         let replay = dispatch(&end, Some(&world), &home, &ledger, &runner);
@@ -1242,6 +1304,133 @@ mod tests {
             1,
             "no retry"
         );
+
+        // The NOW stayed active, so a resume keeps it: the session runs
+        // again and nothing is allocated or moved.
+        let mut resumed = decision(HookEventKind::SessionStart);
+        session_boundary(
+            &mut resumed,
+            &hook_at(
+                PROJECT,
+                HookEventKind::SessionStart,
+                json!({"session_id": "sess-1", "source": "resume"}),
+            ),
+            Some(&world),
+            Some(&home),
+            Some(&ledger),
+            &runner,
+        );
+        assert!(resumed.warnings.is_empty(), "{:?}", resumed.warnings);
+        assert_eq!(calls_of(&runner, "central.now.allocate").len(), 1);
+        assert_eq!(calls_of(&runner, "central.now.lifecycle").len(), 1);
+        let held = ledger.session_now("sess-1").unwrap();
+        assert!(!held.closed);
+        assert_eq!(held.now.now_ref, NOW_REF);
+        assert_eq!(
+            home.session_lifecycle_read_model(&harness_session(REF).unwrap())
+                .unwrap()
+                .state,
+            SessionLifecycleState::Running
+        );
+    }
+
+    #[test]
+    fn a_session_resumed_after_its_end_runs_again_and_re_enters_its_own_now() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = AikitHome::at(temp.path());
+        let ledger = FloorLedger::in_state(&home.state());
+        let (active, closed) = (listed("active"), listed("closed"));
+        let runner = owner_runner_listing(&[&active, &closed]);
+        let world = example_world();
+        dispatch(
+            &hook_at(
+                PROJECT,
+                HookEventKind::SessionStart,
+                json!({"session_id": "sess-1", "source": "startup"}),
+            ),
+            Some(&world),
+            &home,
+            &ledger,
+            &runner,
+        );
+        dispatch(
+            &hook_at(
+                PROJECT,
+                HookEventKind::SessionEnd,
+                json!({"session_id": "sess-1", "reason": "exit"}),
+            ),
+            Some(&world),
+            &home,
+            &ledger,
+            &runner,
+        );
+
+        let resume = hook_at(
+            PROJECT,
+            HookEventKind::SessionStart,
+            json!({"session_id": "sess-1", "source": "resume"}),
+        );
+        let resumed = dispatch(&resume, Some(&world), &home, &ledger, &runner);
+        assert!(resumed.warnings.is_empty(), "{:?}", resumed.warnings);
+
+        // The lifecycle runs again on the session's own history.
+        let model = home
+            .session_lifecycle_read_model(&harness_session(REF).unwrap())
+            .unwrap();
+        assert_eq!(model.state, SessionLifecycleState::Running);
+        assert_eq!(model.event_count, 3);
+
+        // Its closed NOW is re-entered — the same NOW, not another — and
+        // the resumed start names it and its scratch place again.
+        let moves = calls_of(&runner, "central.now.lifecycle");
+        assert_eq!(moves.len(), 2, "{moves:?}");
+        assert!(moves[0].contains("\"lifecycle\":\"closed\""));
+        assert!(moves[1].contains("\"lifecycle\":\"active\""));
+        assert!(moves[1].contains(NOW_REF));
+        let allocations = calls_of(&runner, "central.now.allocate");
+        assert!(allocations
+            .iter()
+            .all(|line| line.contains("\"task_ref\":\"aikit:session:claude:sess-1\"")));
+        let text = resumed.injected_text();
+        assert!(text.contains(&format!("NOW: {NOW_REF} (this session's own)")));
+        assert!(text.contains(&format!("scratch: {SCRATCH}")));
+        assert!(ledger
+            .session_now("sess-1")
+            .is_some_and(|held| !held.closed));
+    }
+
+    #[test]
+    fn a_live_session_replayed_in_another_world_keeps_its_one_now() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = AikitHome::at(temp.path());
+        let ledger = FloorLedger::in_state(&home.state());
+        let runner = owner_runner();
+        let payload = json!({"session_id": "sess-1"});
+        dispatch(
+            &hook_at(PROJECT, HookEventKind::SessionStart, payload.clone()),
+            Some(&example_world()),
+            &home,
+            &ledger,
+            &runner,
+        );
+        // Resumed from the root: no second NOW for the same session.
+        let root = SessionWorld {
+            central_root: CENTRAL.into(),
+            project: None,
+        };
+        let replayed = dispatch(
+            &hook_at(CENTRAL, HookEventKind::SessionStart, payload),
+            Some(&root),
+            &home,
+            &ledger,
+            &runner,
+        );
+        assert!(replayed.warnings.is_empty(), "{:?}", replayed.warnings);
+        assert_eq!(calls_of(&runner, "central.now.allocate").len(), 1);
+        assert!(replayed
+            .injected_text()
+            .contains(&format!("NOW: {NOW_REF} (this session's own)")));
+        assert_eq!(ledger.session_now("sess-1").unwrap().world, example_world());
     }
 
     #[test]
