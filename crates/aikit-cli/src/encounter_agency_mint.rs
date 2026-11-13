@@ -29,10 +29,12 @@
 //!   (`action/aikit/encounter-send`, `action/aikit/model-realise`) — the
 //!   native admission refuses a binding that cannot send.
 //!
-//! Agent identity resolution order: explicit `--agent-ref`, else the Central
-//! AgentProfile for the project scope when exactly one exists, else a derived,
-//! clearly-attributed `agent/<project-slug>-chat`. A human `requester_ref` is
-//! never fabricated: it is always the template's.
+//! Agent identity resolution order: explicit `--agent-ref` (pinned to its
+//! scope's Central AgentProfile when that scope — the root or a Project —
+//! declares one for it), else the Central AgentProfile for the project scope
+//! when exactly one exists, else a derived, clearly-attributed
+//! `agent/<project-slug>-chat`. A human `requester_ref` is never fabricated:
+//! it is always the template's.
 use super::{read_binding, EncounterAgencyBinding};
 use crate::app::Service;
 use aikit_adapters::{
@@ -289,7 +291,9 @@ struct ResolvedAgentIdentity {
 struct CentralProfileBasis {
     profile_ref: String,
     central_root: PathBuf,
-    project: String,
+    /// `root` for the Central root itself, `project` for a Work member.
+    scope: &'static str,
+    project: Option<String>,
 }
 
 /// The agent identity: explicit ref wins; else exactly one Central
@@ -302,10 +306,49 @@ fn resolve_agent_identity(
     explicit: Option<ResourceRef>,
 ) -> Result<ResolvedAgentIdentity> {
     if let Some(agent_ref) = explicit {
+        // A named Agent is still a Central Agent: its scope's profile for it
+        // is what lets every turn say who it is. None declared, or one the
+        // person has not accepted, is an honest absence (every turn would
+        // otherwise refuse on the unaccepted definition); two for one Agent
+        // cannot be chosen between.
+        let central = match scope_profiles(runner, project_cwd, true)? {
+            Some(declared) => match declared.agents.get(agent_ref.as_str()) {
+                Some(profile_refs) if profile_refs.len() > 1 => {
+                    let named: Vec<&str> = profile_refs.iter().map(String::as_str).collect();
+                    return Err(mint_error(
+                        "agency_mint.agent_ambiguous",
+                        format!(
+                            "the Central {} scope declares {} profiles for {agent_ref} ({}); \
+                             remove all but one before opening a conversation with it",
+                            declared.scope,
+                            named.len(),
+                            named.join(", ")
+                        ),
+                    ));
+                }
+                Some(profile_refs) => profile_refs
+                    .iter()
+                    .next()
+                    .filter(|profile_ref| !profile_ref.is_empty())
+                    .map(|profile_ref| CentralProfileBasis {
+                        profile_ref: profile_ref.clone(),
+                        central_root: declared.central_root.clone(),
+                        scope: declared.scope,
+                        project: declared.project.clone(),
+                    })
+                    .filter(|basis| profile_accepted(runner, basis)),
+                None => None,
+            },
+            None => None,
+        };
         return Ok(ResolvedAgentIdentity {
             agent_ref,
-            source: "explicit",
-            central: None,
+            source: if central.is_some() {
+                "explicit-central-agent-profile"
+            } else {
+                "explicit"
+            },
+            central,
         });
     }
     let derived = |world: &ProjectRef| -> Result<ResolvedAgentIdentity> {
@@ -315,7 +358,9 @@ fn resolve_agent_identity(
             central: None,
         })
     };
-    let Some(declared) = project_scope_profiles(runner, project_cwd)? else {
+    // With no Agent named, only a Project scope's sole profile is taken as
+    // the conversation's Agent; the root keeps its derived default.
+    let Some(declared) = scope_profiles(runner, project_cwd, false)? else {
         return derived(world);
     };
     match declared.agents.len() {
@@ -346,6 +391,7 @@ fn resolve_agent_identity(
                 central: (!profile_ref.is_empty()).then_some(CentralProfileBasis {
                     profile_ref,
                     central_root: declared.central_root,
+                    scope: declared.scope,
                     project: declared.project,
                 }),
             })
@@ -365,51 +411,90 @@ fn resolve_agent_identity(
     }
 }
 
-/// One project scope's Central AgentProfile listing: the Central root and
-/// Work member it was read against, and each distinct agent ref with the set
-/// of profile refs that name it. A listing record without a profile ref is
-/// carried as the empty string and stays absent — never invented.
-struct ProjectScopeProfiles {
+/// Whether Central's `agent-profile.review` reads this exact profile as
+/// accepted by the person. Any refusal or unreadable answer is `false`.
+fn profile_accepted(runner: &dyn CommandRunner, basis: &CentralProfileBasis) -> bool {
+    let mut input = json!({"scope": basis.scope, "profile_ref": basis.profile_ref});
+    if let Some(project) = &basis.project {
+        input["project"] = json!(project);
+    }
+    let argv = vec![
+        ctrl_executable().to_string_lossy().into_owned(),
+        "--json".into(),
+        "--root".into(),
+        basis.central_root.to_string_lossy().into_owned(),
+        "action".into(),
+        "run".into(),
+        "agent-profile.review".into(),
+        input.to_string(),
+    ];
+    match runner.run(&argv) {
+        Ok(output) if output.status == 0 => serde_json::from_str::<Value>(&output.stdout)
+            .is_ok_and(|envelope| envelope["ok"] == true && envelope["data"]["accepted"] == true),
+        Ok(_) | Err(_) => false,
+    }
+}
+
+fn ctrl_executable() -> PathBuf {
+    std::env::var_os("CENTRAL_CTRL_BIN")
+        .or_else(|| std::env::var_os("OI_CENTRAL_CTRL_BIN"))
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("ctrl"))
+}
+
+/// One scope's Central AgentProfile listing: the Central root and scope it
+/// was read against (the root itself, or a Work member), and each distinct
+/// agent ref with the set of profile refs that name it. A listing record
+/// without a profile ref is carried as the empty string and stays absent —
+/// never invented.
+struct ScopeProfiles {
     central_root: PathBuf,
-    project: String,
+    scope: &'static str,
+    project: Option<String>,
     agents: BTreeMap<String, BTreeSet<String>>,
 }
 
-/// Ask Central's `agent-profile.list` for the project scope. `None` means the
-/// lookup is unavailable (no Central root, no ctrl, refusing scope) — an
-/// absence, never an invented agent.
-fn project_scope_profiles(
+/// Ask Central's `agent-profile.list` for the scope `project_cwd` stands in:
+/// a Work member's Project scope, or — when `include_root` — the Central root
+/// itself. `None` means the lookup is unavailable (no Central root, a
+/// directory in neither scope, no ctrl, refusing scope) — an absence, never an
+/// invented agent.
+fn scope_profiles(
     runner: &dyn CommandRunner,
     project_cwd: &Path,
-) -> Result<Option<ProjectScopeProfiles>> {
+    include_root: bool,
+) -> Result<Option<ScopeProfiles>> {
     let Some(central_root) = project_cwd
         .ancestors()
         .find(|candidate| candidate.join("Control").is_dir() && candidate.join("Work").is_dir())
     else {
         return Ok(None);
     };
+    let at_root = project_cwd
+        .canonicalize()
+        .ok()
+        .zip(central_root.canonicalize().ok())
+        .is_some_and(|(cwd, root)| cwd == root);
     let project = project_cwd
         .canonicalize()
         .ok()
         .zip(central_root.join("Work").canonicalize().ok())
         .and_then(|(cwd, work)| cwd.strip_prefix(work).ok().map(|p| p.to_path_buf()))
         .map(|relative| relative.to_string_lossy().into_owned());
-    let Some(project) = project else {
-        return Ok(None);
+    let (scope, input) = match project {
+        Some(project) => ("project", json!({"scope":"project","project":project})),
+        None if at_root && include_root => ("root", json!({"scope":"root"})),
+        None => return Ok(None),
     };
-    let executable = std::env::var_os("CENTRAL_CTRL_BIN")
-        .or_else(|| std::env::var_os("OI_CENTRAL_CTRL_BIN"))
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("ctrl"));
     let argv = vec![
-        executable.to_string_lossy().into_owned(),
+        ctrl_executable().to_string_lossy().into_owned(),
         "--json".into(),
         "--root".into(),
         central_root.to_string_lossy().into_owned(),
         "action".into(),
         "run".into(),
         "agent-profile.list".into(),
-        json!({"scope":"project","project":project}).to_string(),
+        input.to_string(),
     ];
     let output = match runner.run(&argv) {
         Ok(output) if output.status == 0 => output,
@@ -438,9 +523,10 @@ fn project_scope_profiles(
             .or_default()
             .insert(profile_ref);
     }
-    Ok(Some(ProjectScopeProfiles {
+    Ok(Some(ScopeProfiles {
         central_root: central_root.to_path_buf(),
-        project,
+        scope,
+        project: input["project"].as_str().map(str::to_owned),
         agents,
     }))
 }
@@ -608,8 +694,8 @@ fn mint_per_project_agency_with_intent(
             Some(super::EncounterCentralIdentityWorld {
                 central_root: basis.central_root,
                 project_cwd: std::fs::canonicalize(project_cwd).map_err(super::error)?,
-                scope: "project".to_owned(),
-                project: Some(basis.project),
+                scope: basis.scope.to_owned(),
+                project: basis.project,
             }),
         ),
         None => (None, None),
@@ -756,4 +842,157 @@ pub fn mint_task_from_cli(
         &SystemRunner::new(),
         true,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use aikit_adapters::runner::Output;
+    use std::sync::Mutex;
+
+    /// Answers `agent-profile.list` from a fixed table, recording the scope
+    /// input it was asked for, and `agent-profile.review` as accepted unless
+    /// the profile is named unaccepted.
+    struct ListRunner {
+        profiles: Value,
+        listed: Mutex<Vec<Value>>,
+        unaccepted: Vec<&'static str>,
+    }
+
+    impl CommandRunner for ListRunner {
+        fn run(&self, argv: &[String]) -> Result<Output> {
+            if argv.iter().any(|arg| arg == "agent-profile.review") {
+                let input: Value = serde_json::from_str(argv.last().unwrap()).unwrap();
+                let accepted = !self
+                    .unaccepted
+                    .iter()
+                    .any(|profile_ref| input["profile_ref"] == *profile_ref);
+                return Ok(Output::success(
+                    json!({"ok":true,"status":"success","data":{"accepted":accepted}}).to_string(),
+                ));
+            }
+            assert!(
+                argv.iter().any(|arg| arg == "agent-profile.list"),
+                "{argv:?}"
+            );
+            self.listed
+                .lock()
+                .unwrap()
+                .push(serde_json::from_str(argv.last().unwrap()).unwrap());
+            Ok(Output::success(
+                json!({"ok":true,"status":"success","data":{"profiles":self.profiles}}).to_string(),
+            ))
+        }
+    }
+
+    fn central_root() -> (tempfile::TempDir, PathBuf) {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        std::fs::create_dir_all(root.join("Control")).unwrap();
+        std::fs::create_dir_all(root.join("Work")).unwrap();
+        (temp, root)
+    }
+
+    /// Messages' Make writes a personal Agent at the Central root, and the
+    /// kernel opens its conversation there with `--agent-ref`. The root scope
+    /// is listed and that Agent's own profile pinned as `root`, no Project.
+    #[test]
+    fn a_named_agent_at_the_central_root_is_pinned_to_its_root_profile() {
+        let (_temp, root) = central_root();
+        let runner = ListRunner {
+            profiles: json!([
+                {"profile":{"ref":"agent-profile:expressed-a","agent_ref":"agent:expressed-a"}},
+                {"profile":{"ref":"agent-profile:expressed-b","agent_ref":"agent:expressed-b"}}
+            ]),
+            listed: Mutex::default(),
+            unaccepted: Vec::new(),
+        };
+        let resolved = resolve_agent_identity(
+            &runner,
+            &root,
+            &ProjectRef::parse("control:root").unwrap(),
+            Some(ResourceRef::parse("agent:expressed-b").unwrap()),
+        )
+        .unwrap();
+        assert_eq!(resolved.agent_ref.as_str(), "agent:expressed-b");
+        assert_eq!(resolved.source, "explicit-central-agent-profile");
+        let central = resolved.central.expect("the root profile is pinned");
+        assert_eq!(central.profile_ref, "agent-profile:expressed-b");
+        assert_eq!(central.scope, "root");
+        assert_eq!(central.project, None);
+        assert_eq!(central.central_root, root);
+        assert_eq!(
+            runner.listed.lock().unwrap().as_slice(),
+            [json!({"scope":"root"})]
+        );
+    }
+
+    /// With no Agent named, the root keeps its derived default: the root's
+    /// profiles are not consulted, so several of them refuse nothing.
+    #[test]
+    fn an_unnamed_agent_at_the_root_stays_derived() {
+        let (_temp, root) = central_root();
+        let runner = ListRunner {
+            profiles: json!([]),
+            listed: Mutex::default(),
+            unaccepted: Vec::new(),
+        };
+        let resolved = resolve_agent_identity(
+            &runner,
+            &root,
+            &ProjectRef::parse("control:root").unwrap(),
+            None,
+        )
+        .unwrap();
+        assert_eq!(resolved.source, "derived-project-agent");
+        assert!(resolved.central.is_none());
+        assert!(runner.listed.lock().unwrap().is_empty());
+    }
+
+    /// A named Agent whose profile the person has not accepted stays
+    /// unpinned: pinning it would refuse every turn on the unaccepted
+    /// definition, where today the conversation works.
+    #[test]
+    fn an_unaccepted_profile_is_not_pinned() {
+        let (_temp, root) = central_root();
+        let runner = ListRunner {
+            profiles: json!([
+                {"profile":{"ref":"agent-profile:expressed-b","agent_ref":"agent:expressed-b"}}
+            ]),
+            listed: Mutex::default(),
+            unaccepted: vec!["agent-profile:expressed-b"],
+        };
+        let resolved = resolve_agent_identity(
+            &runner,
+            &root,
+            &ProjectRef::parse("control:root").unwrap(),
+            Some(ResourceRef::parse("agent:expressed-b").unwrap()),
+        )
+        .unwrap();
+        assert_eq!(resolved.source, "explicit");
+        assert!(resolved.central.is_none());
+    }
+
+    /// Two profiles for the one named Agent cannot be chosen between.
+    #[test]
+    fn two_profiles_for_the_named_agent_refuse() {
+        let (_temp, root) = central_root();
+        let runner = ListRunner {
+            profiles: json!([
+                {"profile":{"ref":"agent-profile:one","agent_ref":"agent:expressed-b"}},
+                {"profile":{"ref":"agent-profile:two","agent_ref":"agent:expressed-b"}}
+            ]),
+            listed: Mutex::default(),
+            unaccepted: Vec::new(),
+        };
+        let error = resolve_agent_identity(
+            &runner,
+            &root,
+            &ProjectRef::parse("control:root").unwrap(),
+            Some(ResourceRef::parse("agent:expressed-b").unwrap()),
+        )
+        .err()
+        .expect("ambiguous");
+        assert_eq!(error.code(), "agency_mint.agent_ambiguous");
+    }
 }

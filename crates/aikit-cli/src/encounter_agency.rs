@@ -7,8 +7,9 @@ use aikit_adapters::{
     agency_admission::{admit_agency, AdmittedAgency, AgencySourceBasis},
     central_agent_profile::CentralAgentProfileProjection,
     identity_composition::{
-        compose_operative_orientation, resolve_self_sources, IdentityCompositionReceipt,
-        IdentitySourceRoute, AGENCY_DELIVERY_MODE, IDENTITY_COMPOSITOR_VERSION,
+        compose_declared_definition, compose_operative_orientation, resolve_self_sources,
+        IdentityCompositionReceipt, IdentitySourceRoute, AGENCY_DELIVERY_MODE,
+        IDENTITY_COMPOSITOR_VERSION,
     },
     runner::{CommandRunner, SystemRunner},
     secret_resolver::SuiteSecretResolver,
@@ -73,8 +74,8 @@ pub(super) struct PreparedTurnText {
 
 /// The composed Agency turn text plus the durable evidence of what composed
 /// identity actually rode it. The evidence is `None` when the session's
-/// identity is explicit or derived (no Central profile, no self section) or
-/// when the session has no Agency binding at all.
+/// identity pins no Central profile or when the session has no Agency binding
+/// at all.
 pub(super) struct PreparedAgencyText {
     pub text: String,
     pub identity_evidence: Option<Value>,
@@ -84,18 +85,20 @@ pub(super) struct PreparedAgencyText {
 /// self orientation: which accepted sources were verified and in what
 /// delivery mode. It never carries the source text itself, and it mirrors
 /// the Direct route's context-submitted evidence keys.
-fn identity_evidence(receipt: &IdentityCompositionReceipt) -> Value {
+fn identity_evidence(agent_ref: &ResourceRef, identity: &ComposedAgencyIdentity) -> Value {
+    let receipt = identity.receipt.as_ref();
     json!({
         "kind": "agency-context-submitted",
-        "agent_ref": receipt.agent_ref,
-        "profile_ref": receipt.profile_ref,
-        "profile_revision": receipt.profile_revision,
+        "agent_ref": agent_ref,
+        "profile_ref": identity.profile_ref,
+        "profile_revision": identity.profile_revision,
         "delivery": AGENCY_DELIVERY_MODE,
         "identity_compositor": IDENTITY_COMPOSITOR_VERSION,
-        "self_source_ref": receipt.self_source_ref,
-        "self_source_digest": receipt.self_source_digest,
-        "relational_logos_ref": receipt.relational_logos_ref,
-        "relational_logos_digest": receipt.relational_logos_digest,
+        "declared_definition": true,
+        "self_source_ref": receipt.map(|r| &r.self_source_ref),
+        "self_source_digest": receipt.map(|r| &r.self_source_digest),
+        "relational_logos_ref": receipt.map(|r| &r.relational_logos_ref),
+        "relational_logos_digest": receipt.map(|r| &r.relational_logos_digest),
         "model_consumption_observed": false,
         "authority_granted": false,
     })
@@ -118,8 +121,9 @@ pub struct EncounterAgencyBinding {
     /// files. Selected Agent context is read from the pinned context below only.
     pub allowed_packet_sources: BTreeSet<ResourceRef>,
     pub context: Option<EncounterContextAdmission>,
-    /// The accepted Central AgentProfile this session's Agent identity was
-    /// resolved from, when the mint found exactly one in the project scope.
+    /// The Central AgentProfile this session's Agent identity was resolved
+    /// from: the one profile its scope declares for the named Agent, or, with
+    /// no Agent named, the only one a Project scope declares.
     /// Carrying the ref lets every turn re-read the owner's current accepted
     /// definition and compose its `self_definition` into the turn text through
     /// the shared identity compositor. Absent for an explicit or derived
@@ -146,10 +150,12 @@ pub struct EncounterCentralIdentityWorld {
     pub project: Option<String>,
 }
 
-/// The composed operative orientation of an Agency turn's selected Agent,
-/// resolved through the one shared identity compositor against the world the
-/// mint pinned. `Ok(None)` is honest absence: an explicit or derived identity
-/// pins no Central profile, so no self section rides the turn. A ref whose
+/// The composed identity of an Agency turn's selected Agent — its declared
+/// definition (purpose, role, the owner's words, World) and, when pinned, its
+/// operative orientation — resolved through the one shared identity
+/// compositor against the world the mint pinned. `Ok(None)` is honest
+/// absence: an identity with no Central profile (a derived project agent, or
+/// a named Agent no profile in its scope declares) composes nothing. A ref whose
 /// review is unavailable, unaccepted, out of scope or no longer this Agent's
 /// refuses named before any turn text is built, as does a pin that does not
 /// hold on disk (`encounter.self_source_*` from the shared compositor).
@@ -158,7 +164,7 @@ pub fn compose_agency_identity<R: CommandRunner>(
     world: Option<&EncounterCentralIdentityWorld>,
     agent_ref: &ResourceRef,
     central_profile_ref: Option<&str>,
-) -> Result<Option<(String, IdentityCompositionReceipt)>> {
+) -> Result<Option<ComposedAgencyIdentity>> {
     let Some(profile_ref) = central_profile_ref else {
         return Ok(None);
     };
@@ -248,33 +254,54 @@ pub fn compose_agency_identity<R: CommandRunner>(
             "The accepted Agent definition under this profile ref no longer belongs to this session's Agent; reread and explicitly accept the Agent definition again",
         ));
     }
-    let Some(self_definition) = &profile.self_definition else {
-        return Err(AikitError::new(
-            "encounter.self_source_changed",
-            "The accepted Agent definition no longer carries a self definition; reread and explicitly accept the Agent definition again",
-        ));
+    // The declared definition rides every turn of an accepted profile: what
+    // the Agent is for and the World it stands in. Pinned self sources, when
+    // the accepted profile carries them, follow it as the operative
+    // orientation; a profile made from a person's words alone carries none.
+    let mut composed = compose_declared_definition(&profile, data["profile"]["name"].as_str());
+    let receipt = match &profile.self_definition {
+        Some(self_definition) => {
+            let root = crate::direct_agent_session::world_root(
+                &world.central_root,
+                &world.project_cwd,
+                &world.scope,
+            );
+            let resolved = resolve_self_sources(&root, self_definition)
+                .map_err(|error| error.into_aikit(IdentitySourceRoute::Agency))?;
+            composed.push_str("\n\n");
+            composed.push_str(&compose_operative_orientation(
+                agent_ref.as_str(),
+                profile_ref,
+                &profile.revision,
+                &resolved,
+            ));
+            Some(IdentityCompositionReceipt::new(
+                agent_ref.as_str(),
+                profile_ref,
+                &profile.revision,
+                &resolved,
+                AGENCY_DELIVERY_MODE,
+            ))
+        }
+        None => None,
     };
-    let root = crate::direct_agent_session::world_root(
-        &world.central_root,
-        &world.project_cwd,
-        &world.scope,
-    );
-    let resolved = resolve_self_sources(&root, self_definition)
-        .map_err(|error| error.into_aikit(IdentitySourceRoute::Agency))?;
-    let composed = compose_operative_orientation(
-        agent_ref.as_str(),
-        profile_ref,
-        &profile.revision,
-        &resolved,
-    );
-    let receipt = IdentityCompositionReceipt::new(
-        agent_ref.as_str(),
-        profile_ref,
-        &profile.revision,
-        &resolved,
-        AGENCY_DELIVERY_MODE,
-    );
-    Ok(Some((composed, receipt)))
+    Ok(Some(ComposedAgencyIdentity {
+        text: composed,
+        profile_ref: profile_ref.to_owned(),
+        profile_revision: profile.revision.clone(),
+        receipt,
+    }))
+}
+
+/// One Agency turn's composed identity: the text that rides the turn, the
+/// accepted profile it was read from, and — when the profile pins self
+/// sources — the receipt of exactly which sources were verified.
+#[derive(Debug, Clone)]
+pub struct ComposedAgencyIdentity {
+    pub text: String,
+    pub profile_ref: String,
+    pub profile_revision: String,
+    pub receipt: Option<IdentityCompositionReceipt>,
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -719,8 +746,8 @@ impl EncounterService {
         // The composed orientation rides immediately after the identity
         // header, before any admitted `<source>` block, and the combined
         // turn text keeps the existing 1 MiB cap convention.
-        if let Some((orientation, _)) = &identity {
-            prompt.push_str(orientation);
+        if let Some(identity) = &identity {
+            prompt.push_str(&identity.text);
             prompt.push_str("\n\n");
             if prompt.len() > 1024 * 1024 {
                 return Err(error("Selected Agent context exceeds the 1 MiB turn limit"));
@@ -751,7 +778,9 @@ impl EncounterService {
         prompt.push_str("\n<explicit-request>\n");
         prompt.push_str(text);
         prompt.push_str("\n</explicit-request>\n");
-        let identity_evidence = identity.map(|(_, receipt)| identity_evidence(&receipt));
+        let identity_evidence = identity
+            .as_ref()
+            .map(|identity| identity_evidence(&binding.agent_ref, identity));
         Ok(PreparedAgencyText {
             text: prompt,
             identity_evidence,

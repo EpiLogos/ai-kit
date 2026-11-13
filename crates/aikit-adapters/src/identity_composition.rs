@@ -10,8 +10,10 @@
 //! accepted first-person orientation. Exact bytes are embedded verbatim: no
 //! reflow, no truncation, no second normalisation.
 
-use crate::central_agent_profile::{CentralAgentSelfDefinition, CentralAgentSelfSourcePin};
-use aikit_core::AikitError;
+use crate::central_agent_profile::{
+    CentralAgentProfileProjection, CentralAgentSelfDefinition, CentralAgentSelfSourcePin,
+};
+use aikit_core::{AikitError, ResourceRef};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::path::{Component, Path, PathBuf};
@@ -365,6 +367,59 @@ pub fn compose_operative_orientation(
         self_text = resolved.self_source.text,
         logos_text = resolved.relational_logos.text,
     )
+}
+
+/// Compose the selected Agent's declared definition — what it is for, its
+/// role, the words its owner made it with and the World it stands in — from
+/// the accepted `central.agent-profile/v1` itself. Every accepted profile has
+/// one, with or without pinned self sources: an Agent made from a person's
+/// words carries those words as `intent_provenance.intent_expression` and
+/// often nothing else, and without this section the model would not know
+/// which Agent it is. Deterministic, and absent fields are omitted rather than
+/// invented; the intent keeps its standing (a generated proposal from the
+/// owner's words) so it is never read as more than it is.
+pub fn compose_declared_definition(
+    profile: &CentralAgentProfileProjection,
+    name: Option<&str>,
+) -> String {
+    let mut lines = vec![
+        "# Who you are in this conversation".to_owned(),
+        String::new(),
+        format!(
+            "You are the Agent {agent} (Central profile {profile_ref} revision {revision}, \
+            human-accepted), standing in the World {world}. Answer as this Agent, from what it \
+            is for — not as a general-purpose assistant or as the model or harness you run on.",
+            agent = profile.agent_ref,
+            profile_ref = profile.profile_ref,
+            revision = profile.revision,
+            world = profile.world_ref,
+        ),
+        String::new(),
+    ];
+    if let Some(name) = name.map(str::trim).filter(|name| !name.is_empty()) {
+        lines.push(format!("Name: {name}"));
+    }
+    if let Some(purpose) = profile.purpose.as_deref() {
+        lines.push(format!("Purpose: {purpose}"));
+    }
+    if let Some(role) = profile.role.as_deref() {
+        lines.push(format!("Role: {role}"));
+    }
+    if let Some(intent) = &profile.intent_provenance {
+        lines.push(format!(
+            "What your owner made you for, in their own words: \"{}\"",
+            intent.intent_expression
+        ));
+    }
+    let worlds: Vec<&str> = profile
+        .ratified_world_refs
+        .iter()
+        .map(ResourceRef::as_str)
+        .collect();
+    if !worlds.is_empty() {
+        lines.push(format!("Worlds you may work in: {}", worlds.join(", ")));
+    }
+    lines.join("\n")
 }
 
 /// The evidence a composition actually happened: which accepted sources were
