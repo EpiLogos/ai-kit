@@ -1,8 +1,9 @@
 //! The per-project agency mint. Real ProjectCentral ground, a real OS process
 //! standing in as the native owner binary (echoing the exact receipt shape the
-//! real `actuation agency actualise` returns), and the real admission seam.
-//! The joined acceptance against the *installed* native owner lives outside
-//! this suite; here the structural law is what is pinned.
+//! real `actuation agency actualise` returns), the World's authority answered
+//! through the CommandRunner seam (`actuation authority list | resolve`), and
+//! the real admission seam. The joined acceptance against the *installed*
+//! native owner lives outside this suite; here the structural law is pinned.
 #![cfg(unix)]
 use aikit_adapters::{
     agency_admission::{admit_agency, AdmittedAgency, AgencySourceBasis},
@@ -118,20 +119,7 @@ impl MintWorld {
         // ProjectCentral manifest then supplies the canonical identity.
         fs::create_dir_all(project.join(".aikit")).unwrap();
         fs::create_dir_all(project.join("ProjectCentral")).unwrap();
-        // A Central-shaped root carrying the owner's standing template at the
-        // default location the mint resolves when no override is set.
-        let template_directory = root
-            .join("Work")
-            .join("O-I")
-            .join(".aikit")
-            .join("sf6-agency");
-        fs::create_dir_all(&template_directory).unwrap();
-        fs::copy(
-            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-                .join("tests/fixtures/mint-agency-template.json"),
-            template_directory.join("agency-request.json"),
-        )
-        .unwrap();
+        // A Central-shaped root: Control/ beside Work/.
         let _ = fs::create_dir_all(root.join("Control"));
         fs::write(
             project.join("ProjectCentral/project.json"),
@@ -155,15 +143,163 @@ fn binding_path(home: &AikitHome, session: &ResourceRef) -> PathBuf {
     ))
 }
 
-/// A runner that answers Central's `agent-profile.list` from a fixed table and
-/// delegates every actualise call to the real stub binary, so a mint that
-/// consults a declared profile still exercises the full native seam.
+/// The World's standing grant as `actuation authority grant-world` composes
+/// it for the World rooted at `control:root`, listed as the store lists it.
+fn world_grant(source: &str, issued_at: u64, worlds: &[&str]) -> Value {
+    let root = worlds[0];
+    let bounds: Vec<String> = worlds
+        .iter()
+        .map(|world| format!("bound:{world}"))
+        .collect();
+    json!({
+        "authority_source_ref": source,
+        "issued_at_unix_seconds": issued_at,
+        "record": {
+            "schema": "actuation.local-authority/v1",
+            "authority_source_ref": source,
+            "holder": "human:owner",
+            "issued_by": "human:owner",
+            "governing_binding": {
+                "schema": "actuation.agency/v1",
+                "binding_ref": format!("binding:world-root@{root}"),
+                "agent_ref": format!("agent:world-root@{root}"),
+                "agency_ref": format!("agency:world-root@{root}"),
+                "world_ref": root,
+                "scope_ref": root,
+                "bounds_refs": bounds,
+                "authority_refs": [format!("authority:world@{root}")],
+                "return_relation_ref": format!("return-relation:world-root@{root}")
+            },
+            "metagency_grant": {
+                "schema": "actuation.agency/v1",
+                "grant_ref": format!("grant:world-root@{root}"),
+                "agency_ref": format!("agency:world-root@{root}"),
+                "world_binding_ref": format!("binding:world-root@{root}"),
+                "authority_ref": format!("authority:world@{root}"),
+                "bounds_refs": bounds,
+                "operations": ["determine-agency", "actualise-agency"]
+            },
+            "allowed_world_refs": worlds,
+            "issued_at_unix_seconds": issued_at,
+            "provenance": [format!("actuation authority grant-world: the World rooted at {root}")]
+        }
+    })
+}
+
+/// The World's grant every mint here resolves through: the root and the
+/// fixture project.
+fn the_worlds_grant() -> Value {
+    json!([world_grant(
+        "authority-source:world-grant@control:root:1726300000",
+        1726300000,
+        &["control:root", "project:mint-fixture"]
+    )])
+}
+
+/// The admitted resolution, assembled from the stored record and the request
+/// exactly as Actuation's `authority resolve` assembles it.
+fn admitted_resolution(record: &Value, asked: &Value) -> Value {
+    let child = &asked["differentiated_binding"];
+    json!({
+        "schema": "actuation.local-authority/v1",
+        "standing": "admitted",
+        "resolution_ref": asked["resolution_ref"],
+        "authority_source_ref": asked["authority_source_ref"],
+        "actualisation_request": {
+            "schema": "actuation.agency-actualisation/v1",
+            "request_ref": asked["request_ref"],
+            "requester_ref": asked["requester_ref"],
+            "governing_binding": record["governing_binding"],
+            "metagency_grant": record["metagency_grant"],
+            "determination": {
+                "schema": "actuation.agency/v1",
+                "determination_ref": asked["determination_ref"],
+                "kind": "delegation",
+                "determining_agency_ref": record["metagency_grant"]["agency_ref"],
+                "differentiated_agency_ref": child["agency_ref"],
+                "world_binding_ref": child["binding_ref"],
+                "bounds_refs": asked["requested_bounds_refs"],
+                "delegated_autonomy": asked["delegated_autonomy"],
+                "return_policy": asked["return_policy"],
+                "authority_refs": child["authority_refs"]
+            },
+            "differentiated_binding": child,
+            "agent_identity": asked["agent_identity"],
+            "provenance": asked["provenance"]
+        },
+        "provenance": [format!("resolved against governing authority {}", asked["authority_source_ref"])]
+    })
+}
+
+/// A runner that answers Central's `agent-profile.list` from a fixed table,
+/// Actuation's `authority list` from `authorities` and `authority resolve`
+/// against them (or with `refusal`, Actuation's refusal), and delegates every
+/// actualise call to the real stub binary, so a mint still exercises the
+/// full native seam.
 struct ProfileRunner {
     profiles: Value,
+    authorities: Value,
+    refusal: Option<Value>,
+    resolved: std::sync::Mutex<Vec<Value>>,
+}
+
+impl ProfileRunner {
+    fn new(profiles: Value) -> Self {
+        Self::with_authorities(profiles, the_worlds_grant())
+    }
+
+    fn with_authorities(profiles: Value, authorities: Value) -> Self {
+        Self {
+            profiles,
+            authorities,
+            refusal: None,
+            resolved: Default::default(),
+        }
+    }
 }
 
 impl CommandRunner for ProfileRunner {
     fn run(&self, argv: &[String]) -> aikit_core::Result<Output> {
+        match (
+            argv.get(1).map(String::as_str),
+            argv.get(2).map(String::as_str),
+        ) {
+            (Some("authority"), Some("list")) => {
+                return Ok(Output::success(
+                    json!({"schema": "actuation.local-authority-listing/v1", "store": "/authority",
+                           "authorities": self.authorities, "invalid": []})
+                    .to_string(),
+                ));
+            }
+            (Some("authority"), Some("resolve")) => {
+                let asked: Value = serde_json::from_slice(&fs::read(&argv[3]).unwrap()).unwrap();
+                self.resolved.lock().unwrap().push(asked.clone());
+                let outcome = match &self.refusal {
+                    Some(refusal) => json!({
+                        "schema": "actuation.local-authority/v1",
+                        "standing": "refused",
+                        "resolution_ref": asked["resolution_ref"],
+                        "authority_source_ref": asked["authority_source_ref"],
+                        "refusal": refusal,
+                        "provenance": []
+                    }),
+                    None => {
+                        let listed = self
+                            .authorities
+                            .as_array()
+                            .unwrap()
+                            .iter()
+                            .find(|listed| {
+                                listed["authority_source_ref"] == asked["authority_source_ref"]
+                            })
+                            .expect("the mint resolves a listed grant");
+                        admitted_resolution(&listed["record"], &asked)
+                    }
+                };
+                return Ok(Output::success(outcome.to_string()));
+            }
+            _ => {}
+        }
         if argv.iter().any(|arg| arg == "agent-profile.list") {
             return Ok(Output::success(
                 json!({"ok":true,"status":"success","action":"agent-profile.list","data":{"profiles":self.profiles,"scope":"project","source_payloads_disclosed":false}}).to_string(),
@@ -349,13 +485,14 @@ fn a_non_delegation_template_is_refused_not_silently_recast() {
 fn mint_provisions_the_session_binding_through_the_real_native_seam() {
     let world = MintWorld::new("project:mint-fixture");
     let session = r("agent-session/mint-proof");
+    let runner = ProfileRunner::new(json!([]));
     let output = mint_per_project_agency(
         &world.home,
         &world.project,
         &session,
         None,
         &world.actuation_bin,
-        &SystemRunner::new(),
+        &runner,
     )
     .unwrap();
     assert_eq!(output["ok"], true);
@@ -388,10 +525,45 @@ fn mint_provisions_the_session_binding_through_the_real_native_seam() {
         source["differentiated_binding"]["agent_ref"],
         "agent/mint-fixture-chat"
     );
-    assert_eq!(source["requester_ref"], "human:sf6-owner");
+    assert_eq!(source["requester_ref"], "human:owner");
 
-    // The persisted binding carries the minted identities and the template's
-    // human sender, and passes the same admission every later turn applies.
+    // The World's grant was resolved for this agent and world: its holder
+    // asks, its bounds and authority are carried, the child's scope is its
+    // own world, and the refs are the mint's own.
+    let grant = &the_worlds_grant()[0];
+    assert_eq!(
+        output["data"]["authority_source_ref"],
+        grant["authority_source_ref"]
+    );
+    let resolved = runner.resolved.lock().unwrap().clone();
+    assert_eq!(resolved.len(), 1);
+    let asked = &resolved[0];
+    assert_eq!(asked["schema"], "actuation.local-authority/v1");
+    assert_eq!(asked["requester_ref"], "human:owner");
+    assert_eq!(asked["authority_source_ref"], grant["authority_source_ref"]);
+    assert_eq!(
+        asked["requested_bounds_refs"],
+        grant["record"]["metagency_grant"]["bounds_refs"]
+    );
+    let child = &asked["differentiated_binding"];
+    assert_eq!(child["world_ref"], "project:mint-fixture");
+    assert_eq!(child["scope_ref"], "project:mint-fixture");
+    assert_eq!(
+        child["determining_agency_ref"],
+        grant["record"]["governing_binding"]["agency_ref"]
+    );
+    assert_eq!(
+        child["authority_refs"],
+        grant["record"]["governing_binding"]["authority_refs"]
+    );
+    assert_eq!(source["differentiated_binding"], *child);
+    assert_eq!(
+        source["governing_binding"],
+        grant["record"]["governing_binding"]
+    );
+
+    // The persisted binding carries the minted identities and the grant's
+    // holder as sender, and passes the same admission every later turn applies.
     let binding_bytes = fs::read(binding_path(&world.home, &session)).unwrap();
     let binding: Value = serde_json::from_slice(&binding_bytes).unwrap();
     assert_eq!(binding["revision"], output["data"]["revision"]);
@@ -400,8 +572,8 @@ fn mint_provisions_the_session_binding_through_the_real_native_seam() {
     assert_eq!(binding["active"], true);
     assert_eq!(
         binding["allowed_senders"],
-        json!(["human:sf6-owner"]),
-        "the template's requester is the permitted sender, never a fabricated one"
+        json!(["human:owner"]),
+        "the grant's holder is the permitted sender, never a fabricated one"
     );
     assert_eq!(binding["allowed_packet_sources"], json!([]));
     let basis: AgencySourceBasis =
@@ -441,7 +613,7 @@ fn a_bare_project_id_still_mints_a_canonical_project_prefixed_world_ref() {
         &session,
         None,
         &world.actuation_bin,
-        &SystemRunner::new(),
+        &ProfileRunner::new(json!([])),
     )
     .unwrap();
     assert_eq!(output["data"]["world_ref"], "project:mint-fixture");
@@ -460,7 +632,7 @@ fn reminting_the_same_session_and_project_is_a_clean_cas_bump() {
         &session,
         None,
         &world.actuation_bin,
-        &SystemRunner::new(),
+        &ProfileRunner::new(json!([])),
     )
     .unwrap();
     let second = mint_per_project_agency(
@@ -469,7 +641,7 @@ fn reminting_the_same_session_and_project_is_a_clean_cas_bump() {
         &session,
         None,
         &world.actuation_bin,
-        &SystemRunner::new(),
+        &ProfileRunner::new(json!([])),
     )
     .unwrap();
     // Same source (deterministic derivation), fresh revision.
@@ -491,7 +663,7 @@ fn minting_a_different_agent_into_a_bound_session_is_refused() {
         &session,
         None,
         &world.actuation_bin,
-        &SystemRunner::new(),
+        &ProfileRunner::new(json!([])),
     )
     .unwrap();
     let error = mint_per_project_agency(
@@ -500,7 +672,7 @@ fn minting_a_different_agent_into_a_bound_session_is_refused() {
         &session,
         Some(r("agent/other-chat")),
         &world.actuation_bin,
-        &SystemRunner::new(),
+        &ProfileRunner::new(json!([])),
     )
     .unwrap_err();
     assert_eq!(error.code(), "encounter.agent_identity_changed");
@@ -510,9 +682,9 @@ fn minting_a_different_agent_into_a_bound_session_is_refused() {
 fn a_declared_central_profile_supplies_the_agent_identity() {
     let world = MintWorld::new("project:mint-fixture");
     let session = r("agent-session/mint-proof");
-    let runner = ProfileRunner {
-        profiles: json!([{"profile":{"agent_ref":"agent/mint-fixture-warden","role":"product-guardian"}}]),
-    };
+    let runner = ProfileRunner::new(
+        json!([{"profile":{"agent_ref":"agent/mint-fixture-warden","role":"product-guardian"}}]),
+    );
     let output = mint_per_project_agency(
         &world.home,
         &world.project,
@@ -536,12 +708,10 @@ fn a_declared_central_profile_supplies_the_agent_identity() {
 fn a_profile_ref_is_carried_onto_the_minted_binding() {
     let world = MintWorld::new("project:mint-fixture");
     let session = r("agent-session/mint-proof");
-    let runner = ProfileRunner {
-        profiles: json!([{"profile":{
+    let runner = ProfileRunner::new(json!([{"profile":{
             "ref":"agent-profile:mint-warden",
             "agent_ref":"agent/mint-fixture-warden",
-            "role":"product-guardian"}}]),
-    };
+            "role":"product-guardian"}}]));
     let output = mint_per_project_agency(
         &world.home,
         &world.project,
@@ -587,7 +757,7 @@ fn a_profile_ref_is_carried_onto_the_minted_binding() {
         &derived_session,
         None,
         &derived_world.actuation_bin,
-        &SystemRunner::new(),
+        &ProfileRunner::new(json!([])),
     )
     .unwrap();
     let derived: Value = serde_json::from_slice(
@@ -649,9 +819,7 @@ impl CommandRunner for ScopedProfileRunner {
 
 impl ScopedProfileRunner {
     fn inner(&self) -> ProfileRunner {
-        ProfileRunner {
-            profiles: self.profiles.clone(),
-        }
+        ProfileRunner::new(self.profiles.clone())
     }
 }
 
@@ -992,12 +1160,10 @@ mod identity_composition {
 fn an_ambiguous_project_scope_is_refused_rather_than_guessed() {
     let world = MintWorld::new("project:mint-fixture");
     let session = r("agent-session/mint-proof");
-    let runner = ProfileRunner {
-        profiles: json!([
-            {"profile":{"agent_ref":"agent/mint-fixture-warden"}},
-            {"profile":{"agent_ref":"agent/mint-fixture-clerk"}}
-        ]),
-    };
+    let runner = ProfileRunner::new(json!([
+        {"profile":{"agent_ref":"agent/mint-fixture-warden"}},
+        {"profile":{"agent_ref":"agent/mint-fixture-clerk"}}
+    ]));
     let error = mint_per_project_agency(
         &world.home,
         &world.project,
@@ -1012,65 +1178,139 @@ fn an_ambiguous_project_scope_is_refused_rather_than_guessed() {
     assert!(error.message().contains("--agent-ref"));
 }
 
+/// With no live grant naming its world, the mint refuses before any native
+/// effect and names the fix: the World's Setup grants it at Ground. A grant
+/// that was revoked, has expired or names only other worlds is no grant.
 #[test]
-fn a_missing_standing_template_is_refused_with_its_path() {
-    let manifest = json!({"schema":"central.project/v1","project_id":"project:mint-fixture",
-        "human_source":"ProjectCentral/user",
-        "wiki":{"profile":"okf-wiki/v1","source":"ProjectCentral/agents/wiki/wiki.json"}})
-    .to_string();
-    // No Central root (Control/ + Work/) above the project and no override:
-    // the mint cannot find the owner's standing chain and says so.
-    let temp = tempfile::tempdir().unwrap();
-    let root = temp.path().canonicalize().unwrap();
-    let project = root.join("Work").join("mint-fixture");
-    fs::create_dir_all(project.join(".aikit")).unwrap();
-    fs::create_dir_all(project.join("ProjectCentral")).unwrap();
-    fs::write(
-        project.join("ProjectCentral/project.json"),
-        manifest.clone(),
-    )
-    .unwrap();
-    let home = AikitHome::at(root.join("home"));
-    let error = mint_per_project_agency(
-        &home,
-        &project,
-        &r("agent-session/mint-proof"),
-        None,
-        &write_actuation_stub(&root),
-        &SystemRunner::new(),
-    )
-    .unwrap_err();
-    assert_eq!(error.code(), "agency_mint.template_missing");
-    assert!(error.message().contains("AIKIT_AGENCY_MINT_TEMPLATE"));
+fn a_world_without_a_live_grant_is_refused_naming_the_fix() {
+    let mut revoked = world_grant(
+        "authority-source:revoked",
+        1726300000,
+        &["control:root", "project:mint-fixture"],
+    );
+    revoked["revoked"] = json!({"at_unix_seconds": 1726300001, "reason": "owner withdrawal"});
+    let mut expired = world_grant(
+        "authority-source:expired",
+        1726300000,
+        &["control:root", "project:mint-fixture"],
+    );
+    expired["record"]["expires_at_unix_seconds"] = json!(1726300001);
+    let elsewhere = world_grant(
+        "authority-source:elsewhere",
+        1726300000,
+        &["control:root", "project:other"],
+    );
+    for authorities in [
+        json!([]),
+        json!([revoked]),
+        json!([expired]),
+        json!([elsewhere]),
+    ] {
+        let world = MintWorld::new("project:mint-fixture");
+        let session = r("agent-session/mint-proof");
+        let runner = ProfileRunner::with_authorities(json!([]), authorities.clone());
+        let error = mint_per_project_agency(
+            &world.home,
+            &world.project,
+            &session,
+            None,
+            &world.actuation_bin,
+            &runner,
+        )
+        .unwrap_err();
+        assert_eq!(
+            error.code(),
+            "agency_mint.authority_missing",
+            "{authorities}"
+        );
+        for words in [
+            "project:mint-fixture",
+            "Setup",
+            "Ground",
+            "actuation.authority.grant-world",
+        ] {
+            assert!(
+                error.message().contains(words),
+                "{words}: {}",
+                error.message()
+            );
+        }
+        assert!(runner.resolved.lock().unwrap().is_empty());
+        assert!(!binding_path(&world.home, &session).exists());
+        assert!(!world.home.state().join("agency-mints").exists());
+    }
+}
 
-    // With the root present but the template file absent, the exact default
-    // path is named.
-    let temp = tempfile::tempdir().unwrap();
-    let root = temp.path().canonicalize().unwrap();
-    fs::create_dir_all(root.join("Control")).unwrap();
-    fs::create_dir_all(
-        root.join("Work")
-            .join("O-I")
-            .join(".aikit")
-            .join("sf6-agency"),
-    )
-    .unwrap();
-    let project = root.join("Work").join("mint-fixture");
-    fs::create_dir_all(project.join(".aikit")).unwrap();
-    fs::create_dir_all(project.join("ProjectCentral")).unwrap();
-    fs::write(project.join("ProjectCentral/project.json"), manifest).unwrap();
-    let home = AikitHome::at(root.join("home"));
+/// Actuation's refusal of the resolution is the mint's refusal, in
+/// Actuation's words; nothing is actualised or bound.
+#[test]
+fn a_refused_resolution_binds_nothing_and_says_why_in_actuations_words() {
+    let world = MintWorld::new("project:mint-fixture");
+    let session = r("agent-session/mint-proof");
+    let mut runner = ProfileRunner::new(json!([]));
+    runner.refusal = Some(json!({
+        "code": "authority.bounds_exceeded",
+        "reason": "requested bounds are empty or exceed the grant bounds"
+    }));
     let error = mint_per_project_agency(
-        &home,
-        &project,
-        &r("agent-session/mint-proof"),
+        &world.home,
+        &world.project,
+        &session,
         None,
-        &write_actuation_stub(&root),
-        &SystemRunner::new(),
+        &world.actuation_bin,
+        &runner,
     )
     .unwrap_err();
-    assert_eq!(error.code(), "agency_mint.template_missing");
-    assert!(error.message().contains("sf6-agency/agency-request.json"));
+    assert_eq!(error.code(), "agency_mint.authority_refused");
+    for words in [
+        "authority.bounds_exceeded",
+        "requested bounds are empty or exceed the grant bounds",
+        "authority-source:world-grant@control:root:1726300000",
+        "actuation.authority.grant-world",
+    ] {
+        assert!(
+            error.message().contains(words),
+            "{words}: {}",
+            error.message()
+        );
+    }
+    assert_eq!(runner.resolved.lock().unwrap().len(), 1);
+    assert!(!binding_path(&world.home, &session).exists());
+}
+
+/// Several live grants may name a world; the newest is resolved.
+#[test]
+fn the_newest_live_grant_naming_the_world_is_resolved() {
+    let world = MintWorld::new("project:mint-fixture");
+    let session = r("agent-session/mint-proof");
+    let runner = ProfileRunner::with_authorities(
+        json!([]),
+        json!([
+            world_grant(
+                "authority-source:older",
+                1726300000,
+                &["control:root", "project:mint-fixture"]
+            ),
+            world_grant(
+                "authority-source:newer",
+                1726300500,
+                &["control:root", "project:mint-fixture"]
+            ),
+        ]),
+    );
+    let output = mint_per_project_agency(
+        &world.home,
+        &world.project,
+        &session,
+        None,
+        &world.actuation_bin,
+        &runner,
+    )
+    .unwrap();
+    assert_eq!(
+        output["data"]["authority_source_ref"],
+        "authority-source:newer"
+    );
 }
 
 #[test]
@@ -1082,7 +1322,7 @@ fn a_non_session_ref_is_refused_before_any_native_effect() {
         &r("display-name/not-a-session"),
         None,
         &world.actuation_bin,
-        &SystemRunner::new(),
+        &ProfileRunner::new(json!([])),
     )
     .unwrap_err();
     assert_eq!(error.code(), "agency_mint.session_invalid");
@@ -1099,34 +1339,21 @@ fn an_unbound_project_cannot_be_minted_against() {
     let project = root.join("loose");
     fs::create_dir_all(&project).unwrap();
     let home = AikitHome::at(root.join("home"));
-    // Under a Central-shaped root so the template is found and the failure is
-    // genuinely the project resolution, not the template walk.
+    // Under a Central-shaped root, with the World's grant at hand, so the
+    // failure is genuinely the project resolution.
     fs::create_dir_all(root.join("Control")).unwrap();
-    fs::create_dir_all(
-        root.join("Work")
-            .join("O-I")
-            .join(".aikit")
-            .join("sf6-agency"),
-    )
-    .unwrap();
-    fs::copy(
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/mint-agency-template.json"),
-        root.join("Work")
-            .join("O-I")
-            .join(".aikit")
-            .join("sf6-agency")
-            .join("agency-request.json"),
-    )
-    .unwrap();
+    fs::create_dir_all(root.join("Work")).unwrap();
     let stub = write_actuation_stub(&root);
+    let runner = ProfileRunner::new(json!([]));
     let error = mint_per_project_agency(
         &home,
         &project,
         &r("agent-session/mint-proof"),
         None,
         &stub,
-        &SystemRunner::new(),
+        &runner,
     )
     .unwrap_err();
     assert_eq!(error.code(), "agency_mint.project_unresolved");
+    assert!(runner.resolved.lock().unwrap().is_empty());
 }
