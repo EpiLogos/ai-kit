@@ -613,10 +613,45 @@ impl CommandRunner for ScopedProfileRunner {
                 .unwrap()
                 .push(serde_json::from_str(argv.last().unwrap()).unwrap());
         }
+        self.inner().run(argv)
+    }
+
+    fn starts_in(&self) -> Option<std::path::PathBuf> {
+        self.inner().starts_in()
+    }
+
+    fn run_in(
+        &self,
+        dir: &std::path::Path,
+        argv: &[String],
+        timeout: Option<std::time::Duration>,
+    ) -> aikit_core::Result<Output> {
+        self.inner().run_in(dir, argv, timeout)
+    }
+
+    fn run_in_with_limits(
+        &self,
+        dir: &std::path::Path,
+        argv: &[String],
+        remaining_timeout: std::time::Duration,
+        remaining_aggregate_bytes: usize,
+        strict_utf8: bool,
+    ) -> aikit_core::Result<Output> {
+        self.inner().run_in_with_limits(
+            dir,
+            argv,
+            remaining_timeout,
+            remaining_aggregate_bytes,
+            strict_utf8,
+        )
+    }
+}
+
+impl ScopedProfileRunner {
+    fn inner(&self) -> ProfileRunner {
         ProfileRunner {
             profiles: self.profiles.clone(),
         }
-        .run(argv)
     }
 }
 
