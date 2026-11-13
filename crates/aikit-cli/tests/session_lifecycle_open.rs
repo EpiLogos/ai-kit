@@ -374,3 +374,52 @@ fn binary_lifecycle_records_and_reopens_with_the_same_identities() {
     assert_eq!(value["error"]["code"], "session_lifecycle.unknown_session");
     assert_eq!(output.status.code(), Some(1));
 }
+
+/// O-I #1016: a harness session's SessionStart and SessionEnd, dispatched
+/// through the Service as `aikit hook dispatch` dispatches them, land in that
+/// Service's own home. A resumed start of the live session is no second start.
+/// The project stands outside any Central world, so no NOW is asked for.
+#[test]
+fn hook_dispatch_records_a_harness_sessions_start_and_end_in_the_services_home() {
+    use aikit_core::hooks::{HookEvent, HookEventKind};
+
+    let (home_dir, project_dir) = scene();
+    let service = open_service(&home_dir, &project_dir);
+    let event = |kind: HookEventKind, source: &str| {
+        HookEvent::new(
+            "claude",
+            kind,
+            serde_json::json!({"session_id": "lifecycle-hook-1", "source": source}),
+        )
+        .in_cwd(project_dir.path())
+    };
+    for (kind, source) in [
+        (HookEventKind::SessionStart, "startup"),
+        (HookEventKind::SessionStart, "resume"),
+        (HookEventKind::SessionEnd, "exit"),
+    ] {
+        let decision = service.dispatch_hook(&event(kind, source)).unwrap();
+        assert!(decision.allowed);
+        assert!(
+            !decision
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("session lifecycle") || warning.contains("NOW")),
+            "{:?}",
+            decision.warnings
+        );
+    }
+    let session =
+        aikit_cli::session_lifecycle_ops::harness_session("aikit:session:claude:lifecycle-hook-1")
+            .unwrap();
+    assert_eq!(
+        service.session_lifecycle_list().unwrap(),
+        vec![session.clone()]
+    );
+    let model = service.session_lifecycle_read_model(&session).unwrap();
+    assert_eq!(model.state, SessionLifecycleState::Ended);
+    assert_eq!(
+        model.event_count, 2,
+        "a resumed start is not a second start"
+    );
+}

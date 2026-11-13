@@ -2402,9 +2402,11 @@ impl Service {
     /// * the resolved chain: every event with at least one step;
     /// * the floor, which no composition gates: Central's temporal reground
     ///   and lean entry (SessionStart, UserPromptSubmit), the floor ledger
-    ///   reset (PreCompact), Communiqué delivery (UserPromptSubmit), and World
+    ///   reset (PreCompact), Communiqué delivery (UserPromptSubmit), World
     ///   inhabitation's Refocus (SessionStart, UserPromptSubmit, PreCompact,
-    ///   Stop) — a body may be inhabited after the seam was installed;
+    ///   Stop) — a body may be inhabited after the seam was installed — and
+    ///   the session's own record: its lifecycle and its NOW open at
+    ///   SessionStart and close at SessionEnd (O-I #1016);
     /// * PostToolUse, whatever the composition: it is where completed tool
     ///   use is recorded (activity evidence, and the observers that read
     ///   finished tool calls), and evidence that silently stops is worse than
@@ -2427,6 +2429,7 @@ impl Service {
             HookEventKind::UserPromptSubmit,
             HookEventKind::PreCompact,
             HookEventKind::Stop,
+            HookEventKind::SessionEnd,
             HookEventKind::PostToolUse,
         ]);
         for chain in build_chains(&self.view, &self.catalog)?.into_values() {
@@ -2491,6 +2494,7 @@ impl Service {
             event,
             &roots,
             lean_entry,
+            Some(&self.home),
         )?;
 
         // W1 reaction engine. The floor (Central's temporal reground) already

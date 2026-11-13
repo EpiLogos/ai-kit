@@ -161,6 +161,56 @@ impl SessionLifecycleServiceOps for AikitHome {
     }
 }
 
+/// The lifecycle identity of the harness session `session_ref` names
+/// (`aikit:session:<client>:<id>`), derived from the ref as an AgentSession's
+/// runtime identity is: every dispatch of one session lands on one history.
+pub fn harness_session(session_ref: &str) -> Result<SessionId> {
+    Ok(SessionId::of_agent_session(
+        &aikit_core::ResourceRef::parse(session_ref)?,
+    ))
+}
+
+/// Record a harness session's start, once (O-I #1016). A session that already
+/// has a history — resumed, cleared or compacted, or ended — gets no second
+/// start: the lifecycle has no restart event and its end is terminal.
+/// `Ok(true)` when this call recorded the start. The event's origin is the
+/// session ref, which is also the session's NOW task in Central.
+pub fn record_harness_start(home: &AikitHome, session_ref: &str) -> Result<bool> {
+    let session = harness_session(session_ref)?;
+    match home.session_lifecycle_history(&session) {
+        Ok(_) => Ok(false),
+        Err(error) if error.code() == "session_lifecycle.unknown_session" => {
+            home.session_lifecycle_record(
+                session,
+                SessionLifecycleRecord::Start,
+                None,
+                session_ref,
+            )?;
+            Ok(true)
+        }
+        Err(error) => Err(error),
+    }
+}
+
+/// Record a harness session's end. `Ok(false)` when this store never saw the
+/// session start, or its history already ended or was cancelled.
+pub fn record_harness_end(home: &AikitHome, session_ref: &str) -> Result<bool> {
+    let session = harness_session(session_ref)?;
+    let history = match home.session_lifecycle_history(&session) {
+        Ok(history) => history,
+        Err(error) if error.code() == "session_lifecycle.unknown_session" => return Ok(false),
+        Err(error) => return Err(error),
+    };
+    if matches!(
+        history.last().map(|event| event.kind),
+        Some(SessionLifecycleEventKind::SessionEnded | SessionLifecycleEventKind::Cancelled)
+    ) {
+        return Ok(false);
+    }
+    home.session_lifecycle_record(session, SessionLifecycleRecord::End, None, session_ref)?;
+    Ok(true)
+}
+
 /// Recover the activity identity and tool of one issued permission request.
 /// Unknown requests are explicit here — before the store's own validation —
 /// so the caller gets `session_lifecycle.unknown_permission_request` rather

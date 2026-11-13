@@ -263,6 +263,7 @@ mod tests {
             now,
             day: None,
             control_unpushed: None,
+            session_now: None,
         }
     }
 

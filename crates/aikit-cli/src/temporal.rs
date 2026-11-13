@@ -10,12 +10,24 @@
 //! same ground every turn is not. A body occupying a World Position gets no
 //! prompt-turn floor at all — its lean entry, Refocus and `aikit whoami` carry
 //! orientation, so no historical NOW strap rides its turns.
+//!
+//! A session makes its own NOW (O-I #1016, [`session_boundary`]): its start is
+//! recorded in AIKit's lifecycle and opens one NOW for it in Central; its end
+//! is recorded and closes that NOW. The ground then names the session's own
+//! NOW and scratch place, and no other session's NOW items.
 
 use std::path::{Path, PathBuf};
 
-use aikit_adapters::central_temporal::{read_central_temporal_ground, read_control_unpushed};
+use aikit_adapters::central_temporal::{
+    close_session_now, open_session_now, project_member, read_central_temporal_ground,
+    read_control_unpushed, read_day_pointer, render_root_ground, session_ref, SessionNow,
+};
 use aikit_adapters::runner::CommandRunner;
 use aikit_core::hooks::{HookDecision, HookEvent, HookEventKind};
+use aikit_store::AikitHome;
+use serde::{Deserialize, Serialize};
+
+use crate::session_lifecycle_ops::{record_harness_end, record_harness_start};
 
 pub fn event_needs_reground(kind: &HookEventKind) -> bool {
     matches!(
@@ -56,12 +68,31 @@ pub fn reground<R: CommandRunner>(
         return;
     };
 
+    let session = crate::refocus::hook_session(&event.payload);
+    let session_now = ledger
+        .zip(session.as_deref())
+        .and_then(|(ledger, session)| ledger.session_now(session))
+        .map(|held| held.now);
     let rendered = match read_central_temporal_ground(runner, &central_root, project_root) {
-        Ok(Some(ground)) => ground.render(),
-        Ok(None) => match read_control_unpushed(runner, &central_root) {
-            Some(unpushed) => unpushed.render_standalone(),
-            None => return,
-        },
+        Ok(Some(mut ground)) => {
+            ground.session_now = session_now;
+            ground.render()
+        }
+        Ok(None) => {
+            // The Day is read only for a root session that holds a NOW: the
+            // Control warning alone costs no Central Action.
+            let day = session_now
+                .as_ref()
+                .and_then(|_| read_day_pointer(runner, &central_root));
+            match render_root_ground(
+                read_control_unpushed(runner, &central_root).as_ref(),
+                session_now.as_ref(),
+                day.as_ref(),
+            ) {
+                Some(rendered) => rendered,
+                None => return,
+            }
+        }
         Err(error) => {
             decision.warnings.push(format!(
                 "Central temporal re-grounding unavailable for this turn: {}",
@@ -74,7 +105,7 @@ pub fn reground<R: CommandRunner>(
             }
         }
     };
-    if let (Some(ledger), Some(session)) = (ledger, crate::refocus::hook_session(&event.payload)) {
+    if let (Some(ledger), Some(session)) = (ledger, session) {
         let digest = blake3::hash(rendered.as_bytes()).to_hex().to_string();
         if event.kind == HookEventKind::UserPromptSubmit
             && ledger.last(&session).as_deref() == Some(digest.as_str())
@@ -164,6 +195,158 @@ impl FloorLedger {
     pub fn forget(&self, session: &str) {
         let _ = std::fs::remove_file(self.path(session));
     }
+
+    fn now_path(&self, session: &str) -> PathBuf {
+        self.dir.join(format!(
+            "{}.now.json",
+            blake3::hash(session.as_bytes()).to_hex()
+        ))
+    }
+
+    /// The NOW Central allocated for this session at its start, and where.
+    /// Kept for the session's life: it changes only at a start or an end.
+    pub fn session_now(&self, session: &str) -> Option<HeldNow> {
+        let text = std::fs::read_to_string(self.now_path(session)).ok()?;
+        serde_json::from_str(&text).ok()
+    }
+
+    fn hold_session_now(&self, session: &str, held: &HeldNow) {
+        if let Ok(text) = serde_json::to_string(held) {
+            if std::fs::create_dir_all(&self.dir).is_ok() {
+                let _ = std::fs::write(self.now_path(session), text);
+            }
+        }
+    }
+
+    fn release_session_now(&self, session: &str) {
+        let _ = std::fs::remove_file(self.now_path(session));
+    }
+}
+
+/// Where a session stands in a Central world: the root, and the Project it is
+/// in (`None` in the root register — the root itself, `Control`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionWorld {
+    pub central_root: PathBuf,
+    #[serde(default)]
+    pub project: Option<String>,
+}
+
+impl SessionWorld {
+    /// The Central world `cwd` stands in, resolved as the floor resolves it.
+    pub fn of(cwd: Option<&Path>) -> Option<Self> {
+        let central_root = process_central_root(cwd).or_else(|| central_root_enclosing(cwd))?;
+        let project = cwd.and_then(|cwd| project_member(&central_root, cwd));
+        Some(Self {
+            central_root,
+            project,
+        })
+    }
+}
+
+/// A session's NOW as its start opened it, and the world it was opened in.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HeldNow {
+    pub world: SessionWorld,
+    pub now: SessionNow,
+}
+
+/// A session's own start and end (O-I #1016). SessionStart records the start
+/// in AIKit's lifecycle and opens the session's NOW in Central; SessionEnd
+/// records the end and closes that NOW. Every failure — no home, `ctrl`
+/// unavailable, Central's refusal — is a warning on the decision, never a
+/// verdict change, and nothing is retried.
+///
+/// A start replayed for a live session (resume, clear, compact) records no
+/// second start and allocates nothing when the session already holds its NOW
+/// in this world. `world` is `None` outside any Central world: the lifecycle
+/// is still recorded, and there is no NOW.
+pub fn session_boundary<R: CommandRunner>(
+    decision: &mut HookDecision,
+    event: &HookEvent,
+    world: Option<&SessionWorld>,
+    home: Option<&AikitHome>,
+    ledger: Option<&FloorLedger>,
+    runner: &R,
+) {
+    if !matches!(
+        event.kind,
+        HookEventKind::SessionStart | HookEventKind::SessionEnd
+    ) {
+        return;
+    }
+    let Some(session) = crate::refocus::hook_session(&event.payload) else {
+        return;
+    };
+    let reference = session_ref(&event.client, &session);
+    let held = ledger.and_then(|ledger| ledger.session_now(&session));
+    if event.kind == HookEventKind::SessionStart {
+        let started = match home.map(|home| record_harness_start(home, &reference)) {
+            Some(Ok(started)) => started,
+            Some(Err(error)) => {
+                decision.warnings.push(format!(
+                    "session lifecycle start not recorded for {reference}: {}",
+                    error.message()
+                ));
+                false
+            }
+            None => false,
+        };
+        let Some(world) = world else {
+            return;
+        };
+        if !started && held.as_ref().is_some_and(|held| &held.world == world) {
+            return;
+        }
+        match open_session_now(
+            runner,
+            &world.central_root,
+            world.project.as_deref(),
+            &event.client,
+            &reference,
+        ) {
+            Ok(now) => {
+                if let Some(ledger) = ledger {
+                    ledger.hold_session_now(
+                        &session,
+                        &HeldNow {
+                            world: world.clone(),
+                            now,
+                        },
+                    );
+                }
+            }
+            Err(error) => decision.warnings.push(format!(
+                "this session's NOW was not opened in Central: {}",
+                error.message()
+            )),
+        }
+        return;
+    }
+    if let Some(Err(error)) = home.map(|home| record_harness_end(home, &reference)) {
+        decision.warnings.push(format!(
+            "session lifecycle end not recorded for {reference}: {}",
+            error.message()
+        ));
+    }
+    // Closed where it was opened; a session whose start predates this record
+    // is looked for where it ends.
+    if let Some(world) = held.as_ref().map(|held| &held.world).or(world) {
+        if let Err(error) = close_session_now(
+            runner,
+            &world.central_root,
+            world.project.as_deref(),
+            &reference,
+        ) {
+            decision.warnings.push(format!(
+                "this session's NOW was not closed in Central: {}",
+                error.message()
+            ));
+        }
+    }
+    if let Some(ledger) = ledger {
+        ledger.release_session_now(&session);
+    }
 }
 
 /// Whether this process is a body stamped into a World Position occupancy
@@ -249,7 +432,13 @@ mod tests {
     }
 
     fn day() -> String {
-        success(json!({"day_ref":"central:day:control:root:2026-09-23","revision":"rev-day"}))
+        day_of("2026-09-23")
+    }
+
+    fn day_of(date: &str) -> String {
+        success(
+            json!({"day_ref": format!("central:day:control:root:{date}"), "revision": "rev-day"}),
+        )
     }
 
     fn now_with(subject: &str) -> String {
@@ -261,11 +450,14 @@ mod tests {
     }
 
     #[test]
-    fn next_prompt_reads_changed_now_instead_of_reusing_session_start() {
+    fn next_prompt_reads_the_turned_day_and_never_other_sessions_now_items() {
         let (a, b) = (now_with("state A"), now_with("state B"));
         let runner = ScriptedRunner::new()
             .sequence("projectcentral.now.inspect", &[&a, &b])
-            .on("central.day.read", &day());
+            .sequence(
+                "central.day.read",
+                &[&day_of("2026-09-23"), &day_of("2026-09-24")],
+            );
         let central = Path::new("/home/me/Central");
         let project = Path::new("/home/me/Central/Work/example");
 
@@ -279,7 +471,6 @@ mod tests {
             &runner,
             None,
         );
-        assert!(first.injected_text().contains("state A"));
         assert!(first
             .injected_text()
             .contains("central:day:control:root:2026-09-23"));
@@ -294,8 +485,15 @@ mod tests {
             &runner,
             None,
         );
-        assert!(second.injected_text().contains("state B"));
-        assert!(!second.injected_text().contains("state A"));
+        assert!(second
+            .injected_text()
+            .contains("central:day:control:root:2026-09-24"));
+        assert!(!second.injected_text().contains("2026-09-23"));
+        // Another session's handoff is not this session's ground.
+        for turn in [&first, &second] {
+            assert!(!turn.injected_text().contains("state A"));
+            assert!(!turn.injected_text().contains("state B"));
+        }
         assert!(!runner
             .call_lines()
             .iter()
@@ -306,10 +504,10 @@ mod tests {
     fn a_prompt_turn_carries_the_ground_only_when_it_changed() {
         let temp = tempfile::tempdir().unwrap();
         let ledger = FloorLedger::in_state(temp.path());
-        let (a, b) = (now_with("state A"), now_with("state B"));
+        let (a, b) = (day_of("2026-09-23"), day_of("2026-09-24"));
         let runner = ScriptedRunner::new()
-            .sequence("projectcentral.now.inspect", &[&a, &a, &a, &b])
-            .on("central.day.read", &day());
+            .on("projectcentral.now.inspect", &now_with("state A"))
+            .sequence("central.day.read", &[&a, &a, &a, &b]);
         let central = Path::new("/home/me/Central");
         let project = Path::new("/home/me/Central/Work/example");
         let session = json!({"session_id": "sess-1"});
@@ -324,7 +522,8 @@ mod tests {
             &runner,
             Some(&ledger),
         );
-        assert!(first.injected_text().contains("state A"));
+        assert!(first.injected_text().contains("2026-09-23"));
+        assert!(!first.injected_text().contains("state A"));
 
         // Same ground: the prompt turn is silent, twice.
         for _ in 0..2 {
@@ -341,7 +540,7 @@ mod tests {
             assert!(turn.injected.is_empty(), "unchanged ground is not re-sent");
         }
 
-        // Changed ground: delivered once.
+        // The Day turned: delivered once.
         let prompt = HookEvent::new("claude", HookEventKind::UserPromptSubmit, session.clone());
         let mut changed = decision(HookEventKind::UserPromptSubmit);
         reground(
@@ -352,7 +551,7 @@ mod tests {
             &runner,
             Some(&ledger),
         );
-        assert!(changed.injected_text().contains("state B"));
+        assert!(changed.injected_text().contains("2026-09-24"));
 
         // Another session starts from nothing.
         let other = HookEvent::new(
@@ -361,8 +560,8 @@ mod tests {
             json!({"session_id": "sess-2"}),
         );
         let runner = ScriptedRunner::new()
-            .on("projectcentral.now.inspect", &b)
-            .on("central.day.read", &day());
+            .on("projectcentral.now.inspect", &now_with("state B"))
+            .on("central.day.read", &b);
         let mut fresh = decision(HookEventKind::UserPromptSubmit);
         reground(
             &mut fresh,
@@ -372,7 +571,7 @@ mod tests {
             &runner,
             Some(&ledger),
         );
-        assert!(fresh.injected_text().contains("state B"));
+        assert!(fresh.injected_text().contains("2026-09-24"));
     }
 
     fn handoff_runner() -> ScriptedRunner {
@@ -435,7 +634,10 @@ mod tests {
             None,
         );
         assert_eq!(unchanged.injected, direct.injected);
-        assert!(unchanged.injected_text().contains("historical handoff"));
+        assert!(unchanged
+            .injected_text()
+            .starts_with("[Central temporal ground]"));
+        assert!(!unchanged.injected_text().contains("historical handoff"));
 
         // An occupied body's prompt turn carries no historical floor…
         let prompt = HookEvent::new("claude", HookEventKind::UserPromptSubmit, json!({}));
@@ -454,7 +656,8 @@ mod tests {
         assert!(occupied.injected.is_empty());
         assert!(runner.calls().is_empty(), "the dump is not even read");
 
-        // …while an unoccupied body's prompt turn re-grounds as before.
+        // …while an unoccupied body's prompt turn re-grounds as before, and
+        // that ground is its own: no historical NOW dump rides it.
         let mut turn = decision(HookEventKind::UserPromptSubmit);
         session_floor(
             &mut turn,
@@ -466,7 +669,9 @@ mod tests {
             false,
             None,
         );
-        assert!(turn.injected_text().contains("historical handoff"));
+        assert!(turn.injected_text().contains("project: example"));
+        assert!(!turn.injected_text().contains("historical handoff"));
+        assert!(!turn.injected_text().contains("historical NOW dump"));
     }
 
     #[test]
@@ -763,12 +968,393 @@ mod tests {
         );
         let text = result.injected_text();
         assert!(text.contains("project: example"));
-        assert!(text.contains("state A"));
+        assert!(!text.contains("state A"), "no other session's handoff");
         assert!(text.contains("6 commits ahead of origin/main"));
         assert_eq!(
             text.matches("[Central temporal ground]").count(),
             1,
             "one block, not a block and a second warning"
         );
+    }
+
+    // ---- The session's own record (O-I #1016) ------------------------------
+
+    use crate::session_lifecycle_ops::{harness_session, SessionLifecycleServiceOps};
+    use aikit_core::session_lifecycle::{SessionLifecycleEventKind, SessionLifecycleState};
+
+    const REF: &str = "aikit:session:claude:sess-1";
+    const NOW_REF: &str = "central:now:project:example:k1";
+    const SCRATCH: &str = "/home/me/Central/Work/example/ProjectCentral/agents/now/clearings/k1/T";
+    const CENTRAL: &str = "/home/me/Central";
+    const PROJECT: &str = "/home/me/Central/Work/example";
+
+    fn example_world() -> SessionWorld {
+        SessionWorld {
+            central_root: CENTRAL.into(),
+            project: Some("example".into()),
+        }
+    }
+
+    fn listed(lifecycle: &str) -> String {
+        success(
+            json!({"records": [{"now_ref": NOW_REF, "task_ref": REF, "lifecycle": lifecycle,
+            "participant_refs": [REF], "revision": {"byte_len": 9, "revision": "rev-now"}}]}),
+        )
+    }
+
+    /// Central as the session's start, turns and end meet it. The Project's
+    /// NOW holds another session's handoff, which must never ride this one.
+    fn owner_runner() -> ScriptedRunner {
+        ScriptedRunner::new()
+            .on(
+                "central.work.policy",
+                &success(json!({"revision": "rev-policy"})),
+            )
+            .on(
+                "central.now.allocate",
+                &success(
+                    json!({"created": true, "now_ref": NOW_REF, "writable_destination": SCRATCH}),
+                ),
+            )
+            .on("central.now.list", &listed("active"))
+            .on(
+                "central.now.lifecycle",
+                &success(json!({"lifecycle": "closed"})),
+            )
+            .on(
+                "projectcentral.now.inspect",
+                &now_with("another session's handoff"),
+            )
+            .on("central.day.read", &day())
+    }
+
+    fn calls_of(runner: &ScriptedRunner, action: &str) -> Vec<String> {
+        runner
+            .call_lines()
+            .into_iter()
+            .filter(|line| line.contains(action))
+            .collect()
+    }
+
+    fn hook_at(cwd: &str, kind: HookEventKind, payload: serde_json::Value) -> HookEvent {
+        HookEvent::new("claude", kind, payload).in_cwd(cwd)
+    }
+
+    /// One dispatch's floor, in the order `hook::dispatch_with_entry` runs it.
+    fn dispatch(
+        event: &HookEvent,
+        world: Option<&SessionWorld>,
+        home: &AikitHome,
+        ledger: &FloorLedger,
+        runner: &ScriptedRunner,
+    ) -> HookDecision {
+        let mut result = decision(event.kind.clone());
+        session_boundary(&mut result, event, world, Some(home), Some(ledger), runner);
+        session_floor(
+            &mut result,
+            event,
+            event.cwd.as_deref(),
+            world.map(|world| world.central_root.as_path()),
+            runner,
+            None,
+            false,
+            Some(ledger),
+        );
+        result
+    }
+
+    #[test]
+    fn a_session_start_records_its_lifecycle_and_opens_its_own_now_once() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = AikitHome::at(temp.path());
+        let ledger = FloorLedger::in_state(&home.state());
+        let runner = owner_runner();
+        let world = example_world();
+        let start = hook_at(
+            PROJECT,
+            HookEventKind::SessionStart,
+            json!({"session_id": "sess-1", "source": "startup"}),
+        );
+        let first = dispatch(&start, Some(&world), &home, &ledger, &runner);
+        assert!(first.allowed);
+        assert!(first.warnings.is_empty(), "{:?}", first.warnings);
+
+        // AIKit's lifecycle holds the start, by the session's ref.
+        let session = harness_session(REF).unwrap();
+        assert_eq!(
+            home.session_lifecycle_list().unwrap(),
+            vec![session.clone()]
+        );
+        let history = home.session_lifecycle_history(&session).unwrap();
+        assert_eq!(history.len(), 1);
+        assert_eq!(history[0].kind, SessionLifecycleEventKind::SessionStarted);
+        assert_eq!(history[0].origin, REF);
+
+        // Central allocated one NOW for it, and the start names that NOW,
+        // its scratch place and the Day — no other session's handoff.
+        let allocations = calls_of(&runner, "central.now.allocate");
+        assert_eq!(allocations.len(), 1);
+        assert!(allocations[0].contains("\"task_ref\":\"aikit:session:claude:sess-1\""));
+        let text = first.injected_text();
+        assert!(text.contains(&format!("NOW: {NOW_REF} (this session's own)")));
+        assert!(text.contains(&format!("scratch: {SCRATCH}")));
+        assert!(text.contains("Day: central:day:control:root:2026-09-23"));
+        assert!(!text.contains("another session's handoff"), "{text}");
+
+        // A resumed start of the live session: no second start, no second
+        // allocation, and its ground names the same NOW.
+        let resume = hook_at(
+            PROJECT,
+            HookEventKind::SessionStart,
+            json!({"session_id": "sess-1", "source": "resume"}),
+        );
+        let again = dispatch(&resume, Some(&world), &home, &ledger, &runner);
+        assert!(again.warnings.is_empty(), "{:?}", again.warnings);
+        assert_eq!(home.session_lifecycle_history(&session).unwrap().len(), 1);
+        assert_eq!(calls_of(&runner, "central.now.allocate").len(), 1);
+        assert!(again.injected_text().contains(NOW_REF));
+
+        // The prompt turn after it is quiet: nothing changed.
+        let prompt = hook_at(
+            PROJECT,
+            HookEventKind::UserPromptSubmit,
+            json!({"session_id": "sess-1"}),
+        );
+        let turn = dispatch(&prompt, Some(&world), &home, &ledger, &runner);
+        assert!(turn.injected.is_empty(), "{}", turn.injected_text());
+        assert_eq!(calls_of(&runner, "central.now.allocate").len(), 1);
+    }
+
+    #[test]
+    fn a_session_end_records_the_end_and_closes_its_own_now() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = AikitHome::at(temp.path());
+        let ledger = FloorLedger::in_state(&home.state());
+        let runner = owner_runner();
+        let world = example_world();
+        let payload = json!({"session_id": "sess-1"});
+        dispatch(
+            &hook_at(PROJECT, HookEventKind::SessionStart, payload.clone()),
+            Some(&world),
+            &home,
+            &ledger,
+            &runner,
+        );
+        assert!(ledger.session_now("sess-1").is_some());
+
+        let end = hook_at(
+            PROJECT,
+            HookEventKind::SessionEnd,
+            json!({"session_id": "sess-1", "reason": "exit"}),
+        );
+        let ended = dispatch(&end, Some(&world), &home, &ledger, &runner);
+        assert!(ended.allowed);
+        assert!(ended.warnings.is_empty(), "{:?}", ended.warnings);
+        assert!(ended.injected.is_empty(), "an end carries no ground");
+
+        let model = home
+            .session_lifecycle_read_model(&harness_session(REF).unwrap())
+            .unwrap();
+        assert_eq!(model.state, SessionLifecycleState::Ended);
+        assert_eq!(model.event_count, 2);
+
+        // Found among the NOWs naming this session, closed at the revision
+        // just listed.
+        let listing = calls_of(&runner, "central.now.list");
+        assert_eq!(listing.len(), 1);
+        assert!(listing[0].contains("\"participant_refs\":[\"aikit:session:claude:sess-1\"]"));
+        let closes = calls_of(&runner, "central.now.lifecycle");
+        assert_eq!(closes.len(), 1);
+        for part in [
+            "\"lifecycle\":\"closed\"",
+            "\"expected_revision\":\"rev-now\"",
+            "\"expected_policy_revision\":\"rev-policy\"",
+            "\"project\":\"example\"",
+            NOW_REF,
+        ] {
+            assert!(closes[0].contains(part), "{part} missing: {}", closes[0]);
+        }
+        assert!(ledger.session_now("sess-1").is_none());
+
+        // An end replayed for an ended session records nothing more.
+        let replay = dispatch(&end, Some(&world), &home, &ledger, &runner);
+        assert!(replay.warnings.is_empty(), "{:?}", replay.warnings);
+        assert_eq!(
+            home.session_lifecycle_history(&harness_session(REF).unwrap())
+                .unwrap()
+                .len(),
+            2
+        );
+    }
+
+    #[test]
+    fn a_refused_close_is_a_warning_and_the_end_is_still_recorded() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = AikitHome::at(temp.path());
+        let ledger = FloorLedger::in_state(&home.state());
+        let world = example_world();
+        let runner = ScriptedRunner::new()
+            .on(
+                "central.work.policy",
+                &success(json!({"revision": "rev-policy"})),
+            )
+            .on(
+                "central.now.allocate",
+                &success(json!({"now_ref": NOW_REF, "writable_destination": SCRATCH})),
+            )
+            .on("central.now.list", &listed("active"))
+            .on(
+                "central.now.lifecycle",
+                &json!({"ok": false, "status": "denied",
+                    "error": {"code": "denied", "message": "native credential is required"}})
+                .to_string(),
+            );
+        let payload = json!({"session_id": "sess-1"});
+        let mut start = decision(HookEventKind::SessionStart);
+        session_boundary(
+            &mut start,
+            &hook_at(PROJECT, HookEventKind::SessionStart, payload.clone()),
+            Some(&world),
+            Some(&home),
+            Some(&ledger),
+            &runner,
+        );
+        let mut end = decision(HookEventKind::SessionEnd);
+        session_boundary(
+            &mut end,
+            &hook_at(PROJECT, HookEventKind::SessionEnd, payload),
+            Some(&world),
+            Some(&home),
+            Some(&ledger),
+            &runner,
+        );
+        assert!(end.allowed, "a refusal never changes the verdict");
+        assert_eq!(end.warnings.len(), 1, "{:?}", end.warnings);
+        assert!(end.warnings[0].contains("not closed in Central: native credential is required"));
+        assert_eq!(
+            home.session_lifecycle_read_model(&harness_session(REF).unwrap())
+                .unwrap()
+                .state,
+            SessionLifecycleState::Ended
+        );
+        assert_eq!(
+            calls_of(&runner, "central.now.lifecycle").len(),
+            1,
+            "no retry"
+        );
+    }
+
+    #[test]
+    fn a_failed_allocation_is_a_warning_and_the_start_is_still_recorded() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = AikitHome::at(temp.path());
+        let ledger = FloorLedger::in_state(&home.state());
+        let runner = ScriptedRunner::new()
+            .on(
+                "central.work.policy",
+                &success(json!({"revision": "rev-policy"})),
+            )
+            .failing("central.now.allocate", 9, "owner unavailable");
+        let mut start = decision(HookEventKind::SessionStart);
+        session_boundary(
+            &mut start,
+            &hook_at(
+                PROJECT,
+                HookEventKind::SessionStart,
+                json!({"session_id": "sess-1"}),
+            ),
+            Some(&example_world()),
+            Some(&home),
+            Some(&ledger),
+            &runner,
+        );
+        assert!(start.allowed);
+        assert!(start.warnings[0].contains("this session's NOW was not opened in Central"));
+        assert_eq!(
+            home.session_lifecycle_history(&harness_session(REF).unwrap())
+                .unwrap()
+                .len(),
+            1
+        );
+        assert!(ledger.session_now("sess-1").is_none());
+    }
+
+    #[test]
+    fn outside_any_central_world_the_lifecycle_is_recorded_and_central_is_not_asked() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = AikitHome::at(temp.path());
+        let ledger = FloorLedger::in_state(&home.state());
+        let runner = ScriptedRunner::new();
+        for kind in [HookEventKind::SessionStart, HookEventKind::SessionEnd] {
+            let mut result = decision(kind.clone());
+            session_boundary(
+                &mut result,
+                &hook_at("/elsewhere/project", kind, json!({"session_id": "sess-1"})),
+                None,
+                Some(&home),
+                Some(&ledger),
+                &runner,
+            );
+            assert!(result.warnings.is_empty(), "{:?}", result.warnings);
+        }
+        assert!(runner.calls().is_empty());
+        let model = home
+            .session_lifecycle_read_model(&harness_session(REF).unwrap())
+            .unwrap();
+        assert_eq!(model.state, SessionLifecycleState::Ended);
+    }
+
+    #[test]
+    fn an_event_without_a_session_id_records_nothing() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = AikitHome::at(temp.path());
+        let runner = ScriptedRunner::new();
+        let mut result = decision(HookEventKind::SessionStart);
+        session_boundary(
+            &mut result,
+            &hook_at(PROJECT, HookEventKind::SessionStart, json!({})),
+            Some(&example_world()),
+            Some(&home),
+            None,
+            &runner,
+        );
+        assert!(home.session_lifecycle_list().unwrap().is_empty());
+        assert!(runner.calls().is_empty());
+    }
+
+    #[test]
+    fn a_root_session_holds_a_root_now_and_hears_it_with_the_day() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = AikitHome::at(temp.path());
+        let ledger = FloorLedger::in_state(&home.state());
+        let runner = ScriptedRunner::new()
+            .on(
+                "central.work.policy",
+                &success(json!({"revision": "rev-root"})),
+            )
+            .on(
+                "central.now.allocate",
+                &success(json!({"now_ref": "central:now:control:root:k2",
+                    "writable_destination": "/home/me/Central/Control/agents/now/clearings/k2/T"})),
+            )
+            .on("central.day.read", &day());
+        let world = SessionWorld {
+            central_root: CENTRAL.into(),
+            project: None,
+        };
+        let start = hook_at(
+            CENTRAL,
+            HookEventKind::SessionStart,
+            json!({"session_id": "sess-1"}),
+        );
+        let result = dispatch(&start, Some(&world), &home, &ledger, &runner);
+        assert!(result.warnings.is_empty(), "{:?}", result.warnings);
+        let allocation = &calls_of(&runner, "central.now.allocate")[0];
+        assert!(!allocation.contains("\"project\""), "{allocation}");
+        assert!(allocation.contains("claude session in the root"));
+        let text = result.injected_text();
+        assert!(text.contains("register: the Central root (no Project)"));
+        assert!(text.contains("NOW: central:now:control:root:k2"));
+        assert!(text.contains("Day: central:day:control:root:2026-09-23"));
     }
 }
