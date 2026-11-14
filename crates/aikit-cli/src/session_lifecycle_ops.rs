@@ -201,6 +201,20 @@ pub fn record_harness_start(home: &AikitHome, session_ref: &str) -> Result<Harne
     Ok(found)
 }
 
+/// Whether the harness session record `session_ref` names has a start with no end yet: its last
+/// event leaves it neither ended nor cancelled. A record never started is not running.
+pub fn harness_session_running(home: &AikitHome, session_ref: &str) -> Result<bool> {
+    let session = harness_session(session_ref)?;
+    match home.session_lifecycle_history(&session) {
+        Ok(history) => Ok(!matches!(
+            history.last().map(|event| event.kind),
+            Some(SessionLifecycleEventKind::SessionEnded | SessionLifecycleEventKind::Cancelled)
+        )),
+        Err(error) if error.code() == "session_lifecycle.unknown_session" => Ok(false),
+        Err(error) => Err(error),
+    }
+}
+
 /// Record a harness session's end. `Ok(false)` when this store never saw the
 /// session start, or its history already ended or was cancelled.
 pub fn record_harness_end(home: &AikitHome, session_ref: &str) -> Result<bool> {

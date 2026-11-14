@@ -655,6 +655,15 @@ fn client_overlay(client: &str) -> Option<&'static ClientOverlay> {
     })
 }
 
+/// The client name a harness's sessions are recorded under in AIKit's
+/// lifecycle (`aikit:session:<client>:<id>`): the name its hooks dispatch as
+/// (`aikit hook dispatch claude ...` for `claude-code`). A session AIKit opens
+/// itself is recorded under the same name, so a harness's sessions share one
+/// spelling however they began. A harness with no overlay keeps its own name.
+pub fn lifecycle_client(harness: &str) -> &str {
+    client_overlay(harness).map_or(harness, |overlay| overlay.name)
+}
+
 /// The Actuation catalog slug for a registered harness, accepting the
 /// CLI-facing name, a registered alias, or the slug itself. This is the one
 /// join between surface spellings and profile slugs; alias families and the

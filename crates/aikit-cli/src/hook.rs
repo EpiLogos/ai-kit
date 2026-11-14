@@ -112,7 +112,10 @@ pub fn dispatch_with_entry(
     // lifecycle. It opens no NOW in Central yet (`can_close` is false): no
     // hook holds an authority that can close one, and allocating writes
     // tracked files into the world's ground. What a hook may hold is #1016's
-    // to decide.
+    // to decide. A body its owner opened keeps the session record it was
+    // handed, under the open that launched it (ai-kit#640): its end lands
+    // there, its start is the owner's, and nothing lands on a second record
+    // under the harness's own id.
     crate::temporal::session_boundary(
         &mut decision,
         event,
@@ -121,6 +124,7 @@ pub fn dispatch_with_entry(
         floor_ledger.as_ref(),
         &runner,
         false,
+        crate::temporal::process_session_lifecycle().as_ref(),
     );
     crate::temporal::session_floor(
         &mut decision,

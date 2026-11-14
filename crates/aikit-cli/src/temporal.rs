@@ -25,6 +25,7 @@ use aikit_adapters::central_temporal::{
     read_control_unpushed, read_day_pointer, render_root_ground, reopen_session_now, session_ref,
     SessionNow,
 };
+use aikit_adapters::connection_process::SessionLifecycleHandoff;
 use aikit_adapters::runner::CommandRunner;
 use aikit_core::hooks::{HookDecision, HookEvent, HookEventKind};
 use aikit_store::AikitHome;
@@ -253,6 +254,109 @@ impl FloorLedger {
             }
         }
     }
+
+    fn claim_path(&self, handed: &str) -> PathBuf {
+        self.dir.join(format!(
+            "{}.claim.json",
+            blake3::hash(handed.as_bytes()).to_hex()
+        ))
+    }
+
+    fn handed_claim(&self, handed: &str) -> Option<HandedClaim> {
+        let text = std::fs::read_to_string(self.claim_path(handed)).ok()?;
+        serde_json::from_str(&text).ok()
+    }
+
+    /// Keep `claim` on the record `handed`, written whole and then moved into place, so a hook
+    /// never reads half of one. A claim that cannot be kept leaves the one before.
+    fn keep_handed_claim(&self, handed: &str, claim: &HandedClaim) {
+        let (Ok(text), Ok(())) = (
+            serde_json::to_string(claim),
+            std::fs::create_dir_all(&self.dir),
+        ) else {
+            return;
+        };
+        let path = self.claim_path(handed);
+        let partial = path.with_extension(format!("{}.partial", std::process::id()));
+        if std::fs::write(&partial, text).is_ok() && std::fs::rename(&partial, &path).is_err() {
+            let _ = std::fs::remove_file(&partial);
+        }
+    }
+
+    /// The owner's open `open` launches a body handed the record `handed` (ai-kit#640): from now
+    /// on the record is claimed by the first session to start under that open
+    /// ([`holds_handed`]), and held by no session of an earlier open.
+    pub fn open_handed(&self, handed: &str, open: &str) {
+        self.keep_handed_claim(
+            handed,
+            &HandedClaim {
+                open: open.to_owned(),
+                session: None,
+            },
+        );
+    }
+
+    /// Claim the record `handed` for `session`, started under the open `open`, unless another
+    /// session holds it under that open. A session of an open the record has moved on from claims
+    /// nothing. Answers whether `session` holds it.
+    fn claim_handed(&self, handed: &str, open: &str, session: &str) -> bool {
+        match self.handed_claim(handed) {
+            Some(claim) if claim.open != open => false,
+            Some(HandedClaim {
+                session: Some(claimant),
+                ..
+            }) => claimant == session,
+            // The open's first session; or no open was kept, which leaves the record to the
+            // session that starts on it, as before claims were kept.
+            _ => {
+                self.keep_handed_claim(
+                    handed,
+                    &HandedClaim {
+                        open: open.to_owned(),
+                        session: Some(session.to_owned()),
+                    },
+                );
+                true
+            }
+        }
+    }
+
+    /// Whether `session`, started under the open `open`, holds the record `handed`.
+    fn holds_handed_claim(&self, handed: &str, open: &str, session: &str) -> bool {
+        self.handed_claim(handed)
+            .is_some_and(|claim| claim.open == open && claim.session.as_deref() == Some(session))
+    }
+}
+
+/// The open a handed record was last launched under, and the session that claimed it under that
+/// open, if one has started yet ([`holds_handed`]).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct HandedClaim {
+    open: String,
+    session: Option<String>,
+}
+
+/// Whether the harness session `session` holds the record it was `handed` (ai-kit#640). The
+/// record is the body's: the owner's open names itself on the record as it launches the body
+/// ([`FloorLedger::open_handed`]), and the first session to start under that open claims it. Any
+/// other session handed the same open is a harness the body launched in turn, which inherited its
+/// environment, and a session of an earlier open is a body the record has moved on from: each
+/// keeps its own record, so its end never ends the body's. With no ledger to keep the claim in, no
+/// session holds the record.
+fn holds_handed(
+    ledger: Option<&FloorLedger>,
+    handed: &SessionLifecycleHandoff,
+    session: &str,
+    kind: &HookEventKind,
+) -> bool {
+    let Some(ledger) = ledger else {
+        return false;
+    };
+    if *kind == HookEventKind::SessionStart {
+        ledger.claim_handed(&handed.session_ref, &handed.open, session)
+    } else {
+        ledger.holds_handed_claim(&handed.session_ref, &handed.open, session)
+    }
 }
 
 /// Where a session stands in a Central world: the root, and the Project it is
@@ -307,6 +411,16 @@ pub struct HeldNow {
 /// for nothing, and raises no warning; its ground says in one line that its
 /// NOW was not opened. The hook passes `false`: what authority a hook may hold
 /// is O-I #1016's to decide.
+///
+/// A body whose owner opened its session (an AIKit conversation) is `handed`
+/// that session's record and the open that launched it
+/// ([`process_session_lifecycle`]), never a second record under the harness's
+/// own id (ai-kit#640). Its start is the owner's to record, once that open has
+/// answered, so a body whose open fails leaves the record as it stood; its end
+/// is recorded there, and after the owner's End is already recorded. A harness
+/// the body launches in turn inherits what it was handed and keeps its own
+/// record ([`holds_handed`]). See [`handed_session_ref`].
+#[allow(clippy::too_many_arguments)]
 pub fn session_boundary<R: CommandRunner>(
     decision: &mut HookDecision,
     event: &HookEvent,
@@ -315,6 +429,7 @@ pub fn session_boundary<R: CommandRunner>(
     ledger: Option<&FloorLedger>,
     runner: &R,
     can_close: bool,
+    handed: Option<&SessionLifecycleHandoff>,
 ) {
     if !matches!(
         event.kind,
@@ -325,10 +440,19 @@ pub fn session_boundary<R: CommandRunner>(
     let Some(session) = crate::refocus::hook_session(&event.payload) else {
         return;
     };
-    let reference = session_ref(&event.client, &session);
+    let handed = handed.filter(|handed| {
+        handed_session_ref(Some(handed), &event.client).is_some()
+            && holds_handed(ledger, handed, &session, &event.kind)
+    });
+    let reference = handed.map_or_else(
+        || session_ref(&event.client, &session),
+        |handed| handed.session_ref.clone(),
+    );
     let held = ledger.and_then(|ledger| ledger.session_now(&session));
     if event.kind == HookEventKind::SessionStart {
-        let start = match home.map(|home| record_harness_start(home, &reference)) {
+        // A start on a handed record is the owner's to record, once its open has answered.
+        let recorder = home.filter(|_| handed.is_none());
+        let start = match recorder.map(|home| record_harness_start(home, &reference)) {
             Some(Ok(start)) => Some(start),
             Some(Err(error)) => {
                 decision.warnings.push(format!(
@@ -461,6 +585,35 @@ pub fn session_boundary<R: CommandRunner>(
 /// (`aikit inhabit` exports `OI_POSITION_REF` into the harness).
 pub fn process_is_occupied() -> bool {
     std::env::var_os("OI_POSITION_REF").is_some_and(|value| !value.is_empty())
+}
+
+/// What this process's body was handed of its session's record by the owner
+/// that opened the session ([`SessionLifecycleHandoff`], ai-kit#640), if
+/// anything.
+pub fn process_session_lifecycle() -> Option<SessionLifecycleHandoff> {
+    SessionLifecycleHandoff::from_process()
+}
+
+/// The record a hook of `client` records its session's end on when its body
+/// was `handed` one: the handed record, when the hook is the body's own
+/// harness (the client its owner handed beside the record) and the record
+/// names a session (`aikit:session:<client>:<id>`). The record keeps the
+/// spelling of the harness that first ran the session, whichever harness runs
+/// it now. A hook of another client was inherited by a harness the body
+/// launched in turn, and is not this session's; that session keeps its own
+/// record.
+pub fn handed_session_ref(
+    handed: Option<&SessionLifecycleHandoff>,
+    client: &str,
+) -> Option<String> {
+    let handed = handed.filter(|handed| handed.client == client)?;
+    let names_a_session = handed
+        .session_ref
+        .strip_prefix("aikit:session:")
+        .and_then(|rest| rest.split_once(':'))
+        .is_some_and(|(spelt, id)| !spelt.is_empty() && !id.is_empty());
+    (names_a_session && crate::session_lifecycle_ops::harness_session(&handed.session_ref).is_ok())
+        .then(|| handed.session_ref.clone())
 }
 
 /// Resolve the Central root without teaching AIKit Central's internal file
@@ -1184,6 +1337,7 @@ mod tests {
             Some(ledger),
             runner,
             can_close,
+            None,
         );
         session_floor(
             &mut result,
@@ -1388,6 +1542,269 @@ mod tests {
         );
     }
 
+    /// The hooks of one AIKit home, each run as `aikit hook dispatch claude <event>` runs the
+    /// session boundary in a process handed `handed`, and the record kinds they leave.
+    struct HandedHooks {
+        _temp: tempfile::TempDir,
+        home: AikitHome,
+        ledger: FloorLedger,
+    }
+
+    impl HandedHooks {
+        fn new() -> Self {
+            let temp = tempfile::tempdir().unwrap();
+            let home = AikitHome::at(temp.path());
+            let ledger = FloorLedger::in_state(&home.state());
+            Self {
+                _temp: temp,
+                home,
+                ledger,
+            }
+        }
+
+        fn kinds(&self, session_ref: &str) -> Vec<SessionLifecycleEventKind> {
+            self.home
+                .session_lifecycle_history(&harness_session(session_ref).unwrap())
+                .map(|history| history.iter().map(|event| event.kind).collect())
+                .unwrap_or_default()
+        }
+
+        /// One hook of `client` for its native session `session`, in a claude body handed the
+        /// record `OWNED` under the open `open`.
+        fn hook(&self, client: &str, kind: HookEventKind, session: &str, open: &str) {
+            self.hook_handed(
+                client,
+                kind,
+                session,
+                &SessionLifecycleHandoff {
+                    session_ref: OWNED.into(),
+                    client: "claude".into(),
+                    open: open.into(),
+                },
+            );
+        }
+
+        /// One hook of `client` for its native session `session`, in a body handed `handed`.
+        fn hook_handed(
+            &self,
+            client: &str,
+            kind: HookEventKind,
+            session: &str,
+            handed: &SessionLifecycleHandoff,
+        ) {
+            let event = HookEvent::new(client, kind.clone(), json!({"session_id": session}))
+                .in_cwd(PROJECT);
+            let mut result = decision(kind);
+            session_boundary(
+                &mut result,
+                &event,
+                None,
+                Some(&self.home),
+                Some(&self.ledger),
+                &ScriptedRunner::new(),
+                false,
+                Some(handed),
+            );
+            assert!(result.allowed);
+            assert!(result.warnings.is_empty(), "{:?}", result.warnings);
+        }
+    }
+
+    /// The record an AIKit conversation's session is kept under, handed to the bodies its opens launch.
+    const OWNED: &str = "aikit:session:claude:agent-session/talk";
+
+    fn own(session: &str) -> String {
+        format!("aikit:session:claude:{session}")
+    }
+
+    /// ai-kit#640 (R640-2): a body its owner handed the session's record keeps no record under the
+    /// harness's own id. Its start is the owner's to record, once its open has answered; its end
+    /// lands on the record, and after the owner's End it is already recorded, answered with no
+    /// warning. A record handed for another client was inherited by a harness the body launched in
+    /// turn, and is not its own.
+    #[test]
+    fn a_body_handed_its_sessions_record_ends_on_it() {
+        use HookEventKind::{SessionEnd, SessionStart};
+        use SessionLifecycleEventKind::{SessionEnded as Ended, SessionStarted as Started};
+        let hooks = HandedHooks::new();
+        hooks.ledger.open_handed(OWNED, "open-1");
+        hooks.hook("claude", SessionStart, "sess-1", "open-1");
+        assert!(hooks.kinds(OWNED).is_empty(), "the owner records the start");
+        // The open answered, and the owner recorded its start; its End ended it.
+        assert_eq!(
+            record_harness_start(&hooks.home, OWNED).unwrap(),
+            HarnessStart::First
+        );
+        assert!(record_harness_end(&hooks.home, OWNED).unwrap());
+        // The body's end comes after.
+        hooks.hook("claude", SessionEnd, "sess-1", "open-1");
+        assert_eq!(hooks.kinds(OWNED), [Started, Ended]);
+        assert!(
+            hooks.kinds(&own("sess-1")).is_empty(),
+            "no record under the harness's own id"
+        );
+
+        // Another client's hook keeps its own record.
+        hooks.hook("codex", SessionStart, "sess-2", "open-1");
+        assert_eq!(hooks.kinds("aikit:session:codex:sess-2"), [Started]);
+        assert_eq!(hooks.kinds(OWNED), [Started, Ended]);
+        let handed = |session_ref: &str| SessionLifecycleHandoff {
+            session_ref: session_ref.into(),
+            client: "claude".into(),
+            open: "open-1".into(),
+        };
+        assert_eq!(handed_session_ref(Some(&handed(OWNED)), "codex"), None);
+        assert_eq!(
+            handed_session_ref(Some(&handed(OWNED)), "claude").as_deref(),
+            Some(OWNED)
+        );
+        assert_eq!(
+            handed_session_ref(Some(&handed("aikit:session:claude:")), "claude"),
+            None
+        );
+        assert_eq!(
+            handed_session_ref(Some(&handed("aikit:session::agent-session/talk")), "claude"),
+            None
+        );
+        assert_eq!(handed_session_ref(None, "claude"), None);
+    }
+
+    /// ai-kit#640 (re-read F1): a claude the body launches in turn inherits what the body was
+    /// handed. The record is the body's — the first session to start under the open that launched
+    /// it — so the nested sessions' starts and ends land on their own records and the body's
+    /// session stands running until its own end. The owner's next open launches a body under
+    /// another id, which claims the record for that open; a session of the earlier open holds it
+    /// no more, so the first body ending late leaves the next one running.
+    #[test]
+    fn a_session_the_body_launches_in_turn_keeps_its_own_record() {
+        use HookEventKind::{SessionEnd, SessionStart};
+        use SessionLifecycleEventKind::{SessionEnded as Ended, SessionStarted as Started};
+        let hooks = HandedHooks::new();
+        hooks.ledger.open_handed(OWNED, "open-1");
+        hooks.hook("claude", SessionStart, "sess-body", "open-1");
+        assert_eq!(
+            record_harness_start(&hooks.home, OWNED).unwrap(),
+            HarnessStart::First
+        );
+        // Two claudes the body launched in turn start and end while the body runs.
+        for nested in ["sess-nested-1", "sess-nested-2"] {
+            hooks.hook("claude", SessionStart, nested, "open-1");
+            hooks.hook("claude", SessionEnd, nested, "open-1");
+            assert_eq!(
+                hooks.kinds(OWNED),
+                [Started],
+                "the body's session still runs"
+            );
+            assert_eq!(hooks.kinds(&own(nested)), [Started, Ended]);
+        }
+        // The body's own end ends its record; nothing lands under the body's own id.
+        hooks.hook("claude", SessionEnd, "sess-body", "open-1");
+        assert_eq!(hooks.kinds(OWNED), [Started, Ended]);
+        assert!(hooks.kinds(&own("sess-body")).is_empty());
+
+        // The owner's next open: its body claims the record under that open, and a claude it
+        // launches keeps its own record again.
+        hooks.ledger.open_handed(OWNED, "open-2");
+        hooks.hook("claude", SessionStart, "sess-next", "open-2");
+        assert_eq!(
+            record_harness_start(&hooks.home, OWNED).unwrap(),
+            HarnessStart::Resumed
+        );
+        hooks.hook("claude", SessionStart, "sess-nested-3", "open-2");
+        hooks.hook("claude", SessionEnd, "sess-nested-3", "open-2");
+        assert_eq!(hooks.kinds(OWNED), [Started, Ended, Started]);
+        assert_eq!(hooks.kinds(&own("sess-nested-3")), [Started, Ended]);
+        // The first body, ending late, holds the record no more.
+        hooks.hook("claude", SessionEnd, "sess-body", "open-1");
+        assert_eq!(hooks.kinds(OWNED), [Started, Ended, Started]);
+        hooks.hook("claude", SessionEnd, "sess-next", "open-2");
+        assert_eq!(hooks.kinds(OWNED), [Started, Ended, Started, Ended]);
+        assert!(hooks.kinds(&own("sess-next")).is_empty());
+    }
+
+    /// ai-kit#640 (re-read F3): a body records no start on the record it was handed; its start is
+    /// the owner's, recorded once the open has answered. So a body whose open then fails (a model
+    /// or mode refused, the startup deadline, its basis changed) leaves the record as it stood: an
+    /// ended session stays ended, with no body. The next open's body claims the record under its
+    /// own open, though the failed one claimed it under the open before. Unfenced, the failed
+    /// body's start resumed the ended record, which then read running with no body and no open
+    /// that answered.
+    #[test]
+    fn a_body_whose_open_fails_leaves_its_sessions_record_as_it_stood() {
+        use HookEventKind::{SessionEnd, SessionStart};
+        use SessionLifecycleEventKind::{SessionEnded as Ended, SessionStarted as Started};
+        let hooks = HandedHooks::new();
+        // The session ran, and its End ended it.
+        assert_eq!(
+            record_harness_start(&hooks.home, OWNED).unwrap(),
+            HarnessStart::First
+        );
+        assert!(record_harness_end(&hooks.home, OWNED).unwrap());
+        // Replace model: its open launches a body, whose start hook runs; then the open fails.
+        hooks.ledger.open_handed(OWNED, "open-2");
+        hooks.hook("claude", SessionStart, "sess-failed", "open-2");
+        assert_eq!(hooks.kinds(OWNED), [Started, Ended], "the End stands");
+        assert!(hooks.kinds(&own("sess-failed")).is_empty());
+
+        // The next open: its body claims the record, and the open answers with the start.
+        hooks.ledger.open_handed(OWNED, "open-3");
+        hooks.hook("claude", SessionStart, "sess-next", "open-3");
+        assert_eq!(hooks.kinds(OWNED), [Started, Ended]);
+        assert_eq!(
+            record_harness_start(&hooks.home, OWNED).unwrap(),
+            HarnessStart::Resumed
+        );
+        hooks.hook("claude", SessionStart, "sess-nested", "open-3");
+        hooks.hook("claude", SessionEnd, "sess-nested", "open-3");
+        assert_eq!(hooks.kinds(OWNED), [Started, Ended, Started]);
+        hooks.hook("claude", SessionEnd, "sess-next", "open-3");
+        assert_eq!(hooks.kinds(OWNED), [Started, Ended, Started, Ended]);
+        assert!(hooks.kinds(&own("sess-next")).is_empty());
+    }
+
+    /// ai-kit#640 (re-read F2): a session keeps the record its first start chose, spelt for the
+    /// harness that first ran it. A successor body on another harness (Replace model onto a
+    /// claude-code provider after a codex one) is handed that record with its own harness's
+    /// spelling of the client, so its hooks hold the record: its end lands there, and no second
+    /// record opens under the harness's own id. A harness of the record's spelling that the body
+    /// launches in turn keeps its own record. Unfenced, the claude body's hooks refused the
+    /// codex-spelt record and opened `aikit:session:claude:<its own id>`, which no End reached.
+    #[test]
+    fn a_successor_on_another_harness_keeps_the_record_its_session_chose() {
+        use HookEventKind::{SessionEnd, SessionStart};
+        use SessionLifecycleEventKind::{SessionEnded as Ended, SessionStarted as Started};
+        const KEPT: &str = "aikit:session:codex:agent-session/talk";
+        let hooks = HandedHooks::new();
+        // The session's first open ran codex; its body was released, and the record runs on.
+        assert_eq!(
+            record_harness_start(&hooks.home, KEPT).unwrap(),
+            HarnessStart::First
+        );
+        // Replace model launches a claude body, handed the kept record.
+        let claude = SessionLifecycleHandoff {
+            session_ref: KEPT.into(),
+            client: "claude".into(),
+            open: "open-2".into(),
+        };
+        hooks.ledger.open_handed(KEPT, "open-2");
+        hooks.hook_handed("claude", SessionStart, "sess-claude", &claude);
+        // A codex the claude body launches in turn keeps its own record.
+        hooks.hook_handed("codex", SessionStart, "sess-codex", &claude);
+        hooks.hook_handed("codex", SessionEnd, "sess-codex", &claude);
+        assert_eq!(
+            hooks.kinds("aikit:session:codex:sess-codex"),
+            [Started, Ended]
+        );
+        assert_eq!(hooks.kinds(KEPT), [Started]);
+        // The claude body's end lands on the kept record.
+        hooks.hook_handed("claude", SessionEnd, "sess-claude", &claude);
+        assert_eq!(hooks.kinds(KEPT), [Started, Ended]);
+        assert!(
+            hooks.kinds(&own("sess-claude")).is_empty(),
+            "no second record under the harness's own id"
+        );
+    }
+
     #[test]
     fn a_refused_close_is_a_warning_and_the_end_is_still_recorded() {
         let temp = tempfile::tempdir().unwrap();
@@ -1420,6 +1837,7 @@ mod tests {
             Some(&ledger),
             &runner,
             true,
+            None,
         );
         let mut end = decision(HookEventKind::SessionEnd);
         session_boundary(
@@ -1430,6 +1848,7 @@ mod tests {
             Some(&ledger),
             &runner,
             true,
+            None,
         );
         assert!(end.allowed, "a refusal never changes the verdict");
         assert_eq!(end.warnings.len(), 1, "{:?}", end.warnings);
@@ -1461,6 +1880,7 @@ mod tests {
             Some(&ledger),
             &runner,
             true,
+            None,
         );
         assert!(resumed.warnings.is_empty(), "{:?}", resumed.warnings);
         assert_eq!(calls_of(&runner, "central.now.allocate").len(), 1);
@@ -1599,6 +2019,7 @@ mod tests {
             Some(&ledger),
             &runner,
             true,
+            None,
         );
         assert!(start.allowed);
         assert!(start.warnings[0].contains("this session's NOW was not opened in Central"));
@@ -1627,6 +2048,7 @@ mod tests {
                 Some(&ledger),
                 &runner,
                 true,
+                None,
             );
             assert!(result.warnings.is_empty(), "{:?}", result.warnings);
         }
@@ -1651,6 +2073,7 @@ mod tests {
             None,
             &runner,
             true,
+            None,
         );
         assert!(home.session_lifecycle_list().unwrap().is_empty());
         assert!(runner.calls().is_empty());

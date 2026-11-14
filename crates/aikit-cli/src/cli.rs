@@ -1192,6 +1192,7 @@ fn session_route(command: &SessionCmd) -> &'static str {
         SessionSub::Diff(_) => "cmd_session_diff",
         SessionSub::Reconcile(_) => "cmd_session_reconcile",
         SessionSub::Down(_) => "cmd_session_down",
+        SessionSub::End(_) => "cmd_session_end",
         SessionSub::Lifecycle(c) => match &c.command {
             SessionLifecycleSub::List(_) => "cmd_session_lifecycle_list",
             SessionLifecycleSub::History(_) => "cmd_session_lifecycle_history",
@@ -5770,6 +5771,9 @@ pub enum SessionSub {
     Reconcile(SessionReconcileArgs),
     /// Tear down a session.
     Down(SessionDownArgs),
+    /// End an agent session AIKit opened for a conversation: its idle body is
+    /// released and its end is recorded in its session lifecycle.
+    End(SessionEndArgs),
     /// Durable lifecycle history of sessions: start/end, thinking,
     /// cancellation and permission events with stable identities.
     Lifecycle(SessionLifecycleCmd),
@@ -5802,7 +5806,13 @@ pub enum SessionLifecycleSub {
 }
 
 #[derive(Debug, Args)]
-pub struct SessionLifecycleListArgs {}
+pub struct SessionLifecycleListArgs {
+    /// Also answer the read model of each session with an event at or after
+    /// this instant (Unix milliseconds), and of each session whose last start
+    /// has no recorded end: the sessions one day reads.
+    #[arg(long, value_name = "UNIX_MS")]
+    pub since: Option<u64>,
+}
 
 #[derive(Debug, Args)]
 pub struct SessionLifecycleSessionArgs {
@@ -5953,6 +5963,13 @@ pub struct SessionReconcileArgs {
 pub struct SessionDownArgs {
     #[arg(value_name = "SESSION")]
     pub session: String,
+}
+
+#[derive(Debug, Args)]
+pub struct SessionEndArgs {
+    /// The AgentSession to end (`agent-session/<name>`).
+    #[arg(value_name = "AGENT_SESSION")]
+    pub agent_session: String,
 }
 
 // ---------------------------------------------------------------------------

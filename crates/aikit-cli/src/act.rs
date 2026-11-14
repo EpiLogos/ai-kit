@@ -49,7 +49,7 @@ struct RouteAction {
 /// The operations the modes' cores write through (docs/architecture/world-shell.md §9.3 in O-I):
 /// send a Communique, control a binding's conversation (`new` starts one, `stop` ends it), cross a
 /// Communique into work, the population those act on, and whether a sent Communique was heard —
-/// the read a send is checked by.
+/// the read a send is checked by — and end a session AIKit opened.
 const ROUTE_ACTIONS: &[RouteAction] = &[
     RouteAction {
         id: "aikit.gateway.send",
@@ -96,6 +96,14 @@ const ROUTE_ACTIONS: &[RouteAction] = &[
         title: "Whether a Communique was heard",
         route: &["gateway", "heard"],
         mutation_class: "read-only",
+    },
+    // A session's End, the one press that ends it (O-I manual §19.1): its body released, its end
+    // recorded in the lifecycle its start opened (O-I #1007, #1016).
+    RouteAction {
+        id: "aikit.session.end",
+        title: "End a session AIKit opened",
+        route: &["session", "end"],
+        mutation_class: "externally-mutating",
     },
     // The receipt a launch binds a session's work to (Factory's task run on a seated session, O-I #1006).
     RouteAction {
@@ -1229,6 +1237,21 @@ mod tests {
             argv[..3],
             ["gateway", "agent", "new"],
             "the positional comes first"
+        );
+        crate::cli::Cli::try_parse_from(std::iter::once("aikit".to_owned()).chain(argv.clone()))
+            .unwrap_or_else(|error| panic!("{argv:?} does not parse: {error}"));
+
+        let end = route_action("aikit.session.end").unwrap();
+        let (argv, words) = route_argv(
+            end,
+            &serde_json::json!({"agent_session": "agent-session/conversation"}),
+        )
+        .unwrap();
+        assert_eq!(words, None);
+        assert_eq!(
+            argv,
+            ["session", "end", "agent-session/conversation", "--json"],
+            "the session is the route's one positional"
         );
         crate::cli::Cli::try_parse_from(std::iter::once("aikit".to_owned()).chain(argv.clone()))
             .unwrap_or_else(|error| panic!("{argv:?} does not parse: {error}"));
