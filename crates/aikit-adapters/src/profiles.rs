@@ -394,10 +394,14 @@ observe = { paths = ["~/.gemini/skills"] }
 [guidance]
 posture = "observed"
 observe = ["~/.gemini/GEMINI.md"]
-# gemini-cli docs (cli/gemini-md.md) [VD]: GEMINI.md in the working folder
-# and each folder above it, up to the project's root (.git) or the home
-# folder.
-in-project = { files = ["GEMINI.md"], reach = "repository" }
+# No in-project declaration: none of the three reaches says how far gemini
+# looks. gemini-cli 0.29.5 (core dist/src/utils/memoryDiscovery.js
+# findProjectRoot, getGeminiMdFilePathsInternal) [V], in a trusted folder,
+# reads GEMINI.md from its working folder up to the folder *above* the
+# nearest folder holding a `.git` directory; a worktree's `.git` file is not
+# one. With none, it reads up to the folder above the home folder. So in a
+# worktree it reads every folder above, and in a primary checkout it stops
+# one above the repository.
 
 [tools]
 posture = "observed"
@@ -1979,10 +1983,10 @@ mod tests {
             in_project("pi"),
             Some((files(&["AGENTS.md", "CLAUDE.md"]), Ancestors))
         );
-        assert_eq!(
-            in_project("gemini"),
-            Some((files(&["GEMINI.md"]), Repository))
-        );
+        // gemini's reach fits none of the three (a worktree's `.git` file is
+        // no root to it, and it reads one folder above a repository), so its
+        // profile leaves what it reads in a project unsaid.
+        assert_eq!(in_project("gemini"), None);
         assert_eq!(
             in_project("opencode"),
             Some((files(&["AGENTS.md"]), Ancestors))
