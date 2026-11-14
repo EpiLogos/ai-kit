@@ -494,10 +494,57 @@ pub fn ingress_rule(
     })
 }
 
+/// The settings of a session that a binding's conversation does not carry, each with what does own
+/// it (O-I #1006: the chain's Gateway, Agent and Scope ask the gateway for them). The protocol
+/// carries none of them, so asking for one is refused with its owner, never as an unknown word.
+const OWNED_ELSEWHERE: &[(&str, &str)] = &[
+    (
+        "effort",
+        "A session's Effort for its task is the task's Effort envelope (inherit, low, medium, high \
+         or max), played into the harness's own reasoning effort: the Action aikit.session.settings \
+         writes it (`task.set.effort`)",
+    ),
+    (
+        "approvals",
+        "A harness's approvals are its own and read only; a session's answer to its requests to use a \
+         tool is its task's Tool calls (inherit, ask, session or always): the Action \
+         aikit.session.settings writes it (`task.set.tool_calls`)",
+    ),
+    (
+        "tool-calls",
+        "A session's Tool calls (inherit, ask, session or always) are its task's: the Action \
+         aikit.session.settings writes them (`task.set.tool_calls`)",
+    ),
+    (
+        "input",
+        "Input goes with each Communique, not with the conversation: the Action aikit.gateway.send \
+         takes it as `handling`, queue or steer",
+    ),
+    (
+        "transport",
+        "A binding's conversation has no transport of its own: the transport is the whole \
+         gateway's, its entry mode, chosen by `aikit gateway setup`",
+    ),
+    (
+        "stall-after",
+        "No AIKit operation holds a stall-after: AIKit keeps no time without progress after which \
+         a session counts as stalled",
+    ),
+];
+
 /// Resolve `aikit gateway agent <op>` into the canonical operation the
 /// protocol carries. The names here mirror the connector-edge slash commands;
 /// both spellings resolve to one `GatewayConversationOperation`.
 pub fn conversation_operation(args: &GatewayAgentArgs) -> Result<GatewayConversationOperation> {
+    if let Some((operation, owner)) = OWNED_ELSEWHERE
+        .iter()
+        .find(|(operation, _)| *operation == args.operation)
+    {
+        return Err(AikitError::new(
+            "cli.gateway_agent_operation_elsewhere",
+            format!("`{operation}` is not a conversation operation. {owner}."),
+        ));
+    }
     let connector_ref = match &args.connector_ref {
         Some(raw) => Some(ResourceRef::parse(raw).map_err(|error| {
             AikitError::new(
@@ -808,5 +855,32 @@ mod conversation_operation_tests {
         assert_eq!(misplaced.code(), "cli.gateway_agent_value_misplaced");
         let unknown = conversation_operation(&args("configure", None)).unwrap_err();
         assert_eq!(unknown.code(), "cli.gateway_agent_operation_unknown");
+    }
+
+    /// O-I #1006: the settings a binding's conversation does not carry are refused with the
+    /// operation that owns each — the Action that writes it, or that none does — never as an
+    /// unknown word, so every door that asks the gateway for one reads the owner's answer.
+    #[test]
+    fn a_setting_the_conversation_does_not_carry_is_refused_with_its_owner() {
+        for (operation, owner) in [
+            ("effort", "aikit.session.settings"),
+            ("approvals", "aikit.session.settings"),
+            ("tool-calls", "aikit.session.settings"),
+            ("input", "aikit.gateway.send"),
+            ("transport", "aikit gateway setup"),
+            ("stall-after", "No AIKit operation"),
+        ] {
+            let refused = conversation_operation(&args(operation, None)).unwrap_err();
+            assert_eq!(
+                refused.code(),
+                "cli.gateway_agent_operation_elsewhere",
+                "{operation}"
+            );
+            assert!(
+                refused.message().contains(owner),
+                "{operation}: {}",
+                refused.message()
+            );
+        }
     }
 }
