@@ -118,6 +118,7 @@ pub fn dispatch_with_entry(
         home.as_ref(),
         floor_ledger.as_ref(),
         &runner,
+        crate::temporal::holds_native_credential(),
     );
     crate::temporal::session_floor(
         &mut decision,

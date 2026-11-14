@@ -1164,23 +1164,66 @@ mod tests {
     }
 
     /// Answers one Action as the real `ctrl` refuses it: exit 4, the refusal
-    /// envelope on stdout and nothing on stderr.
+    /// envelope on stdout and nothing on stderr. Every form refuses that
+    /// Action and passes the rest on to the runner it wraps.
     struct Refusing {
         inner: ScriptedRunner,
         action: &'static str,
         envelope: String,
     }
 
+    impl Refusing {
+        fn refusal(&self, argv: &[String]) -> Option<Output> {
+            argv.iter().any(|arg| arg == self.action).then(|| Output {
+                status: 4,
+                stdout: self.envelope.clone(),
+                stderr: String::new(),
+            })
+        }
+    }
+
     impl CommandRunner for Refusing {
         fn run(&self, argv: &[String]) -> Result<Output> {
-            if argv.iter().any(|arg| arg == self.action) {
-                return Ok(Output {
-                    status: 4,
-                    stdout: self.envelope.clone(),
-                    stderr: String::new(),
-                });
+            match self.refusal(argv) {
+                Some(refused) => Ok(refused),
+                None => self.inner.run(argv),
             }
-            self.inner.run(argv)
+        }
+
+        fn starts_in(&self) -> Option<std::path::PathBuf> {
+            self.inner.starts_in()
+        }
+
+        fn run_in(
+            &self,
+            dir: &Path,
+            argv: &[String],
+            timeout: Option<std::time::Duration>,
+        ) -> Result<Output> {
+            match self.refusal(argv) {
+                Some(refused) => Ok(refused),
+                None => self.inner.run_in(dir, argv, timeout),
+            }
+        }
+
+        fn run_in_with_limits(
+            &self,
+            dir: &Path,
+            argv: &[String],
+            remaining_timeout: std::time::Duration,
+            remaining_aggregate_bytes: usize,
+            strict_utf8: bool,
+        ) -> Result<Output> {
+            match self.refusal(argv) {
+                Some(refused) => Ok(refused),
+                None => self.inner.run_in_with_limits(
+                    dir,
+                    argv,
+                    remaining_timeout,
+                    remaining_aggregate_bytes,
+                    strict_utf8,
+                ),
+            }
         }
     }
 
