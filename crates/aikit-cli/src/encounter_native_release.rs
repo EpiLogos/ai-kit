@@ -178,6 +178,9 @@ impl EncounterService {
         let watcher = resident.stop_child_messages();
         let cleanup = resident.host.shutdown();
         let cleanup_confirmed = watcher.is_ok() && cleanup.is_ok();
+        #[cfg(test)]
+        let cleanup_confirmed =
+            cleanup_confirmed && !self.native_release_test_unconfirmed.load(Ordering::SeqCst);
         let cleanup_error = watcher
             .err()
             .map(|e| e.to_string())
@@ -205,8 +208,11 @@ impl EncounterService {
     /// under. End holds the session's opening lease from its first read to that record
     /// (ai-kit#640): an open, reconnect or release under way refuses it in words, and none starts
     /// until it has answered, so the record and the body never disagree. A session whose body is
-    /// already gone (released, or its owner restarted) is ended from its record alone. An End
-    /// retried after the record closed records nothing and says so.
+    /// already gone (released, or its owner restarted) is ended from its record alone, even where
+    /// that release's cleanup is unconfirmed: the uncertainty fences the next body, not the end.
+    /// A release that took the body but could not confirm its cleanup still ends the session, and
+    /// the answer names it (`release_uncertain`); one refused with the body still held refuses the
+    /// End. An End retried after the record closed records nothing and says so.
     pub(super) fn end_session(&self, session: ResourceRef, deadline: Instant) -> Result<Value> {
         let mut lease =
             self.begin_native_lease(&session, ulid::Ulid::generate().to_string(), "session-end")?;
@@ -223,34 +229,55 @@ impl EncounterService {
             })?;
         let was_running = lifecycle_running(&self.home, &session_ref)?;
         let held = self.residents.lock().map_err(error)?.get(&session).cloned();
-        let released = match held {
+        let (released, release_uncertain) = match held {
             Some(resident) => {
                 let native = resident.lane.binding().native_session_id.clone();
                 let generation = resident.generation.clone();
                 // The release takes the body only when no one else holds it.
                 drop(resident);
-                Some(self.release_native_under(
+                match self.release_native_under(
                     session.clone(),
                     native,
                     generation,
                     deadline,
                     Some(&lease),
-                )?)
+                ) {
+                    Ok(receipt) => (Some(receipt), None),
+                    // Refused with the body still held: the session runs on, and its End is
+                    // refused. No open can return a body under End's lease.
+                    Err(refused)
+                        if self.residents.lock().map_err(error)?.contains_key(&session) =>
+                    {
+                        return Err(refused)
+                    }
+                    // The body was taken; its cleanup is what stays uncertain.
+                    Err(uncertain) => (
+                        None,
+                        Some(json!({
+                            "code": uncertain.code(),
+                            "message": uncertain.message(),
+                        })),
+                    ),
+                }
             }
-            None => None,
+            None => (None, None),
         };
         let recorded = crate::session_lifecycle_ops::record_harness_end(&self.home, &session_ref)?;
         // The body's own hooks record on this same record, so its end may land while the release
         // stops it: that end is this End's.
         let ended = recorded || (was_running && !lifecycle_running(&self.home, &session_ref)?);
         drop(lease);
-        Ok(json!({
+        let mut answer = json!({
             "schema": "aikit.encounter-end/v1",
             "agent_session": session,
             "session_ref": session_ref,
             "ended": ended,
             "released": released,
-        }))
+        });
+        if let Some(uncertain) = release_uncertain {
+            answer["release_uncertain"] = uncertain;
+        }
+        Ok(answer)
     }
 
     /// Record the start of a session AIKit opened on the record `session_ref` names (O-I #1016):
@@ -481,6 +508,14 @@ impl Drop for OwnedChildWatcher {
 
 #[cfg(test)]
 impl EncounterService {
+    /// Leave each later release of this service's bodies with its cleanup unconfirmed, as when its
+    /// kill or its watcher stop fails: the body is taken and stopped, and its receipt says
+    /// `cleanup_confirmed: false`.
+    pub(crate) fn leave_releases_unconfirmed(&self) {
+        self.native_release_test_unconfirmed
+            .store(true, Ordering::SeqCst);
+    }
+
     /// Hold each native open of this service at its admitted opening lease, before it reserves or
     /// launches anything: `arrived` hears an open reach it, and each `()` sent on the answer lets one
     /// open go on. A scheduling checkpoint only; it supplies no native answer.

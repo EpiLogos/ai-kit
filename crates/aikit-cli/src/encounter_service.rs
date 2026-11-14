@@ -658,6 +658,10 @@ pub struct EncounterService {
     native_validation_test_barrier: Mutex<Option<Arc<NativePublicationTestCheckpoint>>>,
     #[cfg(test)]
     native_worker_test_barrier: Mutex<Option<Arc<NativePublicationTestCheckpoint>>>,
+    // Private fault for release tests: each release's cleanup reads as unconfirmed, as when its
+    // kill or its watcher stop fails. It never alters production cleanup.
+    #[cfg(test)]
+    native_release_test_unconfirmed: std::sync::atomic::AtomicBool,
     permissions: PendingPermissions,
 }
 /// How a provider's harness is launched, reduced to what may be shown: the
@@ -1047,6 +1051,8 @@ impl EncounterService {
             native_validation_test_barrier: Mutex::new(None),
             #[cfg(test)]
             native_worker_test_barrier: Mutex::new(None),
+            #[cfg(test)]
+            native_release_test_unconfirmed: std::sync::atomic::AtomicBool::new(false),
             permissions: Arc::new(Mutex::new(BTreeMap::new())),
         })
     }
@@ -1103,9 +1109,15 @@ impl EncounterService {
             )
             .with("lease", under_way["kind"].as_str().unwrap_or_default()));
         }
-        if self.store.native_open_recovery(session)?.is_some() {
-            return Err(AikitError::new("encounter.native_open_recovery_required",
-                "Retained native startup has unresolved cleanup; reconcile its exact generation before another open"));
+        if let Some(recovery) = self.store.native_open_recovery(session)? {
+            // A release whose cleanup is unconfirmed fences the session's next body, never its
+            // End, which launches nothing and takes no body (ai-kit#640): such a release has no
+            // reconcile, so a refused End would leave the record running for good.
+            let release = recovery["opening"]["kind"] == "native-release-requested";
+            if !(release && kind == "session-end") {
+                return Err(AikitError::new("encounter.native_open_recovery_required",
+                    "Retained native startup has unresolved cleanup; reconcile its exact generation before another open"));
+            }
         }
         openings.insert(
             session.clone(),
@@ -3473,10 +3485,13 @@ impl EncounterService {
                     .map_err(error)?
                     .get(&agent_session)
                     .map(|lease| lease_under_way(lease["kind"].as_str().unwrap_or_default()));
+                // A release left uncertain fences the next body, not the End; only a startup's
+                // cleanup, which the reconcile action settles, holds the End back.
                 let unsettled = matches!(
                     view["connection"]["state"].as_str(),
                     Some("RecoveryRequired" | "CleanupUncertain")
-                );
+                ) && view["connection"]["opening"]["kind"]
+                    != "native-release-requested";
                 let can_end = !active
                     && !pending
                     && under_way.is_none()

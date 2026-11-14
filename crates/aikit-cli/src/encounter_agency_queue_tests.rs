@@ -1132,3 +1132,153 @@ fn a_harness_the_body_launches_in_turn_leaves_the_sessions_record_to_its_end() {
         .unwrap();
     assert_eq!(shutdown["shutdown"], json!(true));
 }
+
+/// The control `action` a session's view offers.
+fn control(view: &Value, action: &str) -> Value {
+    view["actions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|control| control["ref"] == action)
+        .cloned()
+        .unwrap_or_else(|| panic!("no {action} control: {view}"))
+}
+
+/// ai-kit#640 (re-read F4): a release whose cleanup could not be confirmed (its kill or its watcher
+/// stop failed, or its owner died before its receipt) fences the session's next body, not its end.
+/// The session runs on in its record after such a release; its view offers End, pointing to no
+/// reconcile that the reconcile action would refuse, and End ends it. Fenced, every End was refused
+/// for good and the record read running forever.
+#[test]
+fn an_end_after_a_release_left_uncertain_still_ends_the_session() {
+    use aikit_core::session_lifecycle::SessionLifecycleEventKind::{SessionEnded, SessionStarted};
+    let world = QueueWorld::new();
+    let (space, session) = world.attach("uncertain");
+    let service = EncounterService::new(world.home.clone()).unwrap();
+    let session_ref = "aikit:session:uncertain:agent-session/uncertain";
+    let opened = world.open(&service, &space, &session, "uncertain");
+    assert_eq!(opened["lifecycle"]["start"], "first", "{opened}");
+    service.leave_releases_unconfirmed();
+    let refused = service
+        .apply(EncounterRequest::ReleaseNative {
+            agent_session: session.clone(),
+            expected_native_session_id: opened["native_session_id"].as_str().unwrap().to_owned(),
+            expected_generation: opened["connection_generation"].as_str().unwrap().to_owned(),
+        })
+        .map(|answer| answer.to_string())
+        .unwrap_err();
+    assert_eq!(
+        refused.code(),
+        "encounter.native_release_uncertain",
+        "{refused}"
+    );
+    let uncertain = view_of(&service, &session);
+    assert_eq!(
+        uncertain["connection"]["state"], "CleanupUncertain",
+        "{uncertain}"
+    );
+    assert_eq!(uncertain["lifecycle"]["running"], true, "{uncertain}");
+    assert_eq!(
+        end_control(&uncertain)["enabled"],
+        true,
+        "End is offered: {uncertain}"
+    );
+    assert_eq!(
+        control(&uncertain, "aikit.encounter.reconcile-native-open")["enabled"],
+        false,
+        "{uncertain}"
+    );
+    let ended = service
+        .apply(EncounterRequest::End {
+            agent_session: session.clone(),
+        })
+        .map_err(|failure| failure.to_string())
+        .unwrap();
+    assert_eq!(ended["ended"], true, "{ended}");
+    assert!(ended["released"].is_null(), "{ended}");
+    assert_eq!(
+        record_of(&world.home, session_ref),
+        [SessionStarted, SessionEnded]
+    );
+    let closed = view_of(&service, &session);
+    assert_eq!(end_control(&closed)["enabled"], false, "{closed}");
+    assert_eq!(
+        closed["connection"]["state"], "CleanupUncertain",
+        "the next body stays fenced: {closed}"
+    );
+    // The owner stops with the release's cleanup still unconfirmed, and says so.
+    let stopped = service
+        .apply(EncounterRequest::Shutdown {
+            expected_pid: std::process::id(),
+        })
+        .map(|answer| answer.to_string())
+        .unwrap_err();
+    assert_eq!(stopped.code(), "encounter.shutdown_failed", "{stopped}");
+    assert!(
+        stopped.message().contains("agent-session/uncertain"),
+        "{stopped}"
+    );
+}
+
+/// ai-kit#640 (re-read F4): an End whose own release took the body but could not confirm its
+/// cleanup has still ended the session. The end is recorded, and the End answers the release it
+/// left uncertain, which goes on fencing the session's next body; a second End finds the session
+/// ended. Before, that End answered the release's error with nothing recorded, and every End after
+/// it was refused.
+#[test]
+fn an_end_whose_own_release_is_left_uncertain_still_records_the_end() {
+    use aikit_core::session_lifecycle::SessionLifecycleEventKind::{SessionEnded, SessionStarted};
+    let world = QueueWorld::new();
+    let (space, session) = world.attach("unconfirmed");
+    let service = EncounterService::new(world.home.clone()).unwrap();
+    let session_ref = "aikit:session:unconfirmed:agent-session/unconfirmed";
+    let opened = world.open(&service, &space, &session, "unconfirmed");
+    assert_eq!(opened["lifecycle"]["start"], "first", "{opened}");
+    service.leave_releases_unconfirmed();
+    let ended = service
+        .apply(EncounterRequest::End {
+            agent_session: session.clone(),
+        })
+        .map_err(|failure| failure.to_string())
+        .unwrap();
+    assert_eq!(ended["ended"], true, "{ended}");
+    assert!(ended["released"].is_null(), "{ended}");
+    assert_eq!(
+        ended["release_uncertain"]["code"], "encounter.native_release_uncertain",
+        "{ended}"
+    );
+    assert_eq!(
+        record_of(&world.home, session_ref),
+        [SessionStarted, SessionEnded]
+    );
+    let closed = view_of(&service, &session);
+    assert_eq!(closed["connection"]["resident"], false, "{closed}");
+    assert_eq!(
+        closed["connection"]["state"], "CleanupUncertain",
+        "{closed}"
+    );
+    assert_eq!(end_control(&closed)["enabled"], false, "{closed}");
+    let twice = service
+        .apply(EncounterRequest::End {
+            agent_session: session.clone(),
+        })
+        .map_err(|failure| failure.to_string())
+        .unwrap();
+    assert_eq!(twice["ended"], false, "{twice}");
+    assert_eq!(
+        record_of(&world.home, session_ref),
+        [SessionStarted, SessionEnded]
+    );
+    // The owner stops with the release's cleanup still unconfirmed, and says so.
+    let stopped = service
+        .apply(EncounterRequest::Shutdown {
+            expected_pid: std::process::id(),
+        })
+        .map(|answer| answer.to_string())
+        .unwrap_err();
+    assert_eq!(stopped.code(), "encounter.shutdown_failed", "{stopped}");
+    assert!(
+        stopped.message().contains("agent-session/unconfirmed"),
+        "{stopped}"
+    );
+}
