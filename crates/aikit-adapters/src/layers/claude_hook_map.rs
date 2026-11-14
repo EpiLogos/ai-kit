@@ -12,8 +12,8 @@
 use aikit_core::hooks::HookEventKind;
 
 use super::{
-    document_for_merging, hooks_block_of, merge_hook_entries, LayerMergeError, MatcherPolicy,
-    MergeReport,
+    document_for_merging, hooks_block_of, merge_hook_entries, no_timeouts, LayerMergeError,
+    MatcherPolicy, MergeReport,
 };
 
 /// Merge AIKit's dispatch entries into a Claude-grammar settings document.
@@ -23,6 +23,18 @@ pub fn claude_hook_map(
     matchers: MatcherPolicy,
     client: &str,
 ) -> Result<(serde_json::Value, MergeReport), LayerMergeError> {
+    claude_hook_map_with_timeouts(existing, events, matchers, client, &no_timeouts)
+}
+
+/// [`claude_hook_map`], with a `timeout` (seconds) on the entry of each event
+/// `timeouts` names one for.
+pub fn claude_hook_map_with_timeouts(
+    existing: &serde_json::Value,
+    events: &[(HookEventKind, String)],
+    matchers: MatcherPolicy,
+    client: &str,
+    timeouts: &dyn Fn(&HookEventKind) -> Option<u64>,
+) -> Result<(serde_json::Value, MergeReport), LayerMergeError> {
     let mut document =
         document_for_merging(existing, "the existing settings are not a JSON object")?;
     let report = merge_hook_entries(
@@ -31,6 +43,7 @@ pub fn claude_hook_map(
         client,
         "hooks",
         matchers,
+        timeouts,
     )?;
     Ok((document, report))
 }

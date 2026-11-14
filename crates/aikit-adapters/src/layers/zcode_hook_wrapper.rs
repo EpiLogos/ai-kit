@@ -56,6 +56,7 @@ pub fn zcode_hook_wrapper(
         client,
         "hooks.events",
         MatcherPolicy::Omitted,
+        &super::no_timeouts,
     )?;
     Ok((document, report))
 }

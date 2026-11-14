@@ -19,7 +19,7 @@ mod mcp_servers_record;
 mod pi_extensions_record;
 mod zcode_hook_wrapper;
 
-pub use claude_hook_map::claude_hook_map;
+pub use claude_hook_map::{claude_hook_map, claude_hook_map_with_timeouts};
 pub use mcp_servers_record::mcp_servers_record;
 pub use pi_extensions_record::pi_extensions_record;
 pub use zcode_hook_wrapper::zcode_hook_wrapper;
@@ -267,20 +267,33 @@ fn hooks_block_of(
         })
 }
 
-/// One AIKit dispatch entry, exactly as it lands in the native document.
-fn dispatch_entry(client: &str, event: &HookEventKind, matcher: Option<&str>) -> serde_json::Value {
+/// One AIKit dispatch entry, exactly as it lands in the native document. A
+/// `timeout` (seconds) is written only when the grammar's caller names one for
+/// the event; every other entry keeps the harness's own default.
+fn dispatch_entry(
+    client: &str,
+    event: &HookEventKind,
+    matcher: Option<&str>,
+    timeout: Option<u64>,
+) -> serde_json::Value {
     let mut entry = serde_json::Map::new();
     if let Some(matcher) = matcher {
         entry.insert("matcher".to_string(), serde_json::json!(matcher));
     }
-    entry.insert(
-        "hooks".to_string(),
-        serde_json::json!([{
-            "type": "command",
-            "command": dispatch_command(client, event),
-        }]),
-    );
+    let mut hook = serde_json::json!({
+        "type": "command",
+        "command": dispatch_command(client, event),
+    });
+    if let Some(timeout) = timeout {
+        hook["timeout"] = serde_json::json!(timeout);
+    }
+    entry.insert("hooks".to_string(), serde_json::json!([hook]));
     serde_json::Value::Object(entry)
+}
+
+/// The hook budget nothing names: every entry keeps the harness's default.
+pub fn no_timeouts(_: &HookEventKind) -> Option<u64> {
+    None
 }
 
 /// Remove every event key emptied by the sweep, so an old install does not
@@ -372,13 +385,16 @@ fn sweep_owned_entries(
 /// Claude grammar, `hooks.events` for the zcode wrapper); `container_label`
 /// is how a refusal spells that path. `matchers` decides whether an AIKit
 /// entry carries a matcher — claude-code's `*` on tool events, nothing where
-/// a matcher AIKit invented would narrow what the dispatcher sees.
+/// a matcher AIKit invented would narrow what the dispatcher sees. `timeouts`
+/// names the budget (seconds) an event's entry carries, where the harness's
+/// default is too short for what the dispatch does.
 fn merge_hook_entries(
     container: &mut serde_json::Map<String, serde_json::Value>,
     events: &[(HookEventKind, String)],
     client: &str,
     container_label: &str,
     matchers: MatcherPolicy,
+    timeouts: &dyn Fn(&HookEventKind) -> Option<u64>,
 ) -> std::result::Result<MergeReport, LayerMergeError> {
     let sweep = sweep_owned_entries(container, client);
 
@@ -394,7 +410,12 @@ fn merge_hook_entries(
                 format!("the existing `{container_label}.{event}` value is not an array"),
             )
         })?;
-        array.push(dispatch_entry(client, event, matchers.matcher_for(event)));
+        array.push(dispatch_entry(
+            client,
+            event,
+            matchers.matcher_for(event),
+            timeouts(event),
+        ));
         if sweep.owned_found.contains(native_name) {
             replaced.insert(native_name.clone());
         } else {

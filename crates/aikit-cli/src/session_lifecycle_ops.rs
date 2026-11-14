@@ -161,6 +161,65 @@ impl SessionLifecycleServiceOps for AikitHome {
     }
 }
 
+/// The lifecycle identity of the harness session `session_ref` names
+/// (`aikit:session:<client>:<id>`), derived from the ref as an AgentSession's
+/// runtime identity is: every dispatch of one session lands on one history.
+pub fn harness_session(session_ref: &str) -> Result<SessionId> {
+    Ok(SessionId::of_agent_session(
+        &aikit_core::ResourceRef::parse(session_ref)?,
+    ))
+}
+
+/// What a harness session's start found in its lifecycle (O-I #1016).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HarnessStart {
+    /// The session's first start: recorded.
+    First,
+    /// The session had ended and is resumed (`claude --resume`, `/resume`,
+    /// `codex resume` reuse its id): its start is recorded again.
+    Resumed,
+    /// A start replayed for a live session (resume, clear, compact), or for a
+    /// cancelled one, whose cancellation is terminal: nothing recorded.
+    Replayed,
+}
+
+/// Record a harness session's start (O-I #1016): its first start, and the
+/// start of each resume after an end. A start replayed for a live session is
+/// no second start. The event's origin is the session ref, which is also the
+/// session's NOW task in Central.
+pub fn record_harness_start(home: &AikitHome, session_ref: &str) -> Result<HarnessStart> {
+    let session = harness_session(session_ref)?;
+    let found = match home.session_lifecycle_history(&session) {
+        Ok(history) => match history.last().map(|event| event.kind) {
+            Some(SessionLifecycleEventKind::SessionEnded) => HarnessStart::Resumed,
+            _ => return Ok(HarnessStart::Replayed),
+        },
+        Err(error) if error.code() == "session_lifecycle.unknown_session" => HarnessStart::First,
+        Err(error) => return Err(error),
+    };
+    home.session_lifecycle_record(session, SessionLifecycleRecord::Start, None, session_ref)?;
+    Ok(found)
+}
+
+/// Record a harness session's end. `Ok(false)` when this store never saw the
+/// session start, or its history already ended or was cancelled.
+pub fn record_harness_end(home: &AikitHome, session_ref: &str) -> Result<bool> {
+    let session = harness_session(session_ref)?;
+    let history = match home.session_lifecycle_history(&session) {
+        Ok(history) => history,
+        Err(error) if error.code() == "session_lifecycle.unknown_session" => return Ok(false),
+        Err(error) => return Err(error),
+    };
+    if matches!(
+        history.last().map(|event| event.kind),
+        Some(SessionLifecycleEventKind::SessionEnded | SessionLifecycleEventKind::Cancelled)
+    ) {
+        return Ok(false);
+    }
+    home.session_lifecycle_record(session, SessionLifecycleRecord::End, None, session_ref)?;
+    Ok(true)
+}
+
 /// Recover the activity identity and tool of one issued permission request.
 /// Unknown requests are explicit here — before the store's own validation —
 /// so the caller gets `session_lifecycle.unknown_permission_request` rather

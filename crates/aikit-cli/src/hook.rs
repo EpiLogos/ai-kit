@@ -52,13 +52,17 @@ pub fn dispatch(
     event: &HookEvent,
     roots: &BTreeMap<CapsuleId, PathBuf>,
 ) -> Result<HookDecision> {
-    dispatch_with_entry(index, context, chain, event, roots, None)
+    dispatch_with_entry(index, context, chain, event, roots, None, None)
 }
 
 /// [`dispatch`], with an optional lean World-inhabitation entry. When a
 /// Position occupancy resolved at SessionStart, the entry stands where the
 /// historical temporal floor would have been and points at it instead of
 /// preloading it; without one the floor is unchanged.
+///
+/// `home` is the AIKit home the session's lifecycle and floor records are
+/// kept in: the dispatching Service's own, so a Service opened on a home
+/// writes there. `None` discovers it from the process environment.
 pub fn dispatch_with_entry(
     index: &Index,
     context: &ContextId,
@@ -66,6 +70,7 @@ pub fn dispatch_with_entry(
     event: &HookEvent,
     roots: &BTreeMap<CapsuleId, PathBuf>,
     lean_entry: Option<&str>,
+    home: Option<&aikit_store::AikitHome>,
 ) -> Result<HookDecision> {
     let open = index.open_bypasses(context)?;
     let active = open.into_iter().next();
@@ -94,17 +99,35 @@ pub fn dispatch_with_entry(
     // the owner at each causal orientation event rather than caching a session
     // prompt. A missing/non-Central world remains a normal AIKit world.
     let central_root = crate::temporal::process_central_root(event.cwd.as_deref());
-    let floor_ledger = aikit_store::AikitHome::discover()
-        .ok()
+    let home = home
+        .cloned()
+        .or_else(|| aikit_store::AikitHome::discover().ok());
+    let floor_ledger = home
+        .as_ref()
         .map(|home| crate::temporal::FloorLedger::in_state(&home.state()));
+    // A hook's owner calls are probes: bounded, so a hanging owner costs the
+    // budget and becomes a warning — never a stalled prompt.
+    let runner = SystemRunner::probe();
+    // The session's own record (O-I #1016): its start and end land in AIKit's
+    // lifecycle. It opens no NOW in Central yet (`can_close` is false): no
+    // hook holds an authority that can close one, and allocating writes
+    // tracked files into the world's ground. What a hook may hold is #1016's
+    // to decide.
+    crate::temporal::session_boundary(
+        &mut decision,
+        event,
+        crate::temporal::SessionWorld::of(event.cwd.as_deref()).as_ref(),
+        home.as_ref(),
+        floor_ledger.as_ref(),
+        &runner,
+        false,
+    );
     crate::temporal::session_floor(
         &mut decision,
         event,
         event.cwd.as_deref(),
         central_root.as_deref(),
-        // A hook re-ground read is a probe: bounded, so a hanging owner read
-        // costs the budget and becomes a warning — never a stalled prompt.
-        &SystemRunner::probe(),
+        &runner,
         lean_entry,
         crate::temporal::process_is_occupied(),
         floor_ledger.as_ref(),

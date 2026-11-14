@@ -44,7 +44,9 @@ pub const SESSION_LIFECYCLE_VERSION: &str = "aikit.session-lifecycle/v1";
 pub enum SessionLifecycleEventKind {
     /// The session's lifecycle began. Always the first recorded event.
     SessionStarted,
-    /// The session's lifecycle ended. Nothing may be recorded after it.
+    /// The session's lifecycle ended. Nothing may be recorded after it but a
+    /// `session-started` that resumes the session (a harness resume reuses
+    /// the session's id).
     SessionEnded,
     /// An in-flight reasoning state marker: the actor is thinking, in the
     /// labelled state (e.g. `reasoning`, `awaiting-tool`).
@@ -202,7 +204,7 @@ pub enum SessionLifecycleRecord {
 /// * `session_lifecycle.start_required` — anything recorded before a
 ///   `session-started` event.
 /// * `session_lifecycle.already_ended` — anything recorded after
-///   `session-ended`.
+///   `session-ended` except the `session-started` that resumes the session.
 /// * `session_lifecycle.already_cancelled` — anything recorded after
 ///   `cancelled`; cancellation is terminal.
 /// * `session_lifecycle.malformed_event` — a kind recorded without the fields
@@ -238,6 +240,12 @@ pub fn validate_next_event(
                     session
                 ),
             ));
+        }
+        // A resumed session starts again on its own history.
+        Some(SessionLifecycleEventKind::SessionEnded)
+            if next.kind == SessionLifecycleEventKind::SessionStarted =>
+        {
+            return Ok(())
         }
         Some(SessionLifecycleEventKind::SessionEnded) => {
             return Err(AikitError::new(
@@ -440,7 +448,8 @@ pub enum SessionLifecycleState {
     PermissionPending,
     /// The session was cancelled. Terminal like `ended`, but distinguishable.
     Cancelled,
-    /// The session ended normally. Terminal.
+    /// The session ended normally. Terminal until a `session-started`
+    /// resumes it.
     Ended,
 }
 
@@ -667,6 +676,36 @@ mod tests {
         let history = vec![start(), ended];
         let error = validate_next_event(&session(), &history, &request_event()).unwrap_err();
         assert_eq!(error.code(), "session_lifecycle.already_ended");
+    }
+
+    #[test]
+    fn a_resumed_session_starts_again_after_its_end_and_runs() {
+        let ended = SessionLifecycleEvent::new(
+            session(),
+            activity("one"),
+            SessionLifecycleEventKind::SessionEnded,
+            "operator",
+        );
+        let mut history = vec![start(), ended];
+        let resumed = start();
+        validate_next_event(&session(), &history, &resumed).unwrap();
+        history.push(resumed);
+        assert_eq!(derive_state(&history), SessionLifecycleState::Running);
+        // Resumed, it records as any live session does.
+        validate_next_event(&session(), &history, &request_event()).unwrap();
+    }
+
+    #[test]
+    fn a_cancelled_session_is_not_resumed() {
+        let cancelled = SessionLifecycleEvent::new(
+            session(),
+            activity("one"),
+            SessionLifecycleEventKind::Cancelled,
+            "operator",
+        )
+        .with_reason("operator interrupt");
+        let error = validate_next_event(&session(), &[start(), cancelled], &start()).unwrap_err();
+        assert_eq!(error.code(), "session_lifecycle.already_cancelled");
     }
 
     #[test]

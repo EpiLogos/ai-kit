@@ -390,6 +390,51 @@ fn only_the_tool_events_carry_a_matcher() {
     );
 }
 
+/// Claude Code gives a SessionEnd hook 1.5 seconds unless its entry names a
+/// `timeout`; the SessionEnd dispatch closes the session's NOW through `ctrl`
+/// (O-I #1016), so its entry carries 15 seconds. Every other entry keeps Claude
+/// Code's default, and a reinstall over an old entry without one writes it.
+#[test]
+fn only_the_session_end_entry_carries_a_timeout_of_fifteen_seconds() {
+    let generation = tempfile::tempdir().unwrap();
+    let config = tempfile::tempdir().unwrap();
+    std::fs::write(
+        config.path().join("settings.json"),
+        r#"{ "hooks": { "SessionEnd": [ { "hooks": [ { "type": "command", "command": "aikit hook dispatch claude SessionEnd" } ] } ] } }"#,
+    )
+    .unwrap();
+    materialize(
+        &adapter(generation.path()).install(config.path()).unwrap(),
+        config.path(),
+    );
+
+    let settings = settings_after_install(config.path());
+    assert_eq!(
+        settings["hooks"]["SessionEnd"],
+        serde_json::json!([{ "hooks": [{
+            "type": "command",
+            "command": "aikit hook dispatch claude SessionEnd",
+            "timeout": 15
+        }] }])
+    );
+    for (event, entries) in settings["hooks"].as_object().unwrap() {
+        if event == "SessionEnd" {
+            continue;
+        }
+        for hook in entries
+            .as_array()
+            .unwrap()
+            .iter()
+            .flat_map(|m| m["hooks"].as_array().unwrap())
+        {
+            assert!(
+                hook.get("timeout").is_none(),
+                "{event} keeps Claude Code's default budget: {hook}"
+            );
+        }
+    }
+}
+
 #[test]
 fn installing_twice_is_byte_for_byte_idempotent() {
     let generation = tempfile::tempdir().unwrap();
