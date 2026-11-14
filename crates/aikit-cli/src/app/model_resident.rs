@@ -230,7 +230,9 @@ const SEATED_SESSION: &str = "seated-session";
 /// harness profile, the native session, the Agency and WorldBinding the session was admitted with, and the model the
 /// native session reports. That model is named by the catalogue Model that claims its provider-native id through the
 /// session's provider; where no Model claims it, by the route that names it, and the offer stays unmatched
-/// (model_route.rs `UnmatchedModelOffer`): no Model is minted from an observed id.
+/// (model_route.rs `UnmatchedModelOffer`): no Model is minted from an observed id. A session that discloses no provider
+/// (gemini and kimi over ACP report the model they run and no provider) is still answered, for the harness it stands on:
+/// no provider is named, and its route names the model by the id the harness runs, through that harness.
 fn seated_factory_selection(
     home: &aikit_store::AikitHome,
     compose: &Value,
@@ -268,12 +270,13 @@ fn seated_factory_selection(
         return Err(refuse(format!("{session} has no native session")));
     }
     // The provider that serves the model: the one the harness binds natively, or, for a provider-plural harness, the
-    // one its own session discloses for the model it runs. A model id is never parsed for it.
+    // one its own session discloses for the model it runs, or none, where the session discloses none. A model id is
+    // never parsed for it.
     let (provider, claimed_id) = match profile.models.as_ref().map(|models| &models.dispatch) {
         Some(aikit_core::harness_profile::ModelDispatchPosture::NativeProviderBinding {
             provider_ref,
             ..
-        }) => (provider_ref.clone(), observed.to_owned()),
+        }) => (Some(provider_ref.clone()), observed.to_owned()),
         _ => {
             let disclosed = observation["available_models"]
                 .as_array()
@@ -289,32 +292,33 @@ fn seated_factory_selection(
                     ))
                 });
             match disclosed {
-                Some(identity) => identity,
-                None => match observation["native_provider"]
-                    .as_str()
-                    .filter(|native| !native.trim().is_empty())
-                {
-                    Some(native) => (format!("provider:{native}"), observed.to_owned()),
-                    None => {
-                        return Err(refuse(format!(
-                            "{session}'s session discloses no provider for the model it runs ({observed}), and its harness ({slug}) binds none natively"
-                        )))
-                    }
-                },
+                Some((provider, id)) => (Some(provider), id),
+                None => (
+                    observation["native_provider"]
+                        .as_str()
+                        .filter(|native| !native.trim().is_empty())
+                        .map(|native| format!("provider:{native}")),
+                    observed.to_owned(),
+                ),
             }
         }
     };
-    let provider_ref = ProviderRef::parse(&provider)?;
+    let provider_ref = provider.as_deref().map(ProviderRef::parse).transpose()?;
+    let harness_ref = format!("harness/{slug}");
+    // A catalogue Model claims an id through a provider; with none disclosed, none is claimed.
     let (catalogue, _) = aikit_store::model_catalogue::resolved_catalogue(home);
-    let claiming: Vec<_> = catalogue
-        .entries()
-        .filter(|entry| {
-            entry
-                .routes
-                .iter()
-                .any(|route| route.provider == provider_ref && route.claims(&claimed_id))
-        })
-        .collect();
+    let claiming: Vec<_> = match &provider_ref {
+        Some(provider_ref) => catalogue
+            .entries()
+            .filter(|entry| {
+                entry
+                    .routes
+                    .iter()
+                    .any(|route| &route.provider == provider_ref && route.claims(&claimed_id))
+            })
+            .collect(),
+        None => Vec::new(),
+    };
     let (model_ref, catalogue_digest) = match claiming.as_slice() {
         [] => (None, None),
         [entry] => {
@@ -330,29 +334,37 @@ fn seated_factory_selection(
         }
         several => {
             return Err(refuse(format!(
-                "{} catalogue Models claim {claimed_id} through {provider_ref} ({}); AIKit names no one of them",
-                several.len(),
-                several
-                    .iter()
-                    .map(|entry| entry.model.to_string())
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            )))
+            "{} catalogue Models claim {claimed_id} through {} ({}); AIKit names no one of them",
+            several.len(),
+            provider.as_deref().unwrap_or_default(),
+            several
+                .iter()
+                .map(|entry| entry.model.to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        )))
         }
     };
-    let unmatched_offer = match &model_ref {
-        Some(_) => Value::Null,
-        None => json!({
+    let unmatched_offer = match (&model_ref, &provider_ref) {
+        (Some(_), _) => Value::Null,
+        (None, Some(provider_ref)) => json!({
             "provider_ref": provider_ref,
             "provider_native_id": claimed_id,
             "reason": "no catalogue Model claims this provider-native id through this provider: it stays an offer until a catalogue entry or a Provider Source admits it, and the route names the model the session runs",
+        }),
+        // The harness is the route's own: the same id run through another harness is another route.
+        (None, None) => json!({
+            "provider_ref": Value::Null,
+            "harness_ref": harness_ref,
+            "provider_native_id": claimed_id,
+            "reason": "the session discloses no provider for the model it runs, and its harness binds none natively: no catalogue Model is claimed, and the route names the model by the id the harness runs, through that harness",
         }),
     };
     let route_basis = json!({
         "schema": ROUTE_BASIS_SCHEMA,
         "model_ref": model_ref,
         "provider_ref": provider_ref,
-        "native_provider": provider_ref.as_str().strip_prefix("provider:").unwrap_or(provider_ref.as_str()),
+        "native_provider": provider_ref.as_ref().map(|provider| provider.as_str().strip_prefix("provider:").unwrap_or(provider.as_str())),
         "provider_native_id": observed,
         "policy_source": Value::Null,
         "catalogue_digest": catalogue_digest,
@@ -369,7 +381,6 @@ fn seated_factory_selection(
                 "{session}'s admitted Agency is unreadable: {error}"
             ))
         })?;
-    let harness_ref = format!("harness/{slug}");
     let composition_target_basis = json!({
         "schema":"aikit.harness-composition-target-basis/v1",
         "digest_contract":SORTED_JSON_DIGEST_CONTRACT,
@@ -449,7 +460,10 @@ fn seated_factory_selection(
             "basis": basis,
             "basis_digest": basis_digest,
             "digest_contract":SORTED_JSON_DIGEST_CONTRACT,
-            "standing": "the seated session as its resident native owner confirms it: no policy pinned its model and no roster ranked it; the model is the one the session runs, named by the catalogue Model that claims it, else by its route",
+            "standing": match provider_ref {
+                Some(_) => "the seated session as its resident native owner confirms it: no policy pinned its model and no roster ranked it; the model is the one the session runs, named by the catalogue Model that claims it, else by its route",
+                None => "the seated session as its resident native owner confirms it: no policy pinned its model and no roster ranked it; the model is the one the session runs, and as the session discloses no provider for it, it is named by its route through the session's harness",
+            },
         },
         "provenance": provenance,
     }))
@@ -808,19 +822,64 @@ mod tests {
         );
     }
 
+    /// A session on a provider-plural harness over ACP (gemini, kimi), as the resident owner reads it back: the model it
+    /// runs and no provider. AIKit records no native provider for an ACP session, and the models it advertises carry no
+    /// roster identity.
+    fn undisclosed(harness: &str, observed: &str) -> (Value, ResidentTarget, Value) {
+        let (compose, target, mut native) = seat(observed);
+        native["data"]["provider"] = json!(harness);
+        let body = &mut native["data"]["body_basis"];
+        body["harness_profile"] = json!(harness);
+        body["provider_id"] = json!(harness);
+        body["owner_launcher_provider_id"] = json!(harness);
+        (compose, target, native)
+    }
+
     #[test]
-    fn a_seated_session_whose_provider_nothing_discloses_is_refused() {
+    fn a_seated_session_whose_provider_nothing_discloses_is_answered_for_its_harness() {
         let temp = tempfile::tempdir().unwrap();
         let home = aikit_store::AikitHome::at(temp.path().join("aikit"));
-        let (compose, target, mut native) = seat("some-model");
-        // Pi is provider-plural: only its session can say which provider serves the model, and here it says none.
-        native["data"]["body_basis"]["harness_profile"] = json!("pi");
-        native["data"]["body_basis"]["protocol"] = json!("pi-rpc");
-        let refused = seated_factory_selection(&home, &compose, &target, &native).unwrap_err();
-        assert_eq!(refused.code(), "model.seated_selection");
-        assert!(
-            refused.message().contains("discloses no provider"),
-            "{refused}"
+        let (compose, target, native) = undisclosed("gemini", "gemini-2.5-pro");
+        let selection = seated_factory_selection(&home, &compose, &target, &native).unwrap();
+        let receipt = &selection["ranking_explanation"];
+        let basis = &receipt["basis"];
+        let route_basis = &basis["route_basis"];
+        assert_eq!(selection["ranking_policy"], "EXPLICIT_PIN");
+        assert_eq!(receipt["selection_kind"], SEATED_SESSION);
+        assert_eq!(receipt["harness_ref"], "harness/gemini");
+        // No provider is named that the session did not disclose, and none is read out of the model id.
+        assert!(selection["provider_ref"].is_null(), "{selection}");
+        assert!(receipt["provider_ref"].is_null());
+        assert!(route_basis["provider_ref"].is_null());
+        assert!(route_basis["native_provider"].is_null());
+        // The route names the model by the id the harness runs, through that harness: no catalogue Model is claimed.
+        assert!(route_basis["model_ref"].is_null());
+        assert_eq!(route_basis["provider_native_id"], "gemini-2.5-pro");
+        let offer = &route_basis["unmatched_offer"];
+        assert!(offer["provider_ref"].is_null());
+        assert_eq!(offer["harness_ref"], "harness/gemini");
+        assert_eq!(offer["provider_native_id"], "gemini-2.5-pro");
+        assert_eq!(selection["model_ref"], receipt["route_ref"]);
+        assert_eq!(
+            receipt["route_ref"],
+            format!("model-route/{}", sorted_digest(route_basis))
         );
+        assert_eq!(
+            receipt["basis_digest"],
+            format!("blake3:{}", sorted_digest(basis))
+        );
+        assert_eq!(
+            basis["harness_composition"]["model"],
+            selection["model_ref"]
+        );
+        assert_eq!(
+            basis["composition_target_basis"]["resident_body_basis"]["harness_profile"],
+            "gemini"
+        );
+        // The same id run through another harness is another route.
+        let (compose, target, native) = undisclosed("kimi", "gemini-2.5-pro");
+        let kimi = seated_factory_selection(&home, &compose, &target, &native).unwrap();
+        assert_eq!(kimi["ranking_explanation"]["harness_ref"], "harness/kimi");
+        assert_ne!(kimi["model_ref"], selection["model_ref"]);
     }
 }
