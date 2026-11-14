@@ -332,7 +332,8 @@ fn seated_factory_selection(
                 )),
             )
         }
-        several => return Err(refuse(format!(
+        several => {
+            return Err(refuse(format!(
             "{} catalogue Models claim {claimed_id} through {} ({}); AIKit names no one of them",
             several.len(),
             provider.as_deref().unwrap_or_default(),
@@ -341,7 +342,8 @@ fn seated_factory_selection(
                 .map(|entry| entry.model.to_string())
                 .collect::<Vec<_>>()
                 .join(", ")
-        ))),
+        )))
+        }
     };
     let unmatched_offer = match (&model_ref, &provider_ref) {
         (Some(_), _) => Value::Null,
