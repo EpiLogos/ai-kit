@@ -3802,6 +3802,7 @@ fn idle_close_grace() -> Option<Duration> {
     }
 }
 
+#[cfg(unix)]
 pub fn serve(home: AikitHome, socket: &Path) -> Result<()> {
     use std::io::{BufRead, BufReader, Write};
     use std::os::unix::{fs::PermissionsExt, net::UnixListener};
@@ -4045,6 +4046,31 @@ pub fn start(home: &AikitHome, cwd: &Path) -> Result<Value> {
 mod tests {
     use super::*;
     use tempfile::TempDir;
+
+    #[test]
+    fn serve_and_its_idle_grace_are_compiled_only_on_unix() {
+        // `serve` binds a Unix socket (std::os::unix) and reads the idle grace; its one caller, EncounterServe, is cfg(unix), and
+        // the crate keeps cfg(not(unix)) arms elsewhere, so a non-unix build must see neither.
+        let source = include_str!("encounter_service.rs");
+        for item in [
+            "pub fn serve(home: AikitHome",
+            "fn idle_close_grace() -> Option<Duration>",
+        ] {
+            let at = source
+                .find(item)
+                .unwrap_or_else(|| panic!("`{item}` is defined here"));
+            let attributes: Vec<&str> = source[..at]
+                .lines()
+                .rev()
+                .map(str::trim)
+                .take_while(|line| line.starts_with("#[") || line.starts_with("///"))
+                .collect();
+            assert!(
+                attributes.contains(&"#[cfg(unix)]"),
+                "`{item}` stands under #[cfg(unix)]: {attributes:?}"
+            );
+        }
+    }
 
     fn test_home() -> AikitHome {
         let temp = TempDir::new().unwrap();
