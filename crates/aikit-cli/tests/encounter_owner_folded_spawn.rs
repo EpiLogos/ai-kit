@@ -211,3 +211,54 @@ fn no_command_brings_back_a_world_that_is_gone() {
         );
     }
 }
+
+/// A read of the code lens that names its GitNexus binary (`aikit knowledge code …
+/// --gitnexus-binary`) remembers that binary's surface in the AIKit home's cache. The read runs
+/// before any home is found, so the cache is kept only in a home that stands: in a World that has
+/// been removed nothing is made for it and the World does not come back (O-I #1001). In a home that
+/// stands, the surface is still remembered.
+#[test]
+fn a_code_lens_read_never_makes_a_removed_world_s_home_for_its_cache() {
+    let temp = tempfile::tempdir().unwrap();
+    let repo = temp.path().join("repo");
+    std::fs::create_dir(&repo).unwrap();
+    let read = |home: &Path, user_home: &Path| {
+        Command::new(env!("CARGO_BIN_EXE_aikit"))
+            .args(["knowledge", "code", "status", "--repo"])
+            .arg(&repo)
+            .args(["--gitnexus-binary", "/usr/bin/true", "--json"])
+            .current_dir(temp.path())
+            .env("AIKIT_HOME", home)
+            .env("HOME", user_home)
+            .env_remove("AIKIT_CONTEXT_ID")
+            .env_remove("AIKIT_ISOLATION")
+            .stdin(Stdio::null())
+            .output()
+            .unwrap()
+    };
+
+    let world = temp.path().join("world");
+    std::fs::create_dir_all(world.join("home")).unwrap();
+    std::fs::remove_dir_all(&world).unwrap();
+    let output = read(&world.join("home").join(".aikit"), &world.join("home"));
+    assert!(
+        !world.exists(),
+        "the code lens read made the removed World again: {} {} {}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let standing = temp.path().join("standing").join("home");
+    std::fs::create_dir_all(standing.join(".aikit")).unwrap();
+    let output = read(&standing.join(".aikit"), &standing);
+    assert!(
+        standing
+            .join(".aikit/cache/gitnexus-cli-surface.json")
+            .is_file(),
+        "a home that stands keeps the surface: {} {} {}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}

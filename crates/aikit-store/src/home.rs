@@ -44,11 +44,11 @@ impl AikitHome {
     /// The home for this process: `AIKIT_HOME`, else `~/.aikit`.
     ///
     /// A home whose folder is gone is refused here ([`Self::ground_present`]).
-    /// Every command finds its home through this door, so none starts in a
-    /// World that has been removed, where the first folder it made would make
-    /// the World again (O-I #1001). A World removed while a command is already
-    /// running is not caught here: the window that removed it stops asking
-    /// AIKit anything there.
+    /// Every command that opens the home finds it through this door, so none
+    /// starts in a World that has been removed, where the first folder it made
+    /// would make the World again (O-I #1001). A World removed while a command
+    /// is already running is not caught here: the window that removed it stops
+    /// asking AIKit anything there.
     pub fn discover() -> Result<Self> {
         let aikit_home = std::env::var_os("AIKIT_HOME");
         let user_home = std::env::var_os("HOME");
