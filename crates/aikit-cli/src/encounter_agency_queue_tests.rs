@@ -1001,9 +1001,11 @@ fn a_session_keeps_the_record_its_start_chose_when_its_provider_changes() {
 }
 
 /// ai-kit#640 (R640-2): the body an open launches is handed its session's record
-/// (`AIKIT_SESSION_LIFECYCLE_REF`) and the open that launched it (`AIKIT_SESSION_LIFECYCLE_OPEN`,
-/// its connection generation), so the body's own hooks record its end there, never on a second
-/// record under the harness's own id. The fixture writes what it was handed to its log.
+/// (`AIKIT_SESSION_LIFECYCLE_REF`), its own harness as its hooks spell their client
+/// (`AIKIT_SESSION_LIFECYCLE_CLIENT`) and the open that launched it
+/// (`AIKIT_SESSION_LIFECYCLE_OPEN`, its connection generation), so the body's own hooks record its
+/// end there, never on a second record under the harness's own id. The fixture writes what it was
+/// handed to its log.
 #[test]
 fn the_body_an_open_launches_is_handed_its_sessions_record() {
     let world = QueueWorld::new();
@@ -1015,6 +1017,7 @@ fn the_body_an_open_launches_is_handed_its_sessions_record() {
         json!({
             "method": "fixture/environment",
             "AIKIT_SESSION_LIFECYCLE_REF": "aikit:session:handed:agent-session/handed",
+            "AIKIT_SESSION_LIFECYCLE_CLIENT": "handed",
             "AIKIT_SESSION_LIFECYCLE_OPEN": opened["connection_generation"],
         }),
         "{opened}"

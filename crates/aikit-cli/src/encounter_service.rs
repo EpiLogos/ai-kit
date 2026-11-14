@@ -2393,15 +2393,24 @@ impl EncounterService {
             None
         };
         // The body's own hooks record its end on this session's record, never on a second under
-        // the harness's own id (ai-kit#640): it is handed the ref, and this open, under which the
-        // body's own session claims the record ([`crate::temporal::FloorLedger::open_handed`]). A
-        // launch that declared no scoped environment keeps its ordinary inheritance beside it.
+        // the harness's own id (ai-kit#640): it is handed the ref (spelt for the harness that
+        // first ran the session), its own harness as its hooks spell their client, and this open,
+        // under which the body's own session claims the record
+        // ([`crate::temporal::FloorLedger::open_handed`]). A launch that declared no scoped
+        // environment keeps its ordinary inheritance beside it.
         let launch_environment = Some(
             launch_environment
                 .unwrap_or_else(aikit_adapters::connection_process::ModelEnvironment::inherited)
                 .with_session_lifecycle(
                     aikit_adapters::connection_process::SessionLifecycleHandoff {
                         session_ref: lifecycle_ref.clone(),
+                        client: crate::client::lifecycle_client(
+                            body_provider
+                                .from_profile
+                                .as_deref()
+                                .unwrap_or(&body_provider.id),
+                        )
+                        .to_owned(),
                         open: generation.clone(),
                     },
                 ),
