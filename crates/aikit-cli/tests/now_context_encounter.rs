@@ -110,6 +110,7 @@ fn prompt(service: &EncounterService, session: &ResourceRef, text: &str) {
         .apply(EncounterRequest::View {
             agent_session: session.clone(),
             before: None,
+            after: None,
         })
         .unwrap();
     let draft = service
@@ -291,6 +292,7 @@ fn redis_prepared_now_is_delivered_before_turn_and_verifier_context_is_isolated(
             .apply(EncounterRequest::View {
                 agent_session: session.clone(),
                 before: None,
+                after: None,
             })
             .unwrap();
         let blocks = view["blocks"].to_string();
@@ -330,6 +332,7 @@ fn redis_prepared_now_is_delivered_before_turn_and_verifier_context_is_isolated(
             .apply(EncounterRequest::View {
                 agent_session: session.clone(),
                 before: None,
+                after: None,
             })
             .unwrap();
         if let Some(entry) = view["now_context_receipts"]
@@ -392,6 +395,7 @@ fn redis_prepared_now_is_delivered_before_turn_and_verifier_context_is_isolated(
         .apply(EncounterRequest::View {
             agent_session: session.clone(),
             before: None,
+            after: None,
         })
         .unwrap();
     let draft = service

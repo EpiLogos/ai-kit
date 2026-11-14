@@ -452,6 +452,7 @@ put('late.json','actual OS bytes after owner-observed release')
             .apply(EncounterRequest::View {
                 agent_session: session,
                 before: None,
+                after: None,
             })
             .unwrap();
         assert_eq!(current["connection"]["state"], "Released");

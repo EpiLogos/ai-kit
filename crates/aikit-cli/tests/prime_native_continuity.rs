@@ -164,6 +164,7 @@ impl PrimeRig {
             .apply(EncounterRequest::View {
                 agent_session: self.session.clone(),
                 before: None,
+                after: None,
             })
             .unwrap()["connection"]["native_session_id"]
             .as_str()

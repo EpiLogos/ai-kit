@@ -451,6 +451,9 @@ pub enum EncounterRequest {
     View {
         agent_session: ResourceRef,
         before: Option<u64>,
+        /// Read forward instead: the blocks after this block, oldest first (`EncounterStore::view_after`).
+        #[serde(default)]
+        after: Option<u64>,
     },
     Open {
         space: SessionSpaceRef,
@@ -3332,9 +3335,19 @@ impl EncounterService {
             EncounterRequest::View {
                 agent_session,
                 before,
+                after,
             } => {
                 self.require_attached(&agent_session)?;
-                let mut view = self.store.view(&agent_session, before)?;
+                let mut view = match (before, after) {
+                    (_, None) => self.store.view(&agent_session, before)?,
+                    (None, Some(after)) => self.store.view_after(&agent_session, after)?,
+                    (Some(_), Some(_)) => {
+                        return Err(AikitError::new(
+                            "encounter.view_direction",
+                            "A view reads back from `before` or forward from `after`, not both",
+                        ))
+                    }
+                };
                 let resident = self
                     .residents
                     .lock()

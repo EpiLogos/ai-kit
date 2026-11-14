@@ -152,6 +152,7 @@ impl Rig {
             .apply(EncounterRequest::View {
                 agent_session: self.session.clone(),
                 before: None,
+                after: None,
             })
             .unwrap()
     }
@@ -584,6 +585,7 @@ fn opening_keeps_views_responsive_and_refuses_a_duplicate_process_launch() {
         .apply(EncounterRequest::View {
             agent_session: other,
             before: None,
+            after: None,
         })
         .unwrap();
     assert!(observed_at.elapsed() < Duration::from_millis(200));
@@ -1036,6 +1038,7 @@ fn restart_projects_unfinished_or_uncertain_native_open_from_the_real_journal() 
         .apply(EncounterRequest::View {
             agent_session: rig.session.clone(),
             before: None,
+            after: None,
         })
         .unwrap();
     assert_eq!(view["connection"]["state"], "RecoveryRequired");
@@ -1063,6 +1066,7 @@ fn restart_projects_unfinished_or_uncertain_native_open_from_the_real_journal() 
         .apply(EncounterRequest::View {
             agent_session: rig.session.clone(),
             before: None,
+            after: None,
         })
         .unwrap();
     assert_eq!(view["connection"]["state"], "CleanupUncertain");
@@ -1133,6 +1137,7 @@ fn restart_projects_unfinished_or_uncertain_native_open_from_the_real_journal() 
         .apply(EncounterRequest::View {
             agent_session: rig.session.clone(),
             before: None,
+            after: None,
         })
         .unwrap();
     assert_eq!(view["connection"]["state"], "Disconnected");
