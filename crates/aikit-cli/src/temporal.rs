@@ -307,6 +307,13 @@ pub struct HeldNow {
 /// for nothing, and raises no warning; its ground says in one line that its
 /// NOW was not opened. The hook passes `false`: what authority a hook may hold
 /// is O-I #1016's to decide.
+///
+/// A body whose owner opened its session (an AIKit conversation) is `handed`
+/// that session's record ([`process_session_lifecycle_ref`]): its start and
+/// end are recorded there, so its start replays the owner's and its end after
+/// the owner's End is already recorded, never a second record under the
+/// harness's own id (ai-kit#640). See [`handed_session_ref`].
+#[allow(clippy::too_many_arguments)]
 pub fn session_boundary<R: CommandRunner>(
     decision: &mut HookDecision,
     event: &HookEvent,
@@ -315,6 +322,7 @@ pub fn session_boundary<R: CommandRunner>(
     ledger: Option<&FloorLedger>,
     runner: &R,
     can_close: bool,
+    handed: Option<&str>,
 ) {
     if !matches!(
         event.kind,
@@ -325,7 +333,8 @@ pub fn session_boundary<R: CommandRunner>(
     let Some(session) = crate::refocus::hook_session(&event.payload) else {
         return;
     };
-    let reference = session_ref(&event.client, &session);
+    let reference = handed_session_ref(handed, &event.client)
+        .unwrap_or_else(|| session_ref(&event.client, &session));
     let held = ledger.and_then(|ledger| ledger.session_now(&session));
     if event.kind == HookEventKind::SessionStart {
         let start = match home.map(|home| record_harness_start(home, &reference)) {
@@ -461,6 +470,25 @@ pub fn session_boundary<R: CommandRunner>(
 /// (`aikit inhabit` exports `OI_POSITION_REF` into the harness).
 pub fn process_is_occupied() -> bool {
     std::env::var_os("OI_POSITION_REF").is_some_and(|value| !value.is_empty())
+}
+
+/// The session record this process's body was handed by the owner that
+/// opened its session (`AIKIT_SESSION_LIFECYCLE_REF`, ai-kit#640), if any.
+pub fn process_session_lifecycle_ref() -> Option<String> {
+    std::env::var(aikit_adapters::connection_process::SESSION_LIFECYCLE_REF)
+        .ok()
+        .filter(|value| !value.is_empty())
+}
+
+/// The record a hook of `client` records its session's start and end on when
+/// its body was `handed` one: a session ref of that same client. A ref for
+/// another client was inherited by a harness the body launched in turn, and
+/// is not this session's; that session keeps its own record.
+pub fn handed_session_ref(handed: Option<&str>, client: &str) -> Option<String> {
+    let handed = handed?;
+    let rest = handed.strip_prefix(&format!("aikit:session:{client}:"))?;
+    (!rest.is_empty() && crate::session_lifecycle_ops::harness_session(handed).is_ok())
+        .then(|| handed.to_owned())
 }
 
 /// Resolve the Central root without teaching AIKit Central's internal file
@@ -1184,6 +1212,7 @@ mod tests {
             Some(ledger),
             runner,
             can_close,
+            None,
         );
         session_floor(
             &mut result,
@@ -1388,6 +1417,89 @@ mod tests {
         );
     }
 
+    /// ai-kit#640 (R640-2): a body its owner handed the session's record records its start and
+    /// end on it. Its start replays the owner's; its end after the owner's End is already recorded,
+    /// answered with no warning; nothing is recorded under the harness's own id. A record handed
+    /// for another client was inherited by a harness the body launched in turn, and is not its own.
+    #[test]
+    fn a_body_handed_its_sessions_record_starts_and_ends_on_it() {
+        const OWNED: &str = "aikit:session:claude:agent-session/talk";
+        let temp = tempfile::tempdir().unwrap();
+        let home = AikitHome::at(temp.path());
+        let ledger = FloorLedger::in_state(&home.state());
+        let runner = ScriptedRunner::new();
+        let kinds = |session_ref: &str| -> Vec<SessionLifecycleEventKind> {
+            home.session_lifecycle_history(&harness_session(session_ref).unwrap())
+                .map(|history| history.iter().map(|event| event.kind).collect())
+                .unwrap_or_default()
+        };
+        let boundary = |event: &HookEvent| {
+            let mut result = decision(event.kind.clone());
+            session_boundary(
+                &mut result,
+                event,
+                None,
+                Some(&home),
+                Some(&ledger),
+                &runner,
+                false,
+                Some(OWNED),
+            );
+            result
+        };
+        // The owner's open started the record.
+        assert_eq!(
+            record_harness_start(&home, OWNED).unwrap(),
+            HarnessStart::First
+        );
+        let payload = json!({"session_id": "sess-1"});
+        let started = boundary(&hook_at(
+            PROJECT,
+            HookEventKind::SessionStart,
+            payload.clone(),
+        ));
+        assert!(started.warnings.is_empty(), "{:?}", started.warnings);
+        assert_eq!(kinds(OWNED), [SessionLifecycleEventKind::SessionStarted]);
+        // The owner's End ended it; the body's end comes after.
+        assert!(record_harness_end(&home, OWNED).unwrap());
+        let ended = boundary(&hook_at(PROJECT, HookEventKind::SessionEnd, payload));
+        assert!(ended.allowed);
+        assert!(ended.warnings.is_empty(), "{:?}", ended.warnings);
+        assert_eq!(
+            kinds(OWNED),
+            [
+                SessionLifecycleEventKind::SessionStarted,
+                SessionLifecycleEventKind::SessionEnded
+            ]
+        );
+        assert!(
+            kinds(REF).is_empty(),
+            "no record under the harness's own id"
+        );
+
+        // Another client's hook keeps its own record.
+        let nested = boundary(
+            &HookEvent::new(
+                "codex",
+                HookEventKind::SessionStart,
+                json!({"session_id": "sess-2"}),
+            )
+            .in_cwd(PROJECT),
+        );
+        assert!(nested.warnings.is_empty(), "{:?}", nested.warnings);
+        assert_eq!(
+            kinds("aikit:session:codex:sess-2"),
+            [SessionLifecycleEventKind::SessionStarted]
+        );
+        assert_eq!(kinds(OWNED).len(), 2);
+        assert_eq!(handed_session_ref(Some(OWNED), "codex"), None);
+        assert_eq!(
+            handed_session_ref(Some("aikit:session:claude:"), "claude"),
+            None
+        );
+        assert_eq!(handed_session_ref(None, "claude"), None);
+    }
+
     #[test]
     fn a_refused_close_is_a_warning_and_the_end_is_still_recorded() {
         let temp = tempfile::tempdir().unwrap();
@@ -1420,6 +1532,7 @@ mod tests {
             Some(&ledger),
             &runner,
             true,
+            None,
         );
         let mut end = decision(HookEventKind::SessionEnd);
         session_boundary(
@@ -1430,6 +1543,7 @@ mod tests {
             Some(&ledger),
             &runner,
             true,
+            None,
         );
         assert!(end.allowed, "a refusal never changes the verdict");
         assert_eq!(end.warnings.len(), 1, "{:?}", end.warnings);
@@ -1461,6 +1575,7 @@ mod tests {
             Some(&ledger),
             &runner,
             true,
+            None,
         );
         assert!(resumed.warnings.is_empty(), "{:?}", resumed.warnings);
         assert_eq!(calls_of(&runner, "central.now.allocate").len(), 1);
@@ -1599,6 +1714,7 @@ mod tests {
             Some(&ledger),
             &runner,
             true,
+            None,
         );
         assert!(start.allowed);
         assert!(start.warnings[0].contains("this session's NOW was not opened in Central"));
@@ -1627,6 +1743,7 @@ mod tests {
                 Some(&ledger),
                 &runner,
                 true,
+                None,
             );
             assert!(result.warnings.is_empty(), "{:?}", result.warnings);
         }
@@ -1651,6 +1768,7 @@ mod tests {
             None,
             &runner,
             true,
+            None,
         );
         assert!(home.session_lifecycle_list().unwrap().is_empty());
         assert!(runner.calls().is_empty());

@@ -68,6 +68,19 @@ impl EncounterService {
         generation: String,
         deadline: Instant,
     ) -> Result<Value> {
+        self.release_native_under(session, native, generation, deadline, None)
+    }
+
+    /// [`Self::release_native`], under the opening lease its caller already holds for this
+    /// session (`end_lease`, End's), or under one it takes for itself.
+    fn release_native_under(
+        &self,
+        session: ResourceRef,
+        native: String,
+        generation: String,
+        deadline: Instant,
+        end_lease: Option<&NativeOpenGuard<'_>>,
+    ) -> Result<Value> {
         // Cleanup belongs to this exact owned body even if its semantic space
         // was later detached. Replacement separately requires current attachment.
         // An exact retry returns the immutable old cleanup receipt even if a
@@ -111,9 +124,22 @@ impl EncounterService {
         }
         // Reuse the existing startup lease so cleanup and startup cannot race.
         // There is no new ownership registry and no map lock during native IO.
-        let mut lease =
-            self.begin_native_lease(&session, generation.clone(), "native-release-validation")?;
-        lease.terminal_recorded = true;
+        // An End releasing the body already holds this session's lease.
+        let _lease = match end_lease {
+            Some(lease) => {
+                debug_assert_eq!(lease.session, session, "End's lease is this session's");
+                None
+            }
+            None => {
+                let mut lease = self.begin_native_lease(
+                    &session,
+                    generation.clone(),
+                    "native-release-validation",
+                )?;
+                lease.terminal_recorded = true;
+                Some(lease)
+            }
+        };
         let removed = {
             let mut residents = self.residents.lock().map_err(error)?;
             if !residents
@@ -177,34 +203,49 @@ impl EncounterService {
     }
 
     /// End one session (O-I manual §19.1): its idle resident body is released exactly as
-    /// `release_native` releases it, then its end is recorded in the lifecycle its open started.
-    /// A session whose body is already gone (released, or its owner restarted) is ended from its
-    /// last native binding. An end retried after the record closed records nothing and says so.
+    /// `release_native` releases it, then its end is recorded on the record its start was kept
+    /// under. End holds the session's opening lease from its first read to that record
+    /// (ai-kit#640): an open, reconnect or release under way refuses it in words, and none starts
+    /// until it has answered, so the record and the body never disagree. A session whose body is
+    /// already gone (released, or its owner restarted) is ended from its record alone. An End
+    /// retried after the record closed records nothing and says so.
     pub(super) fn end_session(&self, session: ResourceRef, deadline: Instant) -> Result<Value> {
+        let mut lease =
+            self.begin_native_lease(&session, ulid::Ulid::generate().to_string(), "session-end")?;
+        // An End reserves no native startup, so it has no startup terminal to journal.
+        lease.terminal_recorded = true;
+        let binding = self.store.last_native_binding(&session)?;
+        let session_ref = self
+            .kept_lifecycle_ref(binding.as_ref(), &session)?
+            .ok_or_else(|| {
+                AikitError::new(
+                    "encounter.end_unopened",
+                    "This session never opened a native body, so it has no start to end",
+                )
+            })?;
+        let was_running = lifecycle_running(&self.home, &session_ref)?;
         let held = self.residents.lock().map_err(error)?.get(&session).cloned();
-        let (provider, released) = match held {
+        let released = match held {
             Some(resident) => {
-                let provider = resident.provider.clone();
                 let native = resident.lane.binding().native_session_id.clone();
                 let generation = resident.generation.clone();
                 // The release takes the body only when no one else holds it.
                 drop(resident);
-                let released =
-                    self.release_native(session.clone(), native, generation, deadline)?;
-                (provider, Some(released))
+                Some(self.release_native_under(
+                    session.clone(),
+                    native,
+                    generation,
+                    deadline,
+                    Some(&lease),
+                )?)
             }
-            None => (
-                self.bound_provider(&session)?.ok_or_else(|| {
-                    AikitError::new(
-                        "encounter.end_unopened",
-                        "This session never opened a native body, so it has no start to end",
-                    )
-                })?,
-                None,
-            ),
+            None => None,
         };
-        let session_ref = self.lifecycle_ref(&provider, &session);
-        let ended = crate::session_lifecycle_ops::record_harness_end(&self.home, &session_ref)?;
+        let recorded = crate::session_lifecycle_ops::record_harness_end(&self.home, &session_ref)?;
+        // The body's own hooks record on this same record, so its end may land while the release
+        // stops it: that end is this End's.
+        let ended = recorded || (was_running && !lifecycle_running(&self.home, &session_ref)?);
+        drop(lease);
         Ok(json!({
             "schema": "aikit.encounter-end/v1",
             "agent_session": session,
@@ -214,15 +255,13 @@ impl EncounterService {
         }))
     }
 
-    /// Record the start of a session AIKit opened in the lifecycle its harness's hooks keep
-    /// (O-I #1016): its first open starts it, an open after its end resumes it, and an open of a
-    /// live session (a reconnect, a view opened again) records nothing. What was recorded rides
-    /// on the open's answer; a start that could not be recorded is named there and never undoes
-    /// the open.
-    pub(super) fn record_session_start(&self, provider: &str, session: &ResourceRef) -> Value {
+    /// Record the start of a session AIKit opened on the record `session_ref` names (O-I #1016):
+    /// its first open starts it, an open after its end resumes it, and an open of a live session
+    /// (a reconnect, a view opened again) records nothing. What was recorded rides on the open's
+    /// answer; a start that could not be recorded is named there and never undoes the open.
+    pub(super) fn record_session_start(&self, session_ref: &str) -> Value {
         use crate::session_lifecycle_ops::{record_harness_start, HarnessStart};
-        let session_ref = self.lifecycle_ref(provider, session);
-        match record_harness_start(&self.home, &session_ref) {
+        match record_harness_start(&self.home, session_ref) {
             Ok(start) => json!({
                 "session_ref": session_ref,
                 "start": match start {
@@ -238,27 +277,22 @@ impl EncounterService {
         }
     }
 
-    /// Where this session's lifecycle stands, for its view: the ref its start was recorded under
-    /// and whether its last start has no end yet. A session that never opened a body has no ref.
+    /// Where this session's lifecycle stands, for its view: the record its start was kept under
+    /// and whether its last start has no end yet. A session that never opened a body has no record.
     pub(super) fn session_lifecycle(&self, session: &ResourceRef) -> Result<Value> {
-        let Some(provider) = self.bound_provider(session)? else {
-            return Ok(json!({"session_ref": null, "running": false}));
-        };
-        let session_ref = self.lifecycle_ref(&provider, session);
-        let running = crate::session_lifecycle_ops::harness_session(&session_ref).and_then(|id| {
-            match self.home.session_lifecycle_history(&id) {
-                Ok(history) => Ok(!matches!(
-                    history.last().map(|event| event.kind),
-                    Some(
-                        SessionLifecycleEventKind::SessionEnded
-                            | SessionLifecycleEventKind::Cancelled
-                    )
-                )),
-                Err(unknown) if unknown.code() == "session_lifecycle.unknown_session" => Ok(false),
-                Err(failure) => Err(failure),
+        let binding = self.store.last_native_binding(session)?;
+        let session_ref = match self.kept_lifecycle_ref(binding.as_ref(), session) {
+            Ok(Some(session_ref)) => session_ref,
+            Ok(None) => return Ok(json!({"session_ref": null, "running": false})),
+            Err(failure) => {
+                return Ok(json!({
+                    "session_ref": null,
+                    "running": null,
+                    "unread": {"code": failure.code(), "message": failure.message()},
+                }))
             }
-        });
-        Ok(match running {
+        };
+        Ok(match lifecycle_running(&self.home, &session_ref) {
             Ok(running) => json!({"session_ref": session_ref, "running": running}),
             Err(failure) => json!({
                 "session_ref": session_ref,
@@ -268,33 +302,62 @@ impl EncounterService {
         })
     }
 
-    /// The provider this session's body runs or last ran: the resident's, else its last native
-    /// binding's. `None` for a session that never opened a body.
-    fn bound_provider(&self, session: &ResourceRef) -> Result<Option<String>> {
-        if let Some(resident) = self.residents.lock().map_err(error)?.get(session) {
-            return Ok(Some(resident.provider.clone()));
+    /// The record this session's starts are kept under, as its last native binding keeps it
+    /// (ai-kit#640): the ref its first start chose ([`first_lifecycle_ref`]), whatever its
+    /// provider's configuration says since. A binding from before the ref was kept is named by
+    /// the provider it ran, as that provider reads now; a provider that cannot be read refuses,
+    /// naming why. `None` for a session that never opened a body.
+    pub(super) fn kept_lifecycle_ref(
+        &self,
+        binding: Option<&Value>,
+        session: &ResourceRef,
+    ) -> Result<Option<String>> {
+        let Some(binding) = binding else {
+            return Ok(None);
+        };
+        if let Some(kept) = binding["session_lifecycle_ref"].as_str() {
+            return Ok(Some(kept.to_owned()));
         }
-        Ok(self
-            .store
-            .last_native_binding(session)?
-            .and_then(|binding| binding["provider"].as_str().map(str::to_owned)))
+        let provider = binding["provider"].as_str().ok_or_else(|| {
+            AikitError::new(
+                "encounter.lifecycle_ref_unknown",
+                "This session's native binding names no provider, so the record its start was kept under cannot be named",
+            )
+        })?;
+        Ok(Some(match provider_named(&self.home, provider)? {
+            Some(row) => first_lifecycle_ref(&row, session),
+            None => aikit_adapters::central_temporal::session_ref(
+                crate::client::lifecycle_client(provider),
+                session.as_str(),
+            ),
+        }))
     }
+}
 
-    /// The lifecycle ref of a session AIKit opened: `aikit:session:<client>:<agent session>`,
-    /// the client being the harness its provider runs, spelt as that harness's hooks spell it
-    /// ([`crate::client::lifecycle_client`]). A seat whose harness dispatches its own hooks for the
-    /// same AgentSession (Factory's) lands on this ref too, so a session keeps one record however
-    /// it is reached.
-    pub(super) fn lifecycle_ref(&self, provider: &str, session: &ResourceRef) -> String {
-        let harness = provider_named(&self.home, provider)
-            .ok()
-            .flatten()
-            .and_then(|row| row.from_profile)
-            .unwrap_or_else(|| provider.to_owned());
-        aikit_adapters::central_temporal::session_ref(
-            crate::client::lifecycle_client(&harness),
-            session.as_str(),
-        )
+/// The record a session's first start chooses: `aikit:session:<client>:<agent session>`, the
+/// client being the harness its provider runs (its profile, else the provider itself), spelt as
+/// that harness's hooks spell it ([`crate::client::lifecycle_client`]). It is kept with the
+/// session's binding from then on, and handed to the body as `AIKIT_SESSION_LIFECYCLE_REF`, so the
+/// body's own hooks record its start and end on the same record (ai-kit#640).
+pub(super) fn first_lifecycle_ref(provider: &EncounterProvider, session: &ResourceRef) -> String {
+    let harness = provider.from_profile.as_deref().unwrap_or(&provider.id);
+    aikit_adapters::central_temporal::session_ref(
+        crate::client::lifecycle_client(harness),
+        session.as_str(),
+    )
+}
+
+/// Whether the record `session_ref` names has a start with no end yet. A record never started is
+/// not running.
+fn lifecycle_running(home: &AikitHome, session_ref: &str) -> Result<bool> {
+    let id = crate::session_lifecycle_ops::harness_session(session_ref)?;
+    match home.session_lifecycle_history(&id) {
+        Ok(history) => Ok(!matches!(
+            history.last().map(|event| event.kind),
+            Some(SessionLifecycleEventKind::SessionEnded | SessionLifecycleEventKind::Cancelled)
+        )),
+        Err(unknown) if unknown.code() == "session_lifecycle.unknown_session" => Ok(false),
+        Err(failure) => Err(failure),
     }
 }
 
@@ -427,12 +490,75 @@ impl Drop for OwnedChildWatcher {
 }
 
 #[cfg(test)]
+impl EncounterService {
+    /// Hold each native open of this service at its admitted opening lease, before it reserves or
+    /// launches anything: `arrived` hears an open reach it, and each `()` sent on the answer lets one
+    /// open go on. A scheduling checkpoint only; it supplies no native answer.
+    pub(crate) fn hold_opens_at_their_lease(
+        &self,
+    ) -> (
+        std::sync::mpsc::Receiver<Instant>,
+        std::sync::mpsc::Sender<()>,
+    ) {
+        let (reached, arrived) = std::sync::mpsc::channel();
+        let (release, proceed) = std::sync::mpsc::channel();
+        *self
+            .native_validation_test_barrier
+            .lock()
+            .expect("the test checkpoint") = Some(Arc::new(NativePublicationTestCheckpoint {
+            reached,
+            proceed: Mutex::new(proceed),
+        }));
+        (arrived, release)
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use aikit_core::session_space_application::{
         SessionSpaceAgentAttachmentIntent, SessionSpaceMutation,
     };
     use std::process::Command;
+
+    /// ai-kit#640 (R640-3): a session whose binding predates the kept ref is named by the provider it
+    /// ran, as that provider reads now. A provider that cannot be read refuses the End naming why; the
+    /// End never ends a record named by a guess.
+    #[test]
+    fn an_end_whose_provider_cannot_be_read_is_refused_naming_why() {
+        let directory = tempfile::tempdir().unwrap();
+        let home = AikitHome::at(directory.path().join("home"));
+        let service = EncounterService::new(home.clone()).unwrap();
+        let session = ResourceRef::parse("agent-session/kept-before").unwrap();
+        service
+            .store
+            .append(
+                &session,
+                &json!({"kind": "binding", "provider": "kept-before", "connection_generation": "generation-1", "native_session_id": "native-1"}),
+            )
+            .unwrap();
+        let providers = home.state().join("encounter-providers");
+        std::fs::create_dir_all(&providers).unwrap();
+        std::fs::write(providers.join("unreadable.json"), b"{ not a provider").unwrap();
+        let refused = service
+            .apply(EncounterRequest::End {
+                agent_session: session.clone(),
+            })
+            .unwrap_err();
+        assert!(
+            refused.to_string().contains("unreadable.json"),
+            "the End names the provider it could not read: {refused}"
+        );
+        let view = service.session_lifecycle(&session).unwrap();
+        assert!(view["session_ref"].is_null(), "{view}");
+        assert!(view["running"].is_null(), "{view}");
+        assert!(
+            view["unread"]["message"]
+                .as_str()
+                .is_some_and(|why| why.contains("unreadable.json")),
+            "{view}"
+        );
+    }
     #[test]
     #[ignore = "requires exact installed AIKIT_CAW_PI_BIN; actual Pi plus OS child-channel writer, never prompts"]
     fn actual_pi_release_joins_owned_reader_and_retains_late_channel_bytes() {

@@ -806,3 +806,225 @@ fn an_encounter_session_starts_on_its_open_and_ends_once_on_its_end() {
         .unwrap();
     assert_eq!(shutdown["shutdown"], json!(true));
 }
+
+/// The `aikit.session.end` control a session's view offers.
+fn end_control(view: &Value) -> Value {
+    view["actions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|action| action["ref"] == "aikit.session.end")
+        .cloned()
+        .unwrap_or_else(|| panic!("no End control: {view}"))
+}
+
+fn view_of(service: &EncounterService, session: &ResourceRef) -> Value {
+    service
+        .apply(EncounterRequest::View {
+            agent_session: session.clone(),
+            before: None,
+            after: None,
+        })
+        .unwrap()
+}
+
+/// The kinds of the events the record `session_ref` names keeps, none for a record never started.
+fn record_of(
+    home: &AikitHome,
+    session_ref: &str,
+) -> Vec<aikit_core::session_lifecycle::SessionLifecycleEventKind> {
+    use crate::session_lifecycle_ops::{harness_session, SessionLifecycleServiceOps};
+    home.session_lifecycle_history(&harness_session(session_ref).unwrap())
+        .map(|history| history.iter().map(|event| event.kind).collect())
+        .unwrap_or_default()
+}
+
+/// ai-kit#640 (R640-1): an End and an open of one session go one at a time. While a reconnect is
+/// under way (held at its opening lease, before it reserves or launches anything) the view's End is
+/// off, saying why, and an End is refused in words; the reconnect then answers, and the session runs
+/// in its record as in its body. Unfenced, the End closed the record while the reconnect brought the
+/// body back.
+#[test]
+fn an_end_waits_for_an_open_under_way_so_the_record_keeps_with_the_body() {
+    use aikit_core::session_lifecycle::SessionLifecycleEventKind::{SessionEnded, SessionStarted};
+    let world = QueueWorld::new();
+    let (space, session) = world.attach("fenced");
+    let service = std::sync::Arc::new(EncounterService::new(world.home.clone()).unwrap());
+    let session_ref = "aikit:session:fenced:agent-session/fenced";
+    let opened = world.open(&service, &space, &session, "fenced");
+    assert_eq!(opened["lifecycle"]["start"], "first", "{opened}");
+    service
+        .apply(EncounterRequest::ReleaseNative {
+            agent_session: session.clone(),
+            expected_native_session_id: opened["native_session_id"].as_str().unwrap().to_owned(),
+            expected_generation: opened["connection_generation"].as_str().unwrap().to_owned(),
+        })
+        .unwrap();
+
+    let (arrived, release) = service.hold_opens_at_their_lease();
+    let reconnecting = {
+        let (service, space, session, cwd) = (
+            service.clone(),
+            space.clone(),
+            session.clone(),
+            world.cwd.clone(),
+        );
+        std::thread::spawn(move || {
+            service.apply(EncounterRequest::Reconnect {
+                space,
+                agent_session: session,
+                provider: "fenced".into(),
+                cwd,
+            })
+        })
+    };
+    arrived
+        .recv_timeout(Duration::from_secs(10))
+        .expect("the reconnect reached its opening lease");
+    let opening = view_of(&service, &session);
+    let end = end_control(&opening);
+    assert_eq!(end["enabled"], false, "{opening}");
+    assert!(
+        end["reason"]
+            .as_str()
+            .is_some_and(|why| why.contains("under way")),
+        "{end}"
+    );
+    let refused = service
+        .apply(EncounterRequest::End {
+            agent_session: session.clone(),
+        })
+        .map(|answer| answer.to_string())
+        .unwrap_err();
+    assert_eq!(
+        refused.code(),
+        "encounter.native_open_in_progress",
+        "{refused}"
+    );
+    assert!(refused.message().contains("under way"), "{refused}");
+    release.send(()).unwrap();
+    let reconnected = reconnecting
+        .join()
+        .unwrap()
+        .map_err(|failure| failure.to_string())
+        .unwrap();
+    assert_eq!(
+        reconnected["lifecycle"],
+        json!({"session_ref": session_ref, "start": "replayed"}),
+        "{reconnected}"
+    );
+    assert_eq!(record_of(&world.home, session_ref), [SessionStarted]);
+    let live = view_of(&service, &session);
+    assert_eq!(live["connection"]["resident"], true, "{live}");
+    assert_eq!(live["lifecycle"]["running"], true, "{live}");
+    assert_eq!(end_control(&live)["enabled"], true, "{live}");
+
+    // Once the open has answered, the End ends both.
+    let ended = service
+        .apply(EncounterRequest::End {
+            agent_session: session.clone(),
+        })
+        .unwrap();
+    assert_eq!(ended["ended"], true, "{ended}");
+    assert_eq!(
+        record_of(&world.home, session_ref),
+        [SessionStarted, SessionEnded]
+    );
+    assert_eq!(view_of(&service, &session)["connection"]["resident"], false);
+    let shutdown = service
+        .apply(EncounterRequest::Shutdown {
+            expected_pid: std::process::id(),
+        })
+        .unwrap();
+    assert_eq!(shutdown["shutdown"], json!(true));
+}
+
+/// ai-kit#640 (R640-3): the record a session's start was kept under is the one its binding keeps. Its
+/// provider configured anew after the open (here as one derived from the claude-code profile, whose
+/// hooks spell another client) moves neither the view's record nor the End's.
+#[test]
+fn a_session_keeps_the_record_its_start_chose_when_its_provider_changes() {
+    use aikit_core::session_lifecycle::SessionLifecycleEventKind::{SessionEnded, SessionStarted};
+    let world = QueueWorld::new();
+    let (space, session) = world.attach("moved");
+    let service = EncounterService::new(world.home.clone()).unwrap();
+    let session_ref = "aikit:session:moved:agent-session/moved";
+    let opened = world.open(&service, &space, &session, "moved");
+    assert_eq!(
+        opened["lifecycle"],
+        json!({"session_ref": session_ref, "start": "first"}),
+        "{opened}"
+    );
+    EncounterService::configure(
+        &world.home,
+        EncounterProvider {
+            protocol: EncounterProtocol::Acp,
+            id: "moved".into(),
+            label: "The same id, now derived from a harness profile".into(),
+            argv: Vec::new(),
+            argv_fallback: Vec::new(),
+            env: Default::default(),
+            cwd: None,
+            from_profile: Some("claude-code".into()),
+            required_context: None,
+            model_policy: None,
+            body_ref: None,
+            body_revision: None,
+            now_context: None,
+        },
+    )
+    .unwrap();
+    let live = view_of(&service, &session);
+    assert_eq!(
+        live["lifecycle"],
+        json!({"session_ref": session_ref, "running": true}),
+        "{live}"
+    );
+    let ended = service
+        .apply(EncounterRequest::End {
+            agent_session: session.clone(),
+        })
+        .unwrap();
+    assert_eq!(ended["session_ref"], session_ref, "{ended}");
+    assert_eq!(ended["ended"], true, "{ended}");
+    assert_eq!(
+        record_of(&world.home, session_ref),
+        [SessionStarted, SessionEnded]
+    );
+    assert!(record_of(&world.home, "aikit:session:claude:agent-session/moved").is_empty());
+    let shutdown = service
+        .apply(EncounterRequest::Shutdown {
+            expected_pid: std::process::id(),
+        })
+        .unwrap();
+    assert_eq!(shutdown["shutdown"], json!(true));
+}
+
+/// ai-kit#640 (R640-2): the body an open launches is handed its session's record
+/// (`AIKIT_SESSION_LIFECYCLE_REF`), so the body's own hooks record its start and end there, never on
+/// a second record under the harness's own id. The fixture writes what it was handed to its log.
+#[test]
+fn the_body_an_open_launches_is_handed_its_sessions_record() {
+    let world = QueueWorld::new();
+    let (space, session) = world.attach("handed");
+    let service = EncounterService::new(world.home.clone()).unwrap();
+    world.open(&service, &space, &session, "handed");
+    let handed: Vec<Value> = fs::read_to_string(world.cwd.join("handed.log"))
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str::<Value>(line).unwrap())
+        .filter(|line| line["method"] == "fixture/environment")
+        .collect();
+    assert_eq!(
+        handed,
+        [
+            json!({"method": "fixture/environment", "AIKIT_SESSION_LIFECYCLE_REF": "aikit:session:handed:agent-session/handed"})
+        ]
+    );
+    let shutdown = service
+        .apply(EncounterRequest::Shutdown {
+            expected_pid: std::process::id(),
+        })
+        .unwrap();
+    assert_eq!(shutdown["shutdown"], json!(true));
+}
