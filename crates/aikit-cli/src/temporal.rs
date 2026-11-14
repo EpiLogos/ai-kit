@@ -11,11 +11,12 @@
 //! prompt-turn floor at all — its lean entry, Refocus and `aikit whoami` carry
 //! orientation, so no historical NOW strap rides its turns.
 //!
-//! A session makes its own NOW (O-I #1016, [`session_boundary`]): its start is
-//! recorded in AIKit's lifecycle and opens one NOW for it in Central; its end
-//! is recorded and closes that NOW, and a resume re-enters it. The ground then
-//! names the session's own NOW and scratch place, and no other session's NOW
-//! items.
+//! A session keeps its own record (O-I #1016, [`session_boundary`]): its start
+//! and end are recorded in AIKit's lifecycle. Where its caller can close a NOW,
+//! the start also opens one for it in Central, its end closes that NOW, and a
+//! resume re-enters it; the ground then names the session's own NOW and scratch
+//! place, and no other session's NOW items. The hook cannot close one yet, so
+//! it opens none.
 
 use std::path::{Path, PathBuf};
 
@@ -268,11 +269,12 @@ pub struct HeldNow {
 /// it was opened. `world` is `None` outside any Central world: the lifecycle
 /// is still recorded, and there is no NOW.
 ///
-/// A session opens or re-enters a NOW only when it `can_close` one: its
-/// process holds the native credential Central closes a NOW on
-/// ([`holds_native_credential`]). Allocating is open to anyone, so without
-/// that credential every session would leave a NOW open for good. Such a
-/// session still records its start and end, and asks Central for nothing.
+/// A session opens or re-enters a NOW only when its caller `can_close` one:
+/// Central closes a NOW only for a caller it authenticates, while allocating
+/// is open to anyone, so a session that cannot close would leave its NOW open
+/// for good. Such a session still records its start and end, and asks Central
+/// for nothing. The hook passes `false`: what authority a hook may hold is
+/// O-I #1016's to decide.
 pub fn session_boundary<R: CommandRunner>(
     decision: &mut HookDecision,
     event: &HookEvent,
@@ -375,8 +377,8 @@ pub fn session_boundary<R: CommandRunner>(
     if held.as_ref().is_some_and(|held| held.closed) {
         return;
     }
-    // Without the credential this session opened nothing to look for. A NOW
-    // it holds from a start that had one is still closed, or warned of.
+    // A session that cannot close a NOW opened nothing to look for. A NOW it
+    // holds from a start that could is still closed, or warned of.
     if held.is_none() && !can_close {
         return;
     }
@@ -424,13 +426,6 @@ pub fn session_boundary<R: CommandRunner>(
 /// (`aikit inhabit` exports `OI_POSITION_REF` into the harness).
 pub fn process_is_occupied() -> bool {
     std::env::var_os("OI_POSITION_REF").is_some_and(|value| !value.is_empty())
-}
-
-/// Whether this process holds the native credential Central authenticates a
-/// NOW's lifecycle on (`CENTRAL_NATIVE_TOKEN`, which every `ctrl` it starts
-/// inherits). Anyone may allocate a NOW; only that credential closes one.
-pub fn holds_native_credential() -> bool {
-    std::env::var_os("CENTRAL_NATIVE_TOKEN").is_some_and(|value| !value.is_empty())
 }
 
 /// Resolve the Central root without teaching AIKit Central's internal file
@@ -1124,7 +1119,7 @@ mod tests {
     }
 
     /// One dispatch's floor, in the order `hook::dispatch_with_entry` runs it,
-    /// by a session whose process holds the native credential.
+    /// by a session whose caller can close a NOW.
     fn dispatch(
         event: &HookEvent,
         world: Option<&SessionWorld>,
@@ -1135,8 +1130,8 @@ mod tests {
         dispatch_holding(event, world, home, ledger, runner, true)
     }
 
-    /// [`dispatch`], by a session whose process holds the native credential
-    /// (`can_close`) or not.
+    /// [`dispatch`], by a session whose caller can close a NOW (`can_close`)
+    /// or not.
     fn dispatch_holding(
         event: &HookEvent,
         world: Option<&SessionWorld>,
@@ -1231,7 +1226,7 @@ mod tests {
     }
 
     #[test]
-    fn a_session_without_the_native_credential_records_its_lifecycle_and_opens_no_now() {
+    fn a_session_that_cannot_close_a_now_records_its_lifecycle_and_opens_none() {
         let temp = tempfile::tempdir().unwrap();
         let home = AikitHome::at(temp.path());
         let ledger = FloorLedger::in_state(&home.state());
@@ -1246,9 +1241,8 @@ mod tests {
         assert!(started.allowed);
         assert!(started.warnings.is_empty(), "{:?}", started.warnings);
 
-        // The start is recorded, and Central is asked for no NOW: closing one
-        // needs the credential this session does not hold, so it would stay
-        // open for good.
+        // The start is recorded, and Central is asked for no NOW: this
+        // session could not close one, so it would stay open for good.
         let session = harness_session(REF).unwrap();
         assert_eq!(home.session_lifecycle_history(&session).unwrap().len(), 1);
         for action in ["central.now.allocate", "central.now.lifecycle"] {

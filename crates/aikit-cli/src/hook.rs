@@ -109,8 +109,10 @@ pub fn dispatch_with_entry(
     // budget and becomes a warning — never a stalled prompt.
     let runner = SystemRunner::probe();
     // The session's own record (O-I #1016): its start and end land in AIKit's
-    // lifecycle and open and close its NOW in Central, before the floor names
-    // that NOW.
+    // lifecycle. It opens no NOW in Central yet (`can_close` is false): no
+    // hook holds an authority that can close one, and allocating writes
+    // tracked files into the world's ground. What a hook may hold is #1016's
+    // to decide.
     crate::temporal::session_boundary(
         &mut decision,
         event,
@@ -118,7 +120,7 @@ pub fn dispatch_with_entry(
         home.as_ref(),
         floor_ledger.as_ref(),
         &runner,
-        crate::temporal::holds_native_credential(),
+        false,
     );
     crate::temporal::session_floor(
         &mut decision,
