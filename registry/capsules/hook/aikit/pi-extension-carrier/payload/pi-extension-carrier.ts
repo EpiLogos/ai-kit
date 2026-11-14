@@ -293,6 +293,27 @@ function sessionIdOf(ctx: {
 }
 
 /**
+ * Whether the session's branch already holds `text` as its latest start
+ * ground: the last custom message the carrier appended at a session start
+ * (its details mark it), compared by content. An unreadable branch holds
+ * nothing, so the ground is delivered.
+ */
+function startGroundHeld(ctx: any, text: string): boolean {
+  try {
+    const entries: any[] = ctx?.sessionManager?.getBranch?.() || ctx?.sessionManager?.getEntries?.() || [];
+    for (let at = entries.length - 1; at >= 0; at--) {
+      const entry = entries[at];
+      if (entry?.type === "custom_message" && entry.customType === INJECTED_MESSAGE_TYPE && entry.details?.start_ground === true) {
+        return entry.content === text;
+      }
+    }
+  } catch {
+    // fall through: deliver
+  }
+  return false;
+}
+
+/**
  * Show a notice where pi has a UI. Fire-and-forget; never awaited, never
  * allowed to throw into the handler.
  */
@@ -333,17 +354,27 @@ export default function (pi: {
   // session_start runs, so a message sent without a turn is appended to the
   // session there and then (AgentSession.sendCustomMessage), and is in its
   // context from its first entry, persisted with it and read back by
-  // `get_messages`. In RPC mode session_start fires inside bindExtensions,
-  // before rpc-mode subscribes its event stream, so the append writes nothing
-  // unasked to an RPC client. Where pi offers no sendMessage, or it throws,
-  // the ground waits for the next run like any other injection.
-  const deliverAtStart = (text: string) => {
-    if (!text || !text.trim()) {
+  // `get_messages`. At startup in RPC mode session_start fires inside
+  // bindExtensions, before rpc-mode subscribes its event stream, so the
+  // append writes nothing unasked to an RPC client. A ground the session
+  // already holds as its latest is not appended again: pi rebinds twice on
+  // new_session, switch_session, fork and clone (the second time with the
+  // RPC stream subscribed), and a reload or a resume on the same Day starts
+  // with the ground it holds. `triggerTurn: false` keeps a session_start that
+  // comes mid-run (a reload from an extension command) from steering the
+  // run: pi appends the ground at the end of the turn instead. Where pi
+  // offers no sendMessage, or it throws, the ground waits for the next run
+  // like any other injection.
+  const deliverAtStart = (text: string, ctx: any) => {
+    if (!text || !text.trim() || startGroundHeld(ctx, text)) {
       return;
     }
     if (typeof pi.sendMessage === "function") {
       try {
-        pi.sendMessage({ customType: INJECTED_MESSAGE_TYPE, content: text, display: false });
+        pi.sendMessage(
+          { customType: INJECTED_MESSAGE_TYPE, content: text, display: false, details: { start_ground: true } },
+          { triggerTurn: false },
+        );
         return;
       } catch {
         // fall through: the next run carries it
@@ -358,7 +389,7 @@ export default function (pi: {
     peers.start(ctx);
     const decision = dispatchAikit("SessionStart", jsonSafe({ ...eventObject, cwd: cwdOf(ctx), session_id: sessionIdOf(ctx) }));
     if (decision) {
-      deliverAtStart(decision.injected);
+      deliverAtStart(decision.injected, ctx);
     }
     // session_start has no deny channel in pi; a denial is recorded by the
     // dispatcher and can never stop a session here.
