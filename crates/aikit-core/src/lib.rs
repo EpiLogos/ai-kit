@@ -245,12 +245,12 @@ pub use harness_admission::{
     HarnessLifecyclePhase, HARNESS_ADAPTER_AUTHORING_SKILL, HARNESS_ADAPTER_SDK_VERSION,
 };
 pub use harness_profile::{
-    ActivationEffectName, GuidanceLayer, HarnessPresence, HarnessProfile, HarnessProfileError,
-    HookObserveDeclaration, HookProjectDeclaration, HooksLayer, LayerPosture, MergeGrammar,
-    MergePolicy, ModelDispatchPosture, SessionCapabilityFlags, SessionProtocol, SettingsLayer,
-    SkillsLayer, SkillsObserveDeclaration, ToolObserveDeclaration, ToolProjectDeclaration,
-    ToolsLayer, TrustSettingDeclaration, TrustSettingScope, TrustValueKind, TrustValueSchema,
-    HARNESS_PROFILE_SCHEMA,
+    ActivationEffectName, GuidanceInProject, GuidanceLayer, GuidanceReach, HarnessPresence,
+    HarnessProfile, HarnessProfileError, HookObserveDeclaration, HookProjectDeclaration,
+    HooksLayer, LayerPosture, MergeGrammar, MergePolicy, ModelDispatchPosture,
+    SessionCapabilityFlags, SessionProtocol, SettingsLayer, SkillsLayer, SkillsObserveDeclaration,
+    ToolObserveDeclaration, ToolProjectDeclaration, ToolsLayer, TrustSettingDeclaration,
+    TrustSettingScope, TrustValueKind, TrustValueSchema, HARNESS_PROFILE_SCHEMA,
 };
 pub use hooks::{
     build_chains, matches as hook_matches, BypassScope, BypassToken, Denial, Dispatcher,

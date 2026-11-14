@@ -1677,8 +1677,9 @@ impl Carries {
 
     /// Lay the row's carries on `row`: `model_default` (the default's model id, its name and native provider; null where AIKit
     /// holds none and the harness opens with its own model), `skill_sets`, `skills` (by name, only for an adapter that projects
-    /// skills natively), `guidance` (the files its profile names; none without a profile) and, where AIKit could not read the
-    /// sets or the defaults, `carries_reason` in AIKit's words.
+    /// skills natively), `guidance` (the files its profile names; none without a profile), `project_guidance` (the files it
+    /// reads in the project it works in, `{files, reach}` with reach `workdir`, `repository` or `ancestors`; null where its
+    /// profile names none) and, where AIKit could not read the sets or the defaults, `carries_reason` in AIKit's words.
     fn lay(
         &self,
         row: &mut serde_json::Value,
@@ -1720,14 +1721,22 @@ impl Carries {
             Vec::new()
         };
         skills.sort_unstable();
-        let guidance: Vec<&str> = aikit_adapters::profiles::for_slug(slug)
-            .and_then(|profile| profile.guidance.as_ref())
+        let layer =
+            aikit_adapters::profiles::for_slug(slug).and_then(|profile| profile.guidance.as_ref());
+        let guidance: Vec<&str> = layer
             .map(|layer| layer.observe.iter().map(String::as_str).collect())
             .unwrap_or_default();
+        let project_guidance = layer
+            .and_then(|layer| layer.in_project.as_ref())
+            .map(|in_project| {
+                serde_json::json!({"files": in_project.files, "reach": in_project.reach.as_str()})
+            })
+            .unwrap_or(serde_json::Value::Null);
         row.insert("model_default".into(), model);
         row.insert("skill_sets".into(), sets);
         row.insert("skills".into(), serde_json::json!(skills));
         row.insert("guidance".into(), serde_json::json!(guidance));
+        row.insert("project_guidance".into(), project_guidance);
         if !reasons.is_empty() {
             row.insert("carries_reason".into(), reasons.join("; ").into());
         }

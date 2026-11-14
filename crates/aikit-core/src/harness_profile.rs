@@ -151,13 +151,89 @@ pub struct SkillsObserveDeclaration {
 
 /// Guidance files (AGENTS.md, rules files) the harness reads. Detection only;
 /// the projection of generated guidance stays with the existing generation
-/// path.
+/// path. `observe` names files by where they are (home-anchored or as the
+/// census recorded them); `in-project` names the files the harness looks for
+/// in the project it works in, and how far up it looks.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case", deny_unknown_fields)]
 pub struct GuidanceLayer {
     pub posture: LayerPosture,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub observe: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub in_project: Option<GuidanceInProject>,
+}
+
+/// The instruction files a harness reads in the project it works in: their
+/// names, in the order it prefers them within one folder, and the folders it
+/// looks in. Read, never written: the floor in those files is the person's or
+/// Central's, not AIKit's.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case", deny_unknown_fields)]
+pub struct GuidanceInProject {
+    pub files: Vec<String>,
+    pub reach: GuidanceReach,
+}
+
+/// How far up from its working folder a harness looks for its instruction
+/// files.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum GuidanceReach {
+    /// The working folder only.
+    Workdir,
+    /// From the repository's root (the nearest folder above holding `.git`)
+    /// down to the working folder.
+    Repository,
+    /// The working folder and every folder above it.
+    Ancestors,
+}
+
+impl GuidanceReach {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            GuidanceReach::Workdir => "workdir",
+            GuidanceReach::Repository => "repository",
+            GuidanceReach::Ancestors => "ancestors",
+        }
+    }
+}
+
+/// An `in-project` declaration names at least one file, each a plain name
+/// relative to the folder it is read in: not home-anchored, not absolute,
+/// never above that folder.
+fn validate_guidance_in_project(in_project: &GuidanceInProject) -> Result<(), HarnessProfileError> {
+    if in_project.files.is_empty() {
+        return Err(HarnessProfileError::new(
+            "harness_profile.guidance_in_project_empty",
+            "the guidance layer's `in-project` names no file; name the instruction files the \
+             harness reads in a project, or remove `in-project`",
+        )
+        .with("layer", "guidance")
+        .with("field", "in-project.files"));
+    }
+    for file in &in_project.files {
+        let relative = !file.trim().is_empty()
+            && !file.starts_with('~')
+            && !std::path::Path::new(file).is_absolute()
+            && !std::path::Path::new(file)
+                .components()
+                .any(|part| matches!(part, std::path::Component::ParentDir));
+        if !relative {
+            return Err(HarnessProfileError::new(
+                "harness_profile.guidance_in_project_path",
+                format!(
+                    "the guidance layer's `in-project` file {file:?} is not a name relative to \
+                     the folder it is read in; write it as the harness looks for it in a \
+                     project (for example \"AGENTS.md\"), and name a home file in `observe`"
+                ),
+            )
+            .with("layer", "guidance")
+            .with("field", "in-project.files")
+            .with("file", file.clone()));
+        }
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -745,6 +821,14 @@ impl HarnessProfile {
         }
         if let Some(sessions) = &self.sessions {
             validate_sessions_connect(sessions)?;
+        }
+        if let Some(in_project) = self
+            .guidance
+            .as_ref()
+            .and_then(|guidance| guidance.in_project.as_ref())
+        {
+            validate_guidance_in_project(in_project)
+                .map_err(|error| error.with("slug", self.slug.clone()))?;
         }
         Ok(())
     }
@@ -1869,6 +1953,56 @@ capabilities = { ordered-streaming = true, cancellation = true }
         assert!(
             error.to_string().contains("argv-fallback[0]"),
             "the refusal must name the offending variant: {error}"
+        );
+    }
+
+    #[test]
+    fn guidance_in_project_names_relative_files_and_parses_its_reach() {
+        let with = |in_project: &str| -> Result<HarnessProfile, String> {
+            let document = format!(
+                "schema = \"aikit.harness-profile/v1\"\nslug = \"pi\"\nedition = \"cli\"\n\n\
+                 [guidance]\nposture = \"observed\"\nobserve = [\"~/.pi/agent/AGENTS.md\"]\n\
+                 in-project = {in_project}\n"
+            );
+            let profile: HarnessProfile = toml::from_str(&document).map_err(|e| e.to_string())?;
+            profile.validate().map_err(|e| e.code().to_owned())?;
+            Ok(profile)
+        };
+        let admitted = with(r#"{ files = ["AGENTS.md", "CLAUDE.md"], reach = "ancestors" }"#)
+            .expect("plain names admit");
+        let declared = admitted.guidance.unwrap().in_project.unwrap();
+        assert_eq!(
+            declared.files,
+            vec!["AGENTS.md".to_owned(), "CLAUDE.md".to_owned()]
+        );
+        assert_eq!(declared.reach, GuidanceReach::Ancestors);
+        assert_eq!(
+            with(r#"{ files = [".github/copilot-instructions.md"], reach = "repository" }"#)
+                .map(|profile| profile.guidance.unwrap().in_project.unwrap().reach),
+            Ok(GuidanceReach::Repository),
+            "a name below the folder it is read in is relative"
+        );
+        for refused in [
+            r#"{ files = ["~/.pi/agent/AGENTS.md"], reach = "ancestors" }"#,
+            r#"{ files = ["/etc/AGENTS.md"], reach = "ancestors" }"#,
+            r#"{ files = ["../AGENTS.md"], reach = "workdir" }"#,
+            r#"{ files = [""], reach = "workdir" }"#,
+        ] {
+            assert_eq!(
+                with(refused).err().as_deref(),
+                Some("harness_profile.guidance_in_project_path"),
+                "{refused} is not a name read in a project"
+            );
+        }
+        assert_eq!(
+            with(r#"{ files = [], reach = "workdir" }"#)
+                .err()
+                .as_deref(),
+            Some("harness_profile.guidance_in_project_empty")
+        );
+        assert!(
+            with(r#"{ files = ["AGENTS.md"], reach = "everywhere" }"#).is_err(),
+            "a reach other than workdir, repository or ancestors does not parse"
         );
     }
 }

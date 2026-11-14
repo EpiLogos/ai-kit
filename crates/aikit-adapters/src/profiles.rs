@@ -93,6 +93,11 @@ observe = { paths = ["~/.claude/skills"] }
 [guidance]
 posture = "observed"
 observe = ["~/.claude/CLAUDE.md"]
+# In a project Claude Code reads CLAUDE.md in its working folder and every
+# folder above it (its memory docs: it recurses up to, not including, the
+# root); observed 14 Nov 2026 in a session working in a repository, which
+# loaded the CLAUDE.md of a folder above the repository's root.
+in-project = { files = ["CLAUDE.md"], reach = "ancestors" }
 
 [hooks]
 posture = "managed"
@@ -177,6 +182,10 @@ observe = { paths = ["~/.codex/skills"] }
 [guidance]
 posture = "observed"
 observe = ["~/.codex/AGENTS.md"]
+# In a project codex reads AGENTS.md from the project's root down to its
+# working folder; the root is the nearest folder above holding one of
+# `project_root_markers`, `[".git"]` by default (codex-cli 0.155.1).
+in-project = { files = ["AGENTS.md"], reach = "repository" }
 
 [hooks]
 posture = "managed"
@@ -336,6 +345,9 @@ shared-tree = "Reloads skills on /reload; isolated tree required for isolation."
 [guidance]
 posture = "observed"
 observe = ["~/.pi/agent/AGENTS.md"]
+# pi 1.5.0 docs/configuration.md "Context files": loaded from the agent
+# directory, the working directory and its parent directories.
+in-project = { files = ["AGENTS.md", "CLAUDE.md"], reach = "ancestors" }
 
 [hooks]
 posture = "managed"
@@ -382,6 +394,10 @@ observe = { paths = ["~/.gemini/skills"] }
 [guidance]
 posture = "observed"
 observe = ["~/.gemini/GEMINI.md"]
+# gemini-cli docs (cli/gemini-md.md) [VD]: GEMINI.md in the working folder
+# and each folder above it, up to the project's root (.git) or the home
+# folder.
+in-project = { files = ["GEMINI.md"], reach = "repository" }
 
 [tools]
 posture = "observed"
@@ -429,6 +445,13 @@ posture = "brokered"
 shared-tree = "No skill projection; a generated project AGENTS.md lists composed capsules."
 observe = { paths = ["~/.kimi/skills"] }
 
+[guidance]
+posture = "observed"
+# kimi 1.6 (kimi_cli/soul/agent.py load_agents_md): AGENTS.md, else
+# agents.md, in its working folder only; its system prompt names it
+# `${KIMI_WORK_DIR}/AGENTS.md`.
+in-project = { files = ["AGENTS.md"], reach = "workdir" }
+
 [tools]
 posture = "observed"
 observe = [{ path = "~/.kimi/mcp.json", collection = "mcpServers" }]
@@ -464,6 +487,13 @@ config-dir = "~/.openclaw"
 posture = "brokered"
 shared-tree = "Per-agent workspaces carry authored identity and memory files (SOUL.md, MEMORY.md); an unmanaged projection write would violate authored-file ownership."
 observe = { paths = ["~/.openclaw/workspace/AGENTS.md"] }
+
+[guidance]
+posture = "observed"
+# openclaw 2026.1.30 (dist/agents/workspace.js DEFAULT_AGENTS_FILENAME)
+# reads AGENTS.md in its own workspace (~/.openclaw/workspace, or
+# workspace-<profile>), never in a project it works on: no `in-project`.
+observe = ["~/.openclaw/workspace/AGENTS.md"]
 
 [tools]
 posture = "managed"
@@ -892,6 +922,10 @@ observe = { paths = ["~/.config/opencode/skills"] }
 [guidance]
 posture = "observed"
 observe = ["~/.config/opencode/AGENTS.md"]
+# opencode 2.0.32 (ConfigInstructionPlugin.projectSource): AGENTS.md in the
+# working folder and each folder above it, up to the home folder when it
+# works under it, else up to the project's root.
+in-project = { files = ["AGENTS.md"], reach = "ancestors" }
 
 [tools]
 posture = "observed"
@@ -1118,6 +1152,28 @@ observe = [
 posture = "observed"
 protocol = "process"
 open-modes = ["create"]
+"#,
+    ),
+    (
+        // prime-agent 0.10.2, installed by its own installer as
+        // ~/.local/bin/prime-agent; Actuation's catalog declares it (slug
+        // `prime`, catalog revision 14). Guidance only: its sessions, models
+        // and tools are not profiled here, and no presence executable is
+        // echoed, so no launch program joins this profile.
+        "prime",
+        r#"
+schema = "aikit.harness-profile/v1"
+slug = "prime"
+edition = "cli"
+
+[guidance]
+posture = "observed"
+# `prime-agent prompt --cwd <dir> --json` (0.10.2, 14 Nov 2026) assembles
+# AGENTS.md from its agent folder and, in a project, one context file per
+# folder (AGENTS.md before CLAUDE.md) from the working folder and every
+# folder above it, past the repository's root; `-nc` disables the discovery.
+observe = ["~/.prime/agent/AGENTS.md"]
+in-project = { files = ["AGENTS.md", "CLAUDE.md"], reach = "ancestors" }
 "#,
     ),
 ];
@@ -1891,5 +1947,70 @@ mod tests {
                 "{target} joins to profile `{slug}` but no embedded profile carries it"
             );
         }
+    }
+
+    #[test]
+    fn guidance_names_the_files_each_harness_reads_in_a_project_and_how_far_up_it_looks() {
+        // O-I #1003 (ai-kit#633): the census reads a world's floor by the files
+        // a harness looks for in a project, never by a home file's basename.
+        // Each declaration is pinned to the evidence its profile cites.
+        use aikit_core::harness_profile::GuidanceReach::{Ancestors, Repository, Workdir};
+        let in_project = |slug: &str| {
+            for_slug(slug)
+                .and_then(|profile| profile.guidance.as_ref())
+                .and_then(|guidance| guidance.in_project.as_ref())
+                .map(|declared| (declared.files.clone(), declared.reach))
+        };
+        let files = |names: &[&str]| {
+            names
+                .iter()
+                .map(|name| (*name).to_owned())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            in_project("claude-code"),
+            Some((files(&["CLAUDE.md"]), Ancestors))
+        );
+        assert_eq!(
+            in_project("codex"),
+            Some((files(&["AGENTS.md"]), Repository))
+        );
+        assert_eq!(
+            in_project("pi"),
+            Some((files(&["AGENTS.md", "CLAUDE.md"]), Ancestors))
+        );
+        assert_eq!(
+            in_project("gemini"),
+            Some((files(&["GEMINI.md"]), Repository))
+        );
+        assert_eq!(
+            in_project("opencode"),
+            Some((files(&["AGENTS.md"]), Ancestors))
+        );
+        assert_eq!(in_project("kimi"), Some((files(&["AGENTS.md"]), Workdir)));
+        assert_eq!(
+            in_project("prime"),
+            Some((files(&["AGENTS.md", "CLAUDE.md"]), Ancestors))
+        );
+        // openclaw reads its own workspace's AGENTS.md and nothing in a project.
+        let openclaw = for_slug("openclaw")
+            .unwrap()
+            .guidance
+            .as_ref()
+            .expect("openclaw declares guidance");
+        assert_eq!(
+            openclaw.observe,
+            vec!["~/.openclaw/workspace/AGENTS.md".to_owned()]
+        );
+        assert!(openclaw.in_project.is_none());
+        // prime's agent folder is its home file; the profile is guidance only and
+        // joins no launch program.
+        let prime = for_slug("prime").unwrap();
+        assert_eq!(
+            prime.guidance.as_ref().unwrap().observe,
+            vec!["~/.prime/agent/AGENTS.md".to_owned()]
+        );
+        assert!(prime.presence.is_none() && prime.sessions.is_none() && prime.models.is_none());
+        assert!(for_argv_program("prime-agent").is_none());
     }
 }

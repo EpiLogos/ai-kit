@@ -227,6 +227,24 @@ pub fn disclose(
         });
     }
     if let Some(guidance) = &profile.guidance {
+        // The files it reads in a project follow its home files, each saying where it looks for them.
+        let in_project = guidance.in_project.iter().flat_map(|in_project| {
+            let detail = match in_project.reach {
+                aikit_core::harness_profile::GuidanceReach::Workdir => {
+                    "read in a project: in the working folder only"
+                }
+                aikit_core::harness_profile::GuidanceReach::Repository => {
+                    "read in a project: from the repository's root down to the working folder"
+                }
+                aikit_core::harness_profile::GuidanceReach::Ancestors => {
+                    "read in a project: in the working folder and every folder above it"
+                }
+            };
+            in_project.files.iter().map(move |file| NativeEntry {
+                name: file.clone(),
+                detail: Some(detail.to_string()),
+            })
+        });
         layers.push(LayerDisclosure {
             layer: "guidance".to_string(),
             posture: guidance.posture,
@@ -237,6 +255,7 @@ pub fn disclose(
                     name: path.clone(),
                     detail: None,
                 })
+                .chain(in_project)
                 .collect(),
             composed: Vec::new(),
             activation: None,
@@ -765,10 +784,20 @@ mod tests {
         let guidance = layer_named("guidance");
         assert_eq!(
             guidance.native,
-            vec![NativeEntry {
-                name: "~/.claude/CLAUDE.md".to_string(),
-                detail: None
-            }]
+            vec![
+                NativeEntry {
+                    name: "~/.claude/CLAUDE.md".to_string(),
+                    detail: None
+                },
+                NativeEntry {
+                    name: "CLAUDE.md".to_string(),
+                    detail: Some(
+                        "read in a project: in the working folder and every folder above it"
+                            .to_string()
+                    ),
+                },
+            ],
+            "the files it reads in a project follow its home file, each saying where it is read"
         );
         let hooks = layer_named("hooks");
         assert_eq!(
