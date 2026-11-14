@@ -201,36 +201,16 @@ pub fn record_harness_start(home: &AikitHome, session_ref: &str) -> Result<Harne
     Ok(found)
 }
 
-/// The lives of the harness session record `session_ref` names (ai-kit#640):
-/// how many starts its lifecycle holds, and whether its last event leaves it
-/// live (neither ended nor cancelled). A record never started has no start and
-/// is not live.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct HarnessLives {
-    pub starts: usize,
-    pub live: bool,
-}
-
-/// Read the lives of the record `session_ref` names ([`HarnessLives`]).
-pub fn harness_session_lives(home: &AikitHome, session_ref: &str) -> Result<HarnessLives> {
+/// Whether the harness session record `session_ref` names has a start with no end yet: its last
+/// event leaves it neither ended nor cancelled. A record never started is not running.
+pub fn harness_session_running(home: &AikitHome, session_ref: &str) -> Result<bool> {
     let session = harness_session(session_ref)?;
     match home.session_lifecycle_history(&session) {
-        Ok(history) => Ok(HarnessLives {
-            starts: history
-                .iter()
-                .filter(|event| event.kind == SessionLifecycleEventKind::SessionStarted)
-                .count(),
-            live: !matches!(
-                history.last().map(|event| event.kind),
-                Some(
-                    SessionLifecycleEventKind::SessionEnded | SessionLifecycleEventKind::Cancelled
-                )
-            ),
-        }),
-        Err(error) if error.code() == "session_lifecycle.unknown_session" => Ok(HarnessLives {
-            starts: 0,
-            live: false,
-        }),
+        Ok(history) => Ok(!matches!(
+            history.last().map(|event| event.kind),
+            Some(SessionLifecycleEventKind::SessionEnded | SessionLifecycleEventKind::Cancelled)
+        )),
+        Err(error) if error.code() == "session_lifecycle.unknown_session" => Ok(false),
         Err(error) => Err(error),
     }
 }

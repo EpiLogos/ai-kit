@@ -358,8 +358,48 @@ impl Drop for StderrCapture {
 
 /// The variable a body AIKit launches for a session reads its session's
 /// lifecycle record from (`aikit:session:<client>:<agent session>`), so the
-/// body's own hooks record its start and end on that record (ai-kit#640).
+/// body's own hooks record its end on that record (ai-kit#640).
 pub const SESSION_LIFECYCLE_REF: &str = "AIKIT_SESSION_LIFECYCLE_REF";
+/// The open that launched the body (that open's connection generation),
+/// handed beside [`SESSION_LIFECYCLE_REF`]: the first session to start under
+/// it holds the record, and any other handed the same open is a harness the
+/// body launched in turn (ai-kit#640).
+pub const SESSION_LIFECYCLE_OPEN: &str = "AIKIT_SESSION_LIFECYCLE_OPEN";
+
+/// What a body AIKit launches for a session is handed of that session's
+/// lifecycle record (ai-kit#640), as [`SESSION_LIFECYCLE_REF`] and
+/// [`SESSION_LIFECYCLE_OPEN`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionLifecycleHandoff {
+    /// The record: `aikit:session:<client>:<agent session>`.
+    pub session_ref: String,
+    /// The open that launched the body: its connection generation.
+    pub open: String,
+}
+
+impl SessionLifecycleHandoff {
+    /// The handoff an environment carries, read through `var`: none unless
+    /// every part of it is set.
+    pub fn from_env(var: impl Fn(&str) -> Option<String>) -> Option<Self> {
+        let part = |name: &str| var(name).filter(|value| !value.is_empty());
+        Some(Self {
+            session_ref: part(SESSION_LIFECYCLE_REF)?,
+            open: part(SESSION_LIFECYCLE_OPEN)?,
+        })
+    }
+
+    /// The handoff this process was launched with ([`Self::from_env`]).
+    pub fn from_process() -> Option<Self> {
+        Self::from_env(|name| std::env::var(name).ok())
+    }
+
+    fn variables(&self) -> [(&'static str, &str); 2] {
+        [
+            (SESSION_LIFECYCLE_REF, self.session_ref.as_str()),
+            (SESSION_LIFECYCLE_OPEN, self.open.as_str()),
+        ]
+    }
+}
 
 /// Scoped final-child environment: the fixed allowlist a provider process
 /// may see, plus the credential variables delivered at launch. `apply` clears
@@ -381,8 +421,9 @@ pub struct ModelEnvironment {
     /// The launching process's environment passes through whole, as with no
     /// environment at all, with only what this one sets added to it.
     inherit: bool,
-    /// The session's lifecycle record, set as [`SESSION_LIFECYCLE_REF`].
-    session_lifecycle_ref: Option<String>,
+    /// The session's lifecycle record and the open that launches the body
+    /// ([`SessionLifecycleHandoff`]).
+    session_lifecycle: Option<SessionLifecycleHandoff>,
 }
 
 impl std::fmt::Debug for ModelEnvironment {
@@ -397,7 +438,7 @@ impl std::fmt::Debug for ModelEnvironment {
             .field("codex_path", &self.codex_path)
             .field("isolated_home", &self.isolated_home)
             .field("inherit", &self.inherit)
-            .field("session_lifecycle_ref", &self.session_lifecycle_ref)
+            .field("session_lifecycle", &self.session_lifecycle)
             .finish()
     }
 }
@@ -428,11 +469,12 @@ impl ModelEnvironment {
         }
     }
 
-    /// The session's lifecycle record the child reads as
-    /// [`SESSION_LIFECYCLE_REF`] (ai-kit#640). A confined launch carries none:
-    /// no AIKit variable reaches it.
-    pub fn with_session_lifecycle_ref(mut self, session_ref: impl Into<String>) -> Self {
-        self.session_lifecycle_ref = Some(session_ref.into());
+    /// The session's lifecycle record and the open launching the body, which
+    /// the child reads as [`SessionLifecycleHandoff`]'s variables
+    /// (ai-kit#640). A confined launch carries none: no AIKit variable
+    /// reaches it.
+    pub fn with_session_lifecycle(mut self, handoff: SessionLifecycleHandoff) -> Self {
+        self.session_lifecycle = Some(handoff);
         self
     }
 
@@ -536,8 +578,8 @@ impl ModelEnvironment {
             if let Some(path) = &self.codex_path {
                 command.env("CODEX_PATH", path);
             }
-            if let Some(session_ref) = &self.session_lifecycle_ref {
-                command.env(SESSION_LIFECYCLE_REF, session_ref);
+            for (name, value) in self.session_lifecycle.iter().flat_map(|h| h.variables()) {
+                command.env(name, value);
             }
             return;
         }
@@ -574,8 +616,9 @@ impl ModelEnvironment {
             "AIKIT_CONTEXT_ID",
             "AIKIT_ISOLATION",
             // A wrapper's final exec hands its harness the record its own
-            // launch was handed.
+            // launch was handed, and the open that launched it.
             SESSION_LIFECYCLE_REF,
+            SESSION_LIFECYCLE_OPEN,
         ] {
             if let Some(value) = ambient(name) {
                 command.env(name, value);
@@ -587,8 +630,9 @@ impl ModelEnvironment {
         if let Some(path) = &self.codex_path {
             command.env("CODEX_PATH", path);
         }
-        if let Some(session_ref) = &self.session_lifecycle_ref {
-            command.env(SESSION_LIFECYCLE_REF, session_ref);
+        // Set whole, over any part the wrapper inherited.
+        for (name, value) in self.session_lifecycle.iter().flat_map(|h| h.variables()) {
+            command.env(name, value);
         }
     }
 }
@@ -1571,55 +1615,86 @@ mod tests {
     }
 
     #[test]
-    fn a_sessions_lifecycle_ref_reaches_every_launch_but_a_confined_one() {
-        // ai-kit#640: the body AIKit launches for a session is handed that session's record.
-        const SESSION: &str = "aikit:session:claude:agent-session/talk";
-        let child = |environment: &ModelEnvironment, ambient: Option<&str>| {
+    fn a_sessions_lifecycle_handoff_reaches_every_launch_but_a_confined_one() {
+        // ai-kit#640: the body AIKit launches for a session is handed that session's record and
+        // the open that launched it.
+        let handoff = |session: &str, open: &str| SessionLifecycleHandoff {
+            session_ref: format!("aikit:session:claude:agent-session/{session}"),
+            open: open.to_owned(),
+        };
+        let child = |environment: &ModelEnvironment, ambient: Option<&SessionLifecycleHandoff>| {
             let mut command = Command::new("sh");
             command
                 .args([
                     "-c",
-                    "printf '%s|%s\\n' \"$AIKIT_SESSION_LIFECYCLE_REF\" \"$AIKIT_INHERITED_PROBE\"",
+                    "printf '%s|%s|%s\\n' \"$AIKIT_SESSION_LIFECYCLE_REF\" \"$AIKIT_SESSION_LIFECYCLE_OPEN\" \"$AIKIT_INHERITED_PROBE\"",
                 ])
                 .env("AIKIT_INHERITED_PROBE", "kept");
             environment.apply_with(&mut command, |name| {
-                ambient
-                    .filter(|_| name == SESSION_LIFECYCLE_REF)
-                    .map(Into::into)
+                ambient.and_then(|handed| {
+                    handed
+                        .variables()
+                        .into_iter()
+                        .find(|(variable, _)| *variable == name)
+                        .map(|(_, value)| value.into())
+                })
             });
             let output = command.output().unwrap();
             assert!(output.status.success());
             String::from_utf8(output.stdout).unwrap()
         };
-        // A launch with no scoped environment keeps its inheritance, the record set beside it.
+        let talk = handoff("talk", "open-1");
+        let ref_ = &talk.session_ref;
+        // A launch with no scoped environment keeps its inheritance, the handoff set beside it.
         assert_eq!(
             child(
-                &ModelEnvironment::inherited().with_session_lifecycle_ref(SESSION),
+                &ModelEnvironment::inherited().with_session_lifecycle(talk.clone()),
                 None
             ),
-            format!("{SESSION}|kept\n")
+            format!("{ref_}|open-1|kept\n")
         );
-        // A scoped launch is set its own record over any it inherited.
+        // A scoped launch is set its own handoff, whole, over any it inherited.
         assert_eq!(
             child(
-                &ModelEnvironment::new().with_session_lifecycle_ref(SESSION),
-                Some("aikit:session:claude:agent-session/another")
+                &ModelEnvironment::new().with_session_lifecycle(talk.clone()),
+                Some(&handoff("another", "open-0"))
             ),
-            format!("{SESSION}|\n")
+            format!("{ref_}|open-1|\n")
         );
-        // A wrapper's final exec passes on the record its own launch was handed.
+        // A wrapper's final exec passes on what its own launch was handed.
         assert_eq!(
-            child(&ModelEnvironment::new(), Some(SESSION)),
-            format!("{SESSION}|\n")
+            child(&ModelEnvironment::new(), Some(&talk)),
+            format!("{ref_}|open-1|\n")
         );
         // A confined launch carries no AIKit variable at all.
         assert_eq!(
             child(
                 &ModelEnvironment::isolated("/nonexistent/empty-home")
-                    .with_session_lifecycle_ref(SESSION),
-                Some(SESSION)
+                    .with_session_lifecycle(talk.clone()),
+                Some(&talk)
             ),
-            "|\n"
+            "||\n"
+        );
+        // A handoff is read whole, or not at all.
+        let read = |pairs: &[(&str, &str)]| {
+            SessionLifecycleHandoff::from_env(|name| {
+                pairs
+                    .iter()
+                    .find(|(variable, _)| *variable == name)
+                    .map(|(_, value)| (*value).to_owned())
+            })
+        };
+        assert_eq!(
+            read(&[
+                (SESSION_LIFECYCLE_REF, ref_),
+                (SESSION_LIFECYCLE_OPEN, "open-1")
+            ]),
+            Some(talk.clone())
+        );
+        assert_eq!(read(&[(SESSION_LIFECYCLE_REF, ref_)]), None);
+        assert_eq!(
+            read(&[(SESSION_LIFECYCLE_REF, ref_), (SESSION_LIFECYCLE_OPEN, "")]),
+            None
         );
     }
 

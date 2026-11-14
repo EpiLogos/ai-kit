@@ -2,9 +2,10 @@
 """Controlled protocol fixture. FIXTURE_REPLY is not a model/harness response."""
 import json, os, sys, threading, time
 mode, log = sys.argv[1:3]
-# The session record the owner hands its body (ai-kit#640), as the body's own hooks would read it.
-if os.environ.get('AIKIT_SESSION_LIFECYCLE_REF'):
-    with open(log,'a',encoding='utf-8') as f: f.write(json.dumps({'method':'fixture/environment','AIKIT_SESSION_LIFECYCLE_REF':os.environ['AIKIT_SESSION_LIFECYCLE_REF']})+'\n')
+# What the owner hands its body of the session's record (ai-kit#640), as the body's own hooks would read it.
+handed = {name: value for name, value in sorted(os.environ.items()) if name.startswith('AIKIT_SESSION_LIFECYCLE_')}
+if handed:
+    with open(log,'a',encoding='utf-8') as f: f.write(json.dumps({'method':'fixture/environment', **handed})+'\n')
 write_lock = threading.Lock()
 pending = {}
 def emit(value):

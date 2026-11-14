@@ -348,7 +348,7 @@ pub(super) fn first_lifecycle_ref(provider: &EncounterProvider, session: &Resour
 /// Whether the record `session_ref` names has a start with no end yet. A record never started is
 /// not running.
 fn lifecycle_running(home: &AikitHome, session_ref: &str) -> Result<bool> {
-    Ok(crate::session_lifecycle_ops::harness_session_lives(home, session_ref)?.live)
+    crate::session_lifecycle_ops::harness_session_running(home, session_ref)
 }
 
 impl Resident {

@@ -2392,14 +2392,21 @@ impl EncounterService {
         } else {
             None
         };
-        // The body's own hooks record its start and end on this session's record, never on a
-        // second under the harness's own id (ai-kit#640): it is handed the ref. A launch that
-        // declared no scoped environment keeps its ordinary inheritance beside it.
+        // The body's own hooks record its end on this session's record, never on a second under
+        // the harness's own id (ai-kit#640): it is handed the ref, and this open, under which the
+        // body's own session claims the record ([`crate::temporal::FloorLedger::open_handed`]). A
+        // launch that declared no scoped environment keeps its ordinary inheritance beside it.
         let launch_environment = Some(
             launch_environment
                 .unwrap_or_else(aikit_adapters::connection_process::ModelEnvironment::inherited)
-                .with_session_lifecycle_ref(&lifecycle_ref),
+                .with_session_lifecycle(
+                    aikit_adapters::connection_process::SessionLifecycleHandoff {
+                        session_ref: lifecycle_ref.clone(),
+                        open: generation.clone(),
+                    },
+                ),
         );
+        let floor_ledger = crate::temporal::FloorLedger::in_state(&self.home.state());
         // Prime resume is the owner's: the recorded native session file is
         // located through the installed body's own configuration before any
         // replacement transport starts, and the adapter then switches to it.
@@ -2557,6 +2564,9 @@ impl EncounterService {
         let mut failed_attempts: Vec<String> = Vec::new();
         for (index, variant) in launch_variants.iter().enumerate() {
             ensure_native_startup_deadline(deadline)?;
+            // Each body this open launches starts with the record unclaimed under this open: the
+            // first session to start in it claims the record, not one of a variant that failed.
+            floor_ledger.open_handed(&lifecycle_ref, &generation);
             let last_variant = index + 1 == launch_variants.len();
             let attempt_host = match configured.protocol {
                 EncounterProtocol::Acp => AgentSessionHost::launch_with_journal_and_environment(

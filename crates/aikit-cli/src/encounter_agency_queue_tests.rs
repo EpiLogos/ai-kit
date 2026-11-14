@@ -1001,26 +1001,127 @@ fn a_session_keeps_the_record_its_start_chose_when_its_provider_changes() {
 }
 
 /// ai-kit#640 (R640-2): the body an open launches is handed its session's record
-/// (`AIKIT_SESSION_LIFECYCLE_REF`), so the body's own hooks record its start and end there, never on
-/// a second record under the harness's own id. The fixture writes what it was handed to its log.
+/// (`AIKIT_SESSION_LIFECYCLE_REF`) and the open that launched it (`AIKIT_SESSION_LIFECYCLE_OPEN`,
+/// its connection generation), so the body's own hooks record its end there, never on a second
+/// record under the harness's own id. The fixture writes what it was handed to its log.
 #[test]
 fn the_body_an_open_launches_is_handed_its_sessions_record() {
     let world = QueueWorld::new();
     let (space, session) = world.attach("handed");
     let service = EncounterService::new(world.home.clone()).unwrap();
-    world.open(&service, &space, &session, "handed");
-    let handed: Vec<Value> = fs::read_to_string(world.cwd.join("handed.log"))
+    let opened = world.open(&service, &space, &session, "handed");
+    assert_eq!(
+        handed_to_the_body(&world, "handed"),
+        json!({
+            "method": "fixture/environment",
+            "AIKIT_SESSION_LIFECYCLE_REF": "aikit:session:handed:agent-session/handed",
+            "AIKIT_SESSION_LIFECYCLE_OPEN": opened["connection_generation"],
+        }),
+        "{opened}"
+    );
+    let shutdown = service
+        .apply(EncounterRequest::Shutdown {
+            expected_pid: std::process::id(),
+        })
+        .unwrap();
+    assert_eq!(shutdown["shutdown"], json!(true));
+}
+
+/// What the body an open launched was handed of its session's record, as the fixture logged it.
+fn handed_to_the_body(world: &QueueWorld, provider: &str) -> Value {
+    let handed: Vec<Value> = fs::read_to_string(world.cwd.join(format!("{provider}.log")))
         .unwrap()
         .lines()
         .map(|line| serde_json::from_str::<Value>(line).unwrap())
         .filter(|line| line["method"] == "fixture/environment")
         .collect();
-    assert_eq!(
-        handed,
-        [
-            json!({"method": "fixture/environment", "AIKIT_SESSION_LIFECYCLE_REF": "aikit:session:handed:agent-session/handed"})
-        ]
+    assert_eq!(handed.len(), 1, "one body launched: {handed:?}");
+    handed[0].clone()
+}
+
+/// One hook a harness of `client` dispatches for its native session `id`, as
+/// `aikit hook dispatch <client> <event>` runs the session boundary in a process handed `handed`.
+fn hook_in_body(
+    home: &AikitHome,
+    client: &str,
+    kind: aikit_core::hooks::HookEventKind,
+    id: &str,
+    handed: &Value,
+) {
+    let event = aikit_core::hooks::HookEvent::new(client, kind.clone(), json!({"session_id": id}));
+    let mut decision = aikit_core::hooks::HookDecision {
+        event: kind,
+        allowed: true,
+        denial: None,
+        payload: json!({}),
+        injected: vec![],
+        warnings: vec![],
+        steps: vec![],
+        groups: vec![],
+        bypass_consumed: false,
+    };
+    let handed = aikit_adapters::connection_process::SessionLifecycleHandoff::from_env(|name| {
+        handed[name].as_str().map(str::to_owned)
+    });
+    crate::temporal::session_boundary(
+        &mut decision,
+        &event,
+        None,
+        Some(home),
+        Some(&crate::temporal::FloorLedger::in_state(&home.state())),
+        &aikit_adapters::runner::ScriptedRunner::new(),
+        false,
+        handed.as_ref(),
     );
+    assert!(decision.warnings.is_empty(), "{:?}", decision.warnings);
+}
+
+/// ai-kit#640 (re-read F1): a claude the body launches in turn (`claude -p`, an Agent SDK script,
+/// `aikit route launch`) inherits what the body was handed and runs AIKit's hooks on it. The
+/// session's record is the body's: two such sessions, one after the other, each start and end on
+/// their own records; the session runs on in its record as in its body, and its End ends it,
+/// answering ended. Unfenced, the first nested end ended the body's record while the body ran, the
+/// next nested start resumed it, and the End then answered ended false.
+#[test]
+fn a_harness_the_body_launches_in_turn_leaves_the_sessions_record_to_its_end() {
+    use aikit_core::hooks::HookEventKind::{SessionEnd, SessionStart};
+    use aikit_core::session_lifecycle::SessionLifecycleEventKind::{SessionEnded, SessionStarted};
+    let world = QueueWorld::new();
+    let (space, session) = world.attach("nesting");
+    let service = EncounterService::new(world.home.clone()).unwrap();
+    let session_ref = "aikit:session:nesting:agent-session/nesting";
+    let opened = world.open(&service, &space, &session, "nesting");
+    assert_eq!(opened["lifecycle"]["start"], "first", "{opened}");
+    let handed = handed_to_the_body(&world, "nesting");
+    hook_in_body(&world.home, "nesting", SessionStart, "body", &handed);
+    for nested in ["nested-1", "nested-2"] {
+        hook_in_body(&world.home, "nesting", SessionStart, nested, &handed);
+        hook_in_body(&world.home, "nesting", SessionEnd, nested, &handed);
+        assert_eq!(
+            record_of(&world.home, session_ref),
+            [SessionStarted],
+            "{nested} left the session's record running"
+        );
+        assert_eq!(
+            record_of(&world.home, &format!("aikit:session:nesting:{nested}")),
+            [SessionStarted, SessionEnded],
+            "{nested} kept its own record"
+        );
+    }
+    let live = view_of(&service, &session);
+    assert_eq!(live["connection"]["resident"], true, "{live}");
+    assert_eq!(live["lifecycle"]["running"], true, "{live}");
+    let ended = service
+        .apply(EncounterRequest::End {
+            agent_session: session.clone(),
+        })
+        .unwrap();
+    assert_eq!(ended["ended"], true, "{ended}");
+    assert_eq!(
+        record_of(&world.home, session_ref),
+        [SessionStarted, SessionEnded]
+    );
+    assert!(record_of(&world.home, "aikit:session:nesting:body").is_empty());
     let shutdown = service
         .apply(EncounterRequest::Shutdown {
             expected_pid: std::process::id(),
