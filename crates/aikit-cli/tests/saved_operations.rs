@@ -852,15 +852,24 @@ fn a_terminal_or_factory_feed_reports_a_batch_as_json_lines() {
         })
         .to_string()
     };
+    // The batch is dated back from the hour the test runs, never on fixed days: the observer keeps
+    // 30 days of runs, so a run dated on a fixed day falls out of what it keeps 30 days later and
+    // the batch no longer reaches its threshold.
+    let newest = jiff::Timestamp::now().as_second() - 3600;
+    let at = |days_before: i64, minutes_after: i64| {
+        jiff::Timestamp::from_second(newest - days_before * 86_400 + minutes_after * 60)
+            .unwrap()
+            .to_string()
+    };
     let batch = [
-        line("terraform plan -out=tf.plan", "2026-10-16T09:00:00Z"),
-        line("ls -la", "2026-10-16T09:01:00Z"),
-        line("terraform plan -out=tf.plan", "2026-10-15T09:00:00Z"),
+        line("terraform plan -out=tf.plan", &at(0, 0)),
+        line("ls -la", &at(0, 1)),
+        line("terraform plan -out=tf.plan", &at(1, 0)),
         line(
             &format!("curl -H 'Authorization: token {secret}' https://x"),
-            "2026-10-16T09:02:00Z",
+            &at(0, 2),
         ),
-        line("terraform plan -out=tf.plan", "2026-10-14T09:00:00Z"),
+        line("terraform plan -out=tf.plan", &at(2, 0)),
     ]
     .join("\n");
 
