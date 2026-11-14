@@ -146,3 +146,35 @@ fn ensuring_a_context_directory_creates_its_generations_directory_too() {
     assert!(dir.join("generations").is_dir());
     assert_eq!(dir, home.context_dir(&ctx));
 }
+
+#[test]
+fn a_home_whose_folder_is_gone_is_refused_and_a_first_run_is_not() {
+    let tmp = tempfile::tempdir().unwrap();
+    // A first run: the folder that holds the home stands; the home does not exist yet.
+    let first = AikitHome::at(tmp.path().join(".aikit"));
+    first.ground_present().unwrap();
+    first.ensure_layout().unwrap();
+    first.ground_present().unwrap();
+
+    // A World's home once its World has been removed.
+    let world = tmp.path().join("world");
+    fs::create_dir_all(world.join("home")).unwrap();
+    let gone = AikitHome::at(world.join("home").join(".aikit"));
+    gone.ground_present().unwrap();
+    fs::remove_dir_all(&world).unwrap();
+    let refused = gone.ground_present().unwrap_err();
+    assert_eq!(refused.code(), "home.ground_gone", "{refused:?}");
+    assert!(
+        refused
+            .message()
+            .contains(&world.join("home").display().to_string()),
+        "the refusal names the folder that is gone: {}",
+        refused.message()
+    );
+    assert!(!world.exists(), "checking the ground created nothing");
+
+    // A relative home stands in the working directory, which is there.
+    AikitHome::at(".aikit-not-created")
+        .ground_present()
+        .unwrap();
+}

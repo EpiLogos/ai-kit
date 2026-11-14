@@ -3850,11 +3850,14 @@ fn idle_close_grace() -> Option<Duration> {
     }
 }
 
+/// Serve `home` as its resident owner, never for a home whose folder is gone
+/// ([`AikitHome::ground_present`]): the socket's folder and the resident lock would bring it back.
 #[cfg(unix)]
 pub fn serve(home: AikitHome, socket: &Path) -> Result<()> {
     use std::io::{BufRead, BufReader, Write};
     use std::os::unix::{fs::PermissionsExt, net::UnixListener};
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    home.ground_present()?;
     if let Some(parent) = socket.parent() {
         use std::os::unix::fs::DirBuilderExt;
         if !parent.exists() {
@@ -4093,9 +4096,14 @@ fn owner_program() -> Result<(PathBuf, Option<&'static str>)> {
     }
 }
 
-/// Start the generic native owner once. No provider is opened by startup.
+/// Start the generic native owner once. No provider is opened by startup. Every door that starts an
+/// owner on no answer comes here (`reach`, routine dispatch, `aikit ui`, inhabit-team and
+/// `encounter-start`), so an owner is never started for a home whose folder is gone
+/// ([`AikitHome::ground_present`]): its lock, its state and its process would bring the removed
+/// World back.
 #[cfg(unix)]
 pub fn start(home: &AikitHome, cwd: &Path) -> Result<Value> {
+    home.ground_present()?;
     let socket = socket_path(home);
     let _starting = aikit_store::ContextLock::acquire(
         home,
@@ -4173,6 +4181,22 @@ mod tests {
                 "`{item}` stands under #[cfg(unix)]: {attributes:?}"
             );
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_owner_is_not_started_for_a_home_whose_folder_is_gone() {
+        // Every door that starts an owner on no answer (reach, routine dispatch, `aikit ui`,
+        // inhabit-team) starts it here; a World removed meanwhile must not come back.
+        let temp = TempDir::new().unwrap();
+        let world = temp.path().join("world");
+        let home = AikitHome::at(world.join("home").join(".aikit"));
+        let refused = start(&home, temp.path()).unwrap_err();
+        assert_eq!(refused.code(), "home.ground_gone", "{refused:?}");
+        assert!(
+            !world.exists(),
+            "starting an owner created the removed World again"
+        );
     }
 
     fn test_home() -> AikitHome {

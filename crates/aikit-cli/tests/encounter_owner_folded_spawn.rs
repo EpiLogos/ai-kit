@@ -8,7 +8,7 @@
 use aikit_cli::encounter_service::{request, socket_path, EncounterRequest};
 use aikit_store::AikitHome;
 use std::path::Path;
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 /// Releasing the socket and exiting the process are distinct observations.
@@ -103,4 +103,68 @@ fn companion_binary_encounter_start_still_boots_the_real_owner() {
     let ack = request(&socket, &EncounterRequest::Shutdown { expected_pid: pid }).unwrap();
     assert_eq!(ack["ok"], true, "owner shutdown failed: {ack}");
     await_owner_exit(&socket, pid);
+}
+
+/// A World removed while something still asks for its owner (O-I #1001): the kernel, or any door,
+/// runs `encounter-start`, or the owner itself `encounter-serve`, with the World's home after the
+/// World's folder is gone. Nothing may bring the World back: no folder is created where it stood
+/// and no owner is started to serve it, and the refusal names the folder that is gone.
+#[test]
+fn an_owner_is_never_started_in_a_world_that_is_gone() {
+    let temp = tempfile::tempdir().unwrap();
+    let world = temp.path().join("world");
+    let home = world.join("home").join(".aikit");
+    let cwd = world.join("home").join("Central");
+    std::fs::create_dir_all(&cwd).unwrap();
+    std::fs::remove_dir_all(&world).unwrap();
+    for verb in ["encounter-start", "encounter-serve"] {
+        let mut child = Command::new(env!("CARGO_BIN_EXE_aikit"))
+            .args(["session-space", verb, "-C"])
+            .arg(&cwd)
+            .env("AIKIT_HOME", &home)
+            // An owner started here anyway closes itself a second after its last request.
+            .env("AIKIT_ENCOUNTER_IDLE_CLOSE_SECONDS", "1")
+            .env_remove("AIKIT_CONTEXT_ID")
+            .env_remove("AIKIT_ISOLATION")
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while child.try_wait().unwrap().is_none() {
+            if Instant::now() >= deadline {
+                let _ = child.kill();
+                let _ = child.wait();
+                panic!("{verb} in a removed World did not return: an owner is serving it");
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        let output = child.wait_with_output().unwrap();
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        if output.status.success() {
+            // An owner was started in the removed World: stop it before failing.
+            let pid = serde_json::from_slice::<serde_json::Value>(&output.stdout)
+                .ok()
+                .and_then(|started| started["data"]["pid"].as_u64());
+            if let Some(pid) = pid {
+                let _ = request(
+                    &socket_path(&AikitHome::at(&home)),
+                    &EncounterRequest::Shutdown {
+                        expected_pid: pid as u32,
+                    },
+                );
+            }
+        }
+        assert!(
+            !output.status.success() && stderr.contains("home.ground_gone"),
+            "{verb} in a removed World must be refused, naming why: {} {stdout} {stderr}",
+            output.status
+        );
+        assert!(
+            stderr.contains(&world.join("home").display().to_string()),
+            "the refusal names the folder that is gone: {stderr}"
+        );
+        assert!(!world.exists(), "{verb} created the removed World again");
+    }
 }

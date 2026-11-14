@@ -223,6 +223,35 @@ impl AikitHome {
 
     // -- creation ----------------------------------------------------------
 
+    /// Refuse a home whose folder is gone. A home stands in the folder that holds it: the
+    /// person's home folder for `~/.aikit`, a World's `home` for that World's. Once that folder
+    /// has been removed (the World was deleted), nothing may bring the home back: creating it
+    /// would create the removed folders again around it, and an owner started there would serve
+    /// a World that no longer exists. A first run, where the home itself does not exist yet but
+    /// the folder that holds it does, is not refused.
+    pub fn ground_present(&self) -> Result<()> {
+        if self.root.is_dir() {
+            return Ok(());
+        }
+        let folder = match self.root.parent() {
+            None => return Ok(()),
+            Some(parent) if parent.as_os_str().is_empty() => Path::new("."),
+            Some(parent) => parent,
+        };
+        if folder.is_dir() {
+            return Ok(());
+        }
+        Err(AikitError::new(
+            "home.ground_gone",
+            format!(
+                "the folder that holds the AIKit home {} is gone ({}): nothing is created or started there",
+                self.root.display(),
+                folder.display()
+            ),
+        )
+        .with("path", self.root.display().to_string()))
+    }
+
     /// Create the whole documented layout. Idempotent: existing directories and
     /// their contents are left exactly as they were.
     pub fn ensure_layout(&self) -> Result<()> {

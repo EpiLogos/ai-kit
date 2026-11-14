@@ -641,6 +641,9 @@ fn run(cli: Cli) -> Result<()> {
             )
         })?,
     };
+    // This family is the kernel's door into a World's AIKit home. Once the World has been removed, no verb of it brings the home
+    // back (`AikitHome::ground_present`): building the Service or the layout below would create the removed folders again.
+    AikitHome::discover()?.ground_present()?;
     // Most of this family reads and writes the AIKit home alone: the store behind every `session_space_*` verb is built from the home,
     // and the encounter verbs take the home and nothing else. Building the whole Service for them — hashing every capsule of the
     // registry, resolving trust and the view, discovering the project through two `git` processes — was 60 of the 63 ms of an
