@@ -604,6 +604,12 @@ enum WorkingSurfaceCommand {
     Attach { space: String, binding: String },
 }
 
+/// This surface's own clap tree, as [`run_from_args`] parses it: what the act
+/// doorway reads a route Action under `session-space` from (act.rs).
+pub fn command() -> clap::Command {
+    <Cli as clap::CommandFactory>::command()
+}
+
 /// Parse `args` (argv, program name first) and run the folded SessionSpace
 /// surface, returning a process exit code. Both the standalone
 /// `aikit-session-space` binary and the main `aikit session-space` subcommand

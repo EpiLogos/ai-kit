@@ -2709,7 +2709,9 @@ pub struct GatewayUpgradeWorkerArgs {
 #[derive(Debug, Args)]
 pub struct GatewayAgentArgs {
     /// The operation: `status`, `stop`, `new`, `sessions`, `restart`,
-    /// `pause`, `resume`, `model`, `harness` or `skills`.
+    /// `pause`, `resume`, `model`, `harness` or `skills`. `effort`,
+    /// `approvals`, `tool-calls`, `input`, `transport` and `stall-after` are
+    /// refused with what owns each.
     #[arg(value_name = "OP")]
     pub operation: String,
     /// The gateway binding whose conversation is controlled, e.g.

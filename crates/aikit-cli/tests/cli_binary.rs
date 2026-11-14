@@ -369,3 +369,109 @@ fn system_emits_the_wave5_owner_disclosure_descriptor() {
     assert!(!raw.contains("SecretValue"));
     assert!(!raw.contains("sk-"));
 }
+
+/// O-I #1006: a session's settings are AIKit's Action `aikit.session.settings`, run by its id
+/// through the act doorway as the O:I kernel runs it (`--input -`, the input on stdin) against the
+/// real folded surface: Scope's Wait and On no answer written, read back, and a write against a
+/// revision that is no longer the current one refused in the owner's words with its code.
+#[test]
+fn a_session_s_settings_are_an_action_the_doorway_runs() {
+    use aikit_core::session_space::SessionSpaceRef;
+    use aikit_core::session_space_application::{
+        SessionSpaceAgentAttachmentIntent, SessionSpaceMutation,
+    };
+    use std::io::Write;
+
+    let (home, project) = scene();
+    // The settings store refuses a record reached through a link (a temporary directory's own,
+    // on macOS), so the home is named where it stands.
+    let home = home.path().canonicalize().unwrap();
+    let aikit_home = aikit_store::AikitHome::at(&home);
+    aikit_home.ensure_layout().unwrap();
+    let spaces = aikit_store::SessionSpaceApplicationStore::new(aikit_home);
+    let space = SessionSpaceRef::parse("session-space/settings-action").unwrap();
+    let create = SessionSpaceMutation::Create {
+        id: space.clone(),
+        label: None,
+    };
+    spaces.apply(&spaces.stage(None, create).unwrap()).unwrap();
+    let session = "agent-session/settings-action";
+    let attach = SessionSpaceMutation::AttachAgentSession {
+        attachment: SessionSpaceAgentAttachmentIntent {
+            agent_session: aikit_core::ResourceRef::parse(session).unwrap(),
+            purpose: Some("Settings by the act doorway".into()),
+            provenance: vec!["cli_binary test".into()],
+        },
+    };
+    spaces
+        .apply(&spaces.stage(Some(&space), attach).unwrap())
+        .unwrap();
+
+    let invoke = |input: Value| {
+        let mut child = std::process::Command::new(cargo_bin("aikit"))
+            .args(["act", "invoke", "aikit.session.settings"])
+            .args(["--input", "-", "--json"])
+            .env("AIKIT_HOME", &home)
+            .current_dir(project.path())
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .expect("binary runs");
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(input.to_string().as_bytes())
+            .unwrap();
+        let output = child.wait_with_output().unwrap();
+        let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+        let value: Value = serde_json::from_str(stdout.trim()).unwrap_or_else(|error| {
+            panic!(
+                "stdout is not JSON ({error}): {stdout:?}; stderr: {}",
+                String::from_utf8_lossy(&output.stderr)
+            )
+        });
+        (output.status.success(), value)
+    };
+
+    let (ok, written) = invoke(serde_json::json!({
+        "agent_session": [session],
+        "request_json": r#"{"track":{"wait":900,"no_answer":"deny"}}"#,
+    }));
+    assert!(ok, "{written}");
+    assert_eq!(written["track"]["wait"], 900, "{written}");
+    assert_eq!(written["track"]["no_answer"], "deny", "{written}");
+    let revision = written["revision"].as_str().expect("a written revision");
+
+    let (ok, read) = invoke(serde_json::json!({"agent_session": [session]}));
+    assert!(ok, "{read}");
+    assert_eq!(read["track"]["wait"], 900, "{read}");
+    assert_eq!(read["revision"], revision, "{read}");
+
+    let (ok, stale) = invoke(serde_json::json!({
+        "agent_session": [session],
+        "request_json": r#"{"track":{"wait":1800}}"#,
+    }));
+    assert!(!ok, "a write on no revision after one was written: {stale}");
+    assert_eq!(stale["error"]["code"], "act.route_refused", "{stale}");
+    assert_eq!(
+        stale["error"]["details"]["route_code"], "encounter.runtime",
+        "{stale}"
+    );
+    assert!(
+        stale["error"]["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("revision conflict")),
+        "{stale}"
+    );
+
+    let (ok, moved) = invoke(serde_json::json!({
+        "agent_session": [session],
+        "request_json": r#"{"track":{"wait":1800}}"#,
+        "expected_revision": revision,
+    }));
+    assert!(ok, "{moved}");
+    assert_eq!(moved["track"]["wait"], 1800, "{moved}");
+    assert_eq!(moved["track"]["no_answer"], "deny", "{moved}");
+}

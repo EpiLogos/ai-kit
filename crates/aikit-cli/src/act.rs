@@ -63,6 +63,22 @@ const ROUTE_ACTIONS: &[RouteAction] = &[
         route: &["gateway", "agent"],
         mutation_class: "externally-mutating",
     },
+    // Scope's Calls to other agents (O-I #1006; manual §19.12): the rule for one sender kind.
+    RouteAction {
+        id: "aikit.gateway.ingress",
+        title: "Rule a sender kind's ingress on a binding",
+        route: &["gateway", "ingress"],
+        mutation_class: "externally-mutating",
+    },
+    // A session's own settings and its bound task's (O-I #1006): Scope's Wait and On no answer, the
+    // task's Effort and Tool calls envelopes, and the rest the verb names. Without `request_json`
+    // it reads.
+    RouteAction {
+        id: "aikit.session.settings",
+        title: "Read or change a session's settings and its task's",
+        route: &[FOLDED, "encounter-session-settings"],
+        mutation_class: "locally-mutating",
+    },
     RouteAction {
         id: "aikit.gateway.delegate",
         title: "Cross a Communique into work",
@@ -106,14 +122,28 @@ fn route_action(reference: &str) -> Option<&'static RouteAction> {
     ROUTE_ACTIONS.iter().find(|action| action.id == reference)
 }
 
+/// The folded SessionSpace surface (`aikit session-space <verb>`): the main binary forwards
+/// everything after the word to that surface's own parser (session_space_cli.rs), so a route under
+/// it is read from that parser, takes the main binary's `--cwd` before the word, and answers in
+/// JSON with no `--json` of its own.
+const FOLDED: &str = "session-space";
+
+fn folded(route: &[&str]) -> bool {
+    route.first() == Some(&FOLDED)
+}
+
 /// The parser's own command for a route, built (globals propagated), or `None` when the
 /// route no longer parses — which the tests below refuse.
 fn route_command(route: &[&str]) -> Option<clap::Command> {
     use clap::CommandFactory;
-    let mut command = crate::cli::Cli::command();
+    let (mut command, words) = if folded(route) {
+        (crate::session_space_cli::command(), &route[1..])
+    } else {
+        (crate::cli::Cli::command(), route)
+    };
     command.build();
     let mut current = command;
-    for word in route {
+    for word in words {
         current = current.find_subcommand(word)?.clone();
     }
     Some(current)
@@ -161,6 +191,12 @@ fn route_inputs(command: &clap::Command) -> Vec<serde_json::Value> {
 /// Action descriptor) beside the field's own row keys.
 fn route_row(action: &RouteAction) -> Option<serde_json::Value> {
     let command = route_command(action.route)?;
+    // The folded surface answers with its document alone, never in the envelope.
+    let output = if folded(action.route) {
+        "aikit-session-space-json"
+    } else {
+        "aikit-json-envelope"
+    };
     Some(serde_json::json!({
         "ref": action.id,
         "id": action.id,
@@ -170,7 +206,7 @@ fn route_row(action: &RouteAction) -> Option<serde_json::Value> {
         "description": command.get_about().map(|about| about.to_string()),
         "mutation_class": action.mutation_class,
         "inputs": route_inputs(&command),
-        "output": {"type": "aikit-json-envelope"},
+        "output": {"type": output},
         "route": action.route,
         "owner": "ai-kit",
         "availability": {"available": true, "reason": null, "state": "runnable"},
@@ -221,8 +257,11 @@ fn route_argv(
             ));
         }
     }
+    let is_folded = folded(action.route);
     let mut positionals: Vec<(u64, String)> = Vec::new();
     let mut flags: Vec<String> = Vec::new();
+    // Before the route's words: a folded route's `--cwd`, the main binary's (see [`FOLDED`]).
+    let mut first: Vec<String> = Vec::new();
     let mut stdin: Option<String> = None;
     for input in &inputs {
         let name = input["name"].as_str().unwrap_or_default();
@@ -275,7 +314,9 @@ fn route_argv(
                 let flag = input["flag"].as_str().unwrap_or_default().to_owned();
                 let words = text(value)?;
                 let file_flag = format!("{flag}-file");
-                if stdin.is_none()
+                if is_folded && flag == "--cwd" {
+                    first.extend([flag, words]);
+                } else if stdin.is_none()
                     && inputs
                         .iter()
                         .any(|other| other["flag"] == file_flag.as_str())
@@ -289,10 +330,13 @@ fn route_argv(
         }
     }
     positionals.sort_by_key(|(index, _)| *index);
-    let mut argv: Vec<String> = action.route.iter().map(|word| (*word).to_owned()).collect();
+    let mut argv = first;
+    argv.extend(action.route.iter().map(|word| (*word).to_owned()));
     argv.extend(positionals.into_iter().map(|(_, value)| value));
     argv.extend(flags);
-    argv.push("--json".to_owned());
+    if !is_folded {
+        argv.push("--json".to_owned());
+    }
     Ok((argv, stdin))
 }
 
@@ -353,8 +397,8 @@ fn invoke_route(action: &RouteAction, input: &serde_json::Value) -> Result<(Stri
 }
 
 /// A routed command's refusal in its own words: a route that refuses in AIKit's envelope (`{ok: false, error: {code, message}}`)
-/// is carried by its message and its code, never as the envelope, so the person reads what the route said; any other words come as
-/// they are.
+/// is carried by its message and its code, never as the envelope, so the person reads what the route said, and so is the folded
+/// SessionSpace surface's `code: message` (its code dotted, as AIKit's codes are); any other words come as they are.
 fn routed_refusal(words: String) -> (String, Option<String>) {
     let routed = serde_json::from_str::<serde_json::Value>(&words)
         .ok()
@@ -364,6 +408,14 @@ fn routed_refusal(words: String) -> (String, Option<String>) {
                 message,
                 envelope["error"]["code"].as_str().map(str::to_owned),
             ))
+        })
+        .or_else(|| {
+            let (code, message) = words.split_once(": ")?;
+            let coded = code.contains('.')
+                && code.chars().all(|c| {
+                    c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, '.' | '_' | '-')
+                });
+            coded.then(|| (message.to_owned(), Some(code.to_owned())))
         });
     match routed {
         Some((message, code)) => (message, code),
@@ -1061,6 +1113,17 @@ mod tests {
             super::routed_refusal("error: unexpected argument '--nope'".to_owned()),
             ("error: unexpected argument '--nope'".to_owned(), None)
         );
+        // The folded SessionSpace surface refuses as `code: message` on stderr (session_space_cli.rs
+        // run_from_args): its message and its code, the same as an envelope's (O-I #1006).
+        assert_eq!(
+            super::routed_refusal(
+                "encounter.runtime: Session settings revision conflict; read the current settings and write again".to_owned()
+            ),
+            (
+                "Session settings revision conflict; read the current settings and write again".to_owned(),
+                Some("encounter.runtime".to_owned())
+            )
+        );
     }
 
     use super::*;
@@ -1150,6 +1213,19 @@ mod tests {
         crate::cli::Cli::try_parse_from(std::iter::once("aikit".to_owned()).chain(argv.clone()))
             .unwrap_or_else(|error| panic!("{argv:?} does not parse: {error}"));
 
+        // Scope's Calls to other agents (O-I #1006): one sender kind's rule on one binding.
+        let ingress = route_action("aikit.gateway.ingress").unwrap();
+        let (argv, words) = route_argv(
+            ingress,
+            &serde_json::json!({"binding": "gateway-binding/x", "kind": "agent", "decision": "pair"}),
+        )
+        .unwrap();
+        assert_eq!(words, None);
+        assert_eq!(argv[..2], ["gateway", "ingress"]);
+        assert_eq!(argv.last().map(String::as_str), Some("--json"));
+        crate::cli::Cli::try_parse_from(std::iter::once("aikit".to_owned()).chain(argv.clone()))
+            .unwrap_or_else(|error| panic!("{argv:?} does not parse: {error}"));
+
         let agent = route_action("aikit.gateway.agent").unwrap();
         let (argv, words) = route_argv(
             agent,
@@ -1187,6 +1263,108 @@ mod tests {
         assert_eq!(missing.code(), "act.input_missing");
         let shape = route_argv(send, &serde_json::json!({"body": ["a"]})).unwrap_err();
         assert_eq!(shape.code(), "act.input_shape");
+    }
+
+    /// O-I #1006: a route under the folded SessionSpace surface is read from that surface's own
+    /// parser, and its argv is what the main binary forwards there: the main binary's `--cwd`
+    /// before the word (after it, the surface would be given its `-C` twice), and no `--json`,
+    /// which the surface has not (it answers in JSON).
+    #[test]
+    fn a_folded_route_takes_the_main_binary_s_cwd_and_no_json() {
+        use clap::Parser;
+        let settings = route_action("aikit.session.settings").unwrap();
+        let row = route_row(settings).unwrap();
+        let input = |name: &str| {
+            row["inputs"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|input| input["name"] == name)
+                .cloned()
+                .unwrap_or_else(|| panic!("no input {name}: {row}"))
+        };
+        assert_eq!(input("agent_session")["type"], "string[]");
+        assert_eq!(input("agent_session")["required"], true);
+        assert_eq!(input("request_json")["flag"], "--request-json");
+        assert_eq!(input("expected_revision")["required"], false);
+        assert_eq!(
+            row["route"],
+            serde_json::json!(["session-space", "encounter-session-settings"])
+        );
+
+        let request = r#"{"track":{"wait":900,"no_answer":"deny"}}"#;
+        let (argv, words) = route_argv(
+            settings,
+            &serde_json::json!({
+                "cwd": "/w",
+                "agent_session": ["agent-session/s"],
+                "request_json": request,
+                "expected_revision": "session-settings/r1",
+            }),
+        )
+        .unwrap();
+        assert_eq!(words, None);
+        assert_eq!(
+            argv,
+            [
+                "--cwd",
+                "/w",
+                "session-space",
+                "encounter-session-settings",
+                "--agent-session",
+                "agent-session/s",
+                "--request-json",
+                request,
+                "--expected-revision",
+                "session-settings/r1",
+            ]
+        );
+        // The main binary takes `--cwd` and forwards the rest to the surface after its own `-C`
+        // (main.rs forward_session_space), where it parses.
+        let parsed = crate::cli::Cli::try_parse_from(
+            std::iter::once("aikit".to_owned()).chain(argv.clone()),
+        )
+        .unwrap_or_else(|error| panic!("{argv:?} does not parse: {error}"));
+        assert_eq!(parsed.cwd.as_deref(), Some(std::path::Path::new("/w")));
+        let Some(crate::cli::Command::SessionSpace { args }) = parsed.command else {
+            panic!("{argv:?} is not the folded surface's");
+        };
+        crate::session_space_cli::command()
+            .try_get_matches_from(
+                ["aikit-session-space", "-C", "/w"]
+                    .into_iter()
+                    .map(std::ffi::OsString::from)
+                    .chain(args),
+            )
+            .unwrap_or_else(|error| panic!("the surface refuses {argv:?}: {error}"));
+
+        // Without a request it reads, several sessions at once.
+        let (argv, _) = route_argv(
+            settings,
+            &serde_json::json!({"agent_session": ["agent-session/a", "agent-session/b"]}),
+        )
+        .unwrap();
+        assert_eq!(
+            argv,
+            [
+                "session-space",
+                "encounter-session-settings",
+                "--agent-session",
+                "agent-session/a",
+                "--agent-session",
+                "agent-session/b",
+            ]
+        );
+        let one = route_argv(
+            settings,
+            &serde_json::json!({"agent_session": "agent-session/a"}),
+        )
+        .unwrap_err();
+        assert_eq!(
+            one.code(),
+            "act.input_shape",
+            "a session is named in a list"
+        );
     }
 
     #[test]
