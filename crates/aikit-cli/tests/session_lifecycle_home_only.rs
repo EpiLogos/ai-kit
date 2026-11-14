@@ -102,6 +102,63 @@ fn the_session_lifecycle_runs_without_the_service() {
     );
 }
 
+/// O-I #1007: the list answers the sessions one day reads beside the identities — each session with
+/// an event since the instant, and each whose last start has no recorded end however long ago it
+/// began — still from the home alone.
+#[test]
+fn the_list_since_an_instant_reads_the_sessions_of_a_day() {
+    let (_temp, home, project) = unopenable_index();
+    for (session, verbs) in [
+        ("ses_ended", &["start", "end"][..]),
+        ("ses_running", &["start"][..]),
+    ] {
+        for verb in verbs {
+            let (output, recorded) = call(
+                &home,
+                &project,
+                &["session", "lifecycle", verb, session, "--json"],
+            );
+            assert!(output.status.success(), "{recorded}");
+        }
+    }
+    let read = |since: &str| {
+        let (output, listed) = call(
+            &home,
+            &project,
+            &["session", "lifecycle", "list", "--since", since, "--json"],
+        );
+        assert!(output.status.success(), "{listed}");
+        assert_eq!(listed["data"]["count"], 2, "{listed}");
+        listed["data"]["read"]
+            .as_array()
+            .unwrap_or_else(|| panic!("no read: {listed}"))
+            .iter()
+            .map(|model| {
+                (
+                    model["session"].as_str().unwrap().to_owned(),
+                    model["state"].as_str().unwrap().to_owned(),
+                    model["events"].as_array().unwrap().len(),
+                )
+            })
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        read("0"),
+        [
+            ("ses_ended".to_owned(), "ended".to_owned(), 2),
+            ("ses_running".to_owned(), "running".to_owned(), 1),
+        ]
+    );
+    // An instant after every event: the ended session is not this day's; the open one still is.
+    assert_eq!(
+        read("99999999999999"),
+        [("ses_running".to_owned(), "running".to_owned(), 1)]
+    );
+    let (output, plain) = call(&home, &project, &["session", "lifecycle", "list", "--json"]);
+    assert!(output.status.success(), "{plain}");
+    assert!(plain["data"].get("read").is_none(), "{plain}");
+}
+
 #[test]
 fn the_other_session_verbs_still_build_the_service() {
     let (_temp, home, project) = unopenable_index();
