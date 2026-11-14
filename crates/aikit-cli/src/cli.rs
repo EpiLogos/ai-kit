@@ -590,6 +590,17 @@ pub enum ComposeModelCommand {
     Resolve(ModelResolveArgs),
     /// Read the resolved Model catalogue (the composed read side).
     Catalogue(ComposeModelCatalogueCmd),
+    /// Read the selection receipt a launch binds for a session AIKit opened: the realisation of the
+    /// resident the session stands on now, read from its owner. Nothing is opened, replaced or prompted.
+    Selection(ModelSelectionArgs),
+}
+
+/// `aikit compose model selection`.
+#[derive(Debug, Args)]
+pub struct ModelSelectionArgs {
+    /// The AgentSession whose resident is read, as AIKit opened it.
+    #[arg(long, value_name = "AGENT_SESSION")]
+    pub session: String,
 }
 
 /// `aikit compose model catalogue` — the composed read side of the catalogue.
@@ -766,6 +777,7 @@ fn compose_route(args: &ComposeArgs) -> &'static str {
             ComposeModelCommand::Catalogue(c) => match &c.command {
                 ComposeModelCatalogueCommand::Show(_) => "cmd_model_catalogue",
             },
+            ComposeModelCommand::Selection(_) => "cmd_model_selection",
         },
     }
 }

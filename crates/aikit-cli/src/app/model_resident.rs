@@ -221,7 +221,288 @@ fn explicit_factory_selection(
     })))
 }
 
+/// The selection kind of a session AIKit opened without a model policy.
+const SEATED_SESSION: &str = "seated-session";
+
+/// The selection receipt for a session AIKit opened without a model policy: an agent the person seated, its model the
+/// harness's own (or the model default AIKit asked for when it opened). It is the receipt `explicit_factory_selection`
+/// issues, of kind `seated-session`, and binds what the resident owner opened and confirms now: the body basis, the
+/// harness profile, the native session, the Agency and WorldBinding the session was admitted with, and the model the
+/// native session reports. That model is named by the catalogue Model that claims its provider-native id through the
+/// session's provider; where no Model claims it, by the route that names it, and the offer stays unmatched
+/// (model_route.rs `UnmatchedModelOffer`): no Model is minted from an observed id.
+fn seated_factory_selection(
+    home: &aikit_store::AikitHome,
+    compose: &Value,
+    target: &ResidentTarget,
+    native: &Value,
+) -> Result<Value> {
+    let refuse = |message: String| AikitError::new("model.seated_selection", message);
+    let session = &target.agent_session;
+    let data = &native["data"];
+    let body_basis = data["body_basis"].clone();
+    if body_basis["schema"] != "aikit.resident-body-basis/v1" {
+        return Err(refuse(format!(
+            "{session} stands on no resident body basis AIKit can name"
+        )));
+    }
+    let slug = body_basis["harness_profile"].as_str().ok_or_else(|| {
+        refuse(format!(
+            "{session}'s resident body joins no harness profile, so AIKit names no harness for it"
+        ))
+    })?;
+    let profile = aikit_adapters::profiles::for_slug(slug).ok_or_else(|| {
+        refuse(format!(
+            "The embedded {slug} harness profile is unavailable"
+        ))
+    })?;
+    let observation = &data["model_observation"];
+    let observed = observation["current_model_id"]
+        .as_str()
+        .filter(|id| !id.trim().is_empty())
+        .ok_or_else(|| refuse(format!("{session}'s native session reports no model")))?;
+    if !data["native_session_id"]
+        .as_str()
+        .is_some_and(|id| !id.trim().is_empty())
+    {
+        return Err(refuse(format!("{session} has no native session")));
+    }
+    // The provider that serves the model: the one the harness binds natively, or, for a provider-plural harness, the
+    // one its own session discloses for the model it runs. A model id is never parsed for it.
+    let (provider, claimed_id) = match profile.models.as_ref().map(|models| &models.dispatch) {
+        Some(aikit_core::harness_profile::ModelDispatchPosture::NativeProviderBinding {
+            provider_ref,
+            ..
+        }) => (provider_ref.clone(), observed.to_owned()),
+        _ => {
+            let disclosed = observation["available_models"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter(|model| model["modelId"] == observed)
+                .find_map(|model| {
+                    Some((
+                        model["rosterIdentity"]["provider_ref"].as_str()?.to_owned(),
+                        model["rosterIdentity"]["provider_native_id"]
+                            .as_str()?
+                            .to_owned(),
+                    ))
+                });
+            match disclosed {
+                Some(identity) => identity,
+                None => match observation["native_provider"]
+                    .as_str()
+                    .filter(|native| !native.trim().is_empty())
+                {
+                    Some(native) => (format!("provider:{native}"), observed.to_owned()),
+                    None => {
+                        return Err(refuse(format!(
+                            "{session}'s session discloses no provider for the model it runs ({observed}), and its harness ({slug}) binds none natively"
+                        )))
+                    }
+                },
+            }
+        }
+    };
+    let provider_ref = ProviderRef::parse(&provider)?;
+    let (catalogue, _) = aikit_store::model_catalogue::resolved_catalogue(home);
+    let claiming: Vec<_> = catalogue
+        .entries()
+        .filter(|entry| {
+            entry
+                .routes
+                .iter()
+                .any(|route| route.provider == provider_ref && route.claims(&claimed_id))
+        })
+        .collect();
+    let (model_ref, catalogue_digest) = match claiming.as_slice() {
+        [] => (None, None),
+        [entry] => {
+            let value = serde_json::to_value(entry)
+                .map_err(|error| AikitError::new("model.selection_receipt", error.to_string()))?;
+            (
+                Some(entry.model.clone()),
+                Some(format!(
+                    "blake3:{}",
+                    blake3::hash(value.to_string().as_bytes()).to_hex()
+                )),
+            )
+        }
+        several => {
+            return Err(refuse(format!(
+                "{} catalogue Models claim {claimed_id} through {provider_ref} ({}); AIKit names no one of them",
+                several.len(),
+                several
+                    .iter()
+                    .map(|entry| entry.model.to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )))
+        }
+    };
+    let unmatched_offer = match &model_ref {
+        Some(_) => Value::Null,
+        None => json!({
+            "provider_ref": provider_ref,
+            "provider_native_id": claimed_id,
+            "reason": "no catalogue Model claims this provider-native id through this provider: it stays an offer until a catalogue entry or a Provider Source admits it, and the route names the model the session runs",
+        }),
+    };
+    let route_basis = json!({
+        "schema": ROUTE_BASIS_SCHEMA,
+        "model_ref": model_ref,
+        "provider_ref": provider_ref,
+        "native_provider": provider_ref.as_str().strip_prefix("provider:").unwrap_or(provider_ref.as_str()),
+        "provider_native_id": observed,
+        "policy_source": Value::Null,
+        "catalogue_digest": catalogue_digest,
+        "unmatched_offer": unmatched_offer,
+    });
+    let route_ref = format!("model-route/{}", digest(&route_basis)?);
+    let model = match &model_ref {
+        Some(model) => model.clone(),
+        None => ResourceRef::parse(&route_ref)?,
+    };
+    let admitted: AdmittedAgency = serde_json::from_value(compose["agency_admission"].clone())
+        .map_err(|error| {
+            refuse(format!(
+                "{session}'s admitted Agency is unreadable: {error}"
+            ))
+        })?;
+    let harness_ref = format!("harness/{slug}");
+    let composition_target_basis = json!({
+        "schema":"aikit.harness-composition-target-basis/v1",
+        "digest_contract":SORTED_JSON_DIGEST_CONTRACT,
+        "harness_profile":{
+            "schema": profile.schema,
+            "slug": profile.slug,
+            "digest": format!("blake3:{}", digest(profile)?),
+        },
+        "resident_body_basis":body_basis,
+        "agency_source":admitted.basis,
+        "world_binding_ref":admitted.world_binding_ref,
+    });
+    let composition_target_revision = format!("blake3:{}", digest(&composition_target_basis)?);
+    let project = compose
+        .pointer("/project_binding/project")
+        .and_then(Value::as_str)
+        .map(ResourceRef::parse)
+        .transpose()?;
+    let composition = resolve_harness_composition(
+        &CompositionCatalog::default(),
+        HarnessCompositionRequest {
+            harness: ResourceRef::parse(&harness_ref)?,
+            project,
+            agent: Some(admitted.agent_ref.clone()),
+            agency: Some(admitted.agency_ref.clone()),
+            session: Some(session.to_string()),
+            model: Some(model.clone()),
+            selections: Vec::new(),
+            target_revision: Some(composition_target_revision),
+            generation: None,
+        },
+    )?;
+    let harness_composition_ref = format!("harness-composition/{}", composition.fingerprint);
+    ResourceRef::parse(&harness_composition_ref)?;
+    let basis = json!({
+        "schema": EXPLICIT_SELECTION_BASIS_SCHEMA,
+        "selection_kind": SEATED_SESSION,
+        "digest_contract":SORTED_JSON_DIGEST_CONTRACT,
+        "route_basis": route_basis,
+        "composition_scope": {
+            "kind":SEATED_SESSION,
+            "selected_components":[],
+            "ambient_components_claimed":false,
+            "standing":"the session as AIKit opened it for the agent seated on it: its exact body and launch basis and the harness's own model as the session reports it; no skills, extensions, tools or contributions are claimed",
+        },
+        "composition_target_basis":composition_target_basis,
+        "harness_composition": composition,
+        "native": {
+            "space":target.space,
+            "agent_session": session,
+            "native_session_id": data["native_session_id"],
+            "model_observation": observation,
+        },
+    });
+    let basis_digest = format!("blake3:{}", digest(&basis)?);
+    let mut provenance = vec![
+        format!("aikit-encounter-selection:{session}"),
+        data["native_session_id"]
+            .as_str()
+            .unwrap_or_default()
+            .to_owned(),
+    ];
+    provenance.extend(catalogue_digest);
+    Ok(json!({
+        "roster_version": aikit_core::resource::MODEL_ROSTER_VERSION,
+        "model_ref": model,
+        "provider_ref": provider_ref,
+        "ranking_policy": "EXPLICIT_PIN",
+        "ranking_explanation": {
+            "schema": EXPLICIT_SELECTION_SCHEMA,
+            "selection_kind": SEATED_SESSION,
+            "model_ref": model,
+            "provider_ref": provider_ref,
+            "route_ref": route_ref,
+            "harness_ref": harness_ref,
+            "harness_composition_ref": harness_composition_ref,
+            "basis": basis,
+            "basis_digest": basis_digest,
+            "digest_contract":SORTED_JSON_DIGEST_CONTRACT,
+            "standing": "the seated session as its resident native owner confirms it: no policy pinned its model and no roster ranked it; the model is the one the session runs, named by the catalogue Model that claims it, else by its route",
+        },
+        "provenance": provenance,
+    }))
+}
+
 impl Service {
+    /// `aikit compose model selection --session <s>`: the selection receipt a launch binds for a session AIKit opened,
+    /// as the realisation (`aikit.model-realisation/v2`) of the resident the session stands on now, read from its owner.
+    /// Nothing is opened, replaced or prompted. A session realised on an explicit model policy carries the explicit pin
+    /// receipt `aikit compose --realise` issued; a session opened without one carries its seated-session receipt.
+    pub fn session_selection(&self, session: &ResourceRef) -> Result<Value> {
+        let compose = self.compose_session_resident(session, None)?;
+        let target: ResidentTarget = serde_json::from_value(compose["resident_target"].clone())
+            .map_err(|e| AikitError::new("model.invalid_resident_target", e.to_string()))?;
+        let native = crate::encounter_service::request(
+            &target.socket,
+            &crate::encounter_service::EncounterRequest::Selection {
+                agent_session: session.clone(),
+            },
+        )?;
+        if native["ok"] != true {
+            return Err(AikitError::new(
+                "model.resident_unread",
+                format!(
+                    "{session}'s resident owner did not read it back: {}",
+                    native["error"]["message"]
+                        .as_str()
+                        .unwrap_or("it gave no reason")
+                ),
+            )
+            .with("native_response", native.to_string()));
+        }
+        let factory_selection = if native["data"]["model_selection"].is_null() {
+            seated_factory_selection(&self.home, &compose, &target, &native)?
+        } else {
+            explicit_factory_selection(&compose, &target, &native)?.ok_or_else(|| {
+                AikitError::new(
+                    "model.selection_receipt",
+                    format!("{session}'s selected model runs on a body AIKit issues no explicit selection receipt for"),
+                )
+            })?
+        };
+        Ok(json!({
+            "schema":"aikit.model-realisation/v2",
+            "model_ref":factory_selection["model_ref"],
+            "selected":true,
+            "executed":false,
+            "resident":native["data"],
+            "factory_selection":factory_selection,
+            "standing":"the resident the session stands on, read from its owner: nothing was opened, replaced or prompted",
+        }))
+    }
+
     /// What `aikit compose --session <s> --realise` realises on: the session's
     /// own Agency admitted again from its owner binding, the one SessionSpace
     /// that holds the session, and the native owner that runs it (this home's,
@@ -383,4 +664,163 @@ pub(super) fn realise(
         receipt["resolution"] = resolution;
     }
     Ok(receipt)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A codex session as `oi desktop provision` opens it for a seated agent: a plain open, no model policy, the model
+    /// the harness runs as its own. The values stand where the resident owner's Selection read puts them.
+    fn seat(observed: &str) -> (Value, ResidentTarget, Value) {
+        let compose = json!({
+            "agency_admission": {
+                "basis": {
+                    "source_ref": "source/agency-notes",
+                    "revision": "revision/1",
+                    "path": "/tmp/agency-notes.json",
+                    "content_digest": format!("blake3:{}", "0".repeat(64)),
+                },
+                "agent_ref": "agent/codex",
+                "agency_ref": "agency/notes",
+                "world_binding_ref": "world-binding/notes",
+                "world_ref": "world/notes",
+                "scope_ref": "scope:root",
+                "receipt": {},
+            },
+        });
+        let target: ResidentTarget = serde_json::from_value(json!({
+            "space": "session-space/notes-chat",
+            "agent_session": "agent-session/notes-chat",
+            "socket": "/tmp/aikit-owner.sock",
+        }))
+        .unwrap();
+        let native = json!({"ok": true, "data": {
+            "agent_session": "agent-session/notes-chat",
+            "space": "session-space/notes-chat",
+            "native_session_id": "019a6e2c-0000-7000-8000-000000000001",
+            "model_observation": {
+                "current_model_id": observed,
+                "available_models": [{"modelId": observed, "name": observed}],
+                "standing": "provider-reported-configuration-not-independent-selection-or-inference-proof",
+            },
+            "provider": "codex",
+            "protocol": "acp",
+            "body_basis": {
+                "schema": "aikit.resident-body-basis/v1",
+                "provider_id": "codex",
+                "protocol": "acp",
+                "provider_argv_digest": "a".repeat(64),
+                "owner_launcher_provider_id": "codex",
+                "owner_launcher_argv_digest": "a".repeat(64),
+                "effective_launch_argv_digest": "b".repeat(64),
+                "harness_profile": "codex",
+                "task_bound": false,
+                "cwd": "/tmp/notes",
+                "required_context": null,
+                "model_basis_digest": null,
+            },
+            "model_selection": null,
+            "resident": true,
+        }});
+        (compose, target, native)
+    }
+
+    fn sorted_digest(value: &Value) -> String {
+        digest(value).unwrap()
+    }
+
+    #[test]
+    fn a_seated_session_is_bound_by_a_receipt_naming_the_catalogue_model_it_runs() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = aikit_store::AikitHome::at(temp.path().join("aikit"));
+        let (compose, target, native) = seat("gpt-5.4");
+        let selection = seated_factory_selection(&home, &compose, &target, &native).unwrap();
+        let receipt = &selection["ranking_explanation"];
+        assert_eq!(selection["ranking_policy"], "EXPLICIT_PIN");
+        assert_eq!(receipt["schema"], EXPLICIT_SELECTION_SCHEMA);
+        assert_eq!(receipt["selection_kind"], SEATED_SESSION);
+        // The seed catalogue claims gpt-5.4 through provider:openai, the provider codex binds natively.
+        assert_eq!(selection["model_ref"], "model:gpt-5.4");
+        assert_eq!(selection["provider_ref"], "provider:openai");
+        let basis = &receipt["basis"];
+        let route_basis = &basis["route_basis"];
+        assert_eq!(route_basis["model_ref"], "model:gpt-5.4");
+        assert_eq!(route_basis["provider_native_id"], "gpt-5.4");
+        assert!(route_basis["unmatched_offer"].is_null());
+        assert_eq!(
+            receipt["route_ref"],
+            format!("model-route/{}", sorted_digest(route_basis))
+        );
+        assert_eq!(
+            receipt["basis_digest"],
+            format!("blake3:{}", sorted_digest(basis))
+        );
+        assert_eq!(receipt["harness_ref"], "harness/codex");
+        assert_eq!(
+            basis["harness_composition"]["session"],
+            "agent-session/notes-chat"
+        );
+        assert_eq!(basis["harness_composition"]["model"], "model:gpt-5.4");
+        assert_eq!(
+            receipt["harness_composition_ref"],
+            format!(
+                "harness-composition/{}",
+                basis["harness_composition"]["fingerprint"]
+                    .as_str()
+                    .unwrap()
+            )
+        );
+        assert_eq!(
+            basis["composition_target_basis"]["resident_body_basis"]["harness_profile"],
+            "codex"
+        );
+        assert_eq!(basis["native"]["agent_session"], "agent-session/notes-chat");
+        assert_eq!(basis["native"]["space"], "session-space/notes-chat");
+    }
+
+    #[test]
+    fn a_seated_model_no_catalogue_model_claims_is_named_by_its_route_and_stays_an_offer() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = aikit_store::AikitHome::at(temp.path().join("aikit"));
+        let (compose, target, native) = seat("gpt-6-astra");
+        let selection = seated_factory_selection(&home, &compose, &target, &native).unwrap();
+        let receipt = &selection["ranking_explanation"];
+        let route_basis = &receipt["basis"]["route_basis"];
+        // No Model is minted from the observed id: the route names what the session runs.
+        assert!(route_basis["model_ref"].is_null());
+        assert_eq!(selection["model_ref"], receipt["route_ref"]);
+        assert!(selection["model_ref"]
+            .as_str()
+            .unwrap()
+            .starts_with("model-route/"));
+        assert_eq!(
+            route_basis["unmatched_offer"]["provider_native_id"],
+            "gpt-6-astra"
+        );
+        assert_eq!(
+            route_basis["unmatched_offer"]["provider_ref"],
+            "provider:openai"
+        );
+        assert_eq!(
+            receipt["basis"]["harness_composition"]["model"],
+            selection["model_ref"]
+        );
+    }
+
+    #[test]
+    fn a_seated_session_whose_provider_nothing_discloses_is_refused() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = aikit_store::AikitHome::at(temp.path().join("aikit"));
+        let (compose, target, mut native) = seat("some-model");
+        // Pi is provider-plural: only its session can say which provider serves the model, and here it says none.
+        native["data"]["body_basis"]["harness_profile"] = json!("pi");
+        native["data"]["body_basis"]["protocol"] = json!("pi-rpc");
+        let refused = seated_factory_selection(&home, &compose, &target, &native).unwrap_err();
+        assert_eq!(refused.code(), "model.seated_selection");
+        assert!(
+            refused.message().contains("discloses no provider"),
+            "{refused}"
+        );
+    }
 }

@@ -340,6 +340,12 @@ pub enum EncounterRequest {
     ModelRead {
         agent_session: ResourceRef,
     },
+    /// Read the resident a session stands on, as its open receipt named it: its space, body basis, selected-model
+    /// basis (none for a session opened without a model policy) and the native session and model it reports now. The
+    /// selection receipt a launch binds is issued from it (`aikit compose model selection`).
+    Selection {
+        agent_session: ResourceRef,
+    },
     /// Reclassify only a causally proven legacy native-load replay projection.
     ClassifyLegacyLoadReplay {
         agent_session: ResourceRef,
@@ -3443,6 +3449,35 @@ impl EncounterService {
                     },
                     "pinned_model_id":resident.model.as_ref().map(|model| &model.policy.provider_native_id),
                     "standing":"provider-reported-configuration-not-independent-selection-or-inference-proof"
+                }))
+            }
+            EncounterRequest::Selection { agent_session } => {
+                self.require_attached(&agent_session)?;
+                let resident = self.resident(&agent_session)?;
+                let _operation = native_control_lease(&resident, native_control_deadline)?;
+                let _agency_lock = self.lock_agency(&agent_session)?;
+                ensure_native_control_deadline(native_control_deadline)?;
+                // The resident is read only as it still stands on its admitted context and model basis.
+                self.check_resident_context_inner(
+                    &agent_session,
+                    &resident,
+                    "native-selection-read",
+                    Some(native_control_deadline),
+                )?;
+                ensure_native_control_deadline(native_control_deadline)?;
+                let identity = resident.host.identity(&agent_session)?;
+                Ok(json!({
+                    "agent_session":agent_session,
+                    "space":resident.space,
+                    "native_session_id":identity.binding.native_session_id,
+                    "model_observation":identity.binding.model_observation,
+                    "provider":resident.provider,
+                    "protocol":resident.protocol,
+                    "body_basis":resident.body_basis,
+                    "model_selection":resident.model,
+                    "connection_generation":resident.generation,
+                    "resident":true,
+                    "inference_observed":false,
                 }))
             }
             EncounterRequest::ModelSelect {

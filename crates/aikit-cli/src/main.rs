@@ -252,6 +252,7 @@ fn dispatch(cli: Cli, cwd: &std::path::Path) -> Result<Reply> {
             Some(ComposeGroupCommand::Alias(c)) => cmd_alias(cwd, c, json_mode),
             Some(ComposeGroupCommand::Model(m)) => match m.command {
                 ComposeModelCommand::Resolve(a) => cmd_model_resolve(cwd, a),
+                ComposeModelCommand::Selection(a) => cmd_model_selection(cwd, a),
                 ComposeModelCommand::Catalogue(c) => match c.command {
                     ComposeModelCatalogueCommand::Show(a) => cmd_model_catalogue(
                         cwd,
@@ -2653,6 +2654,14 @@ fn cmd_model_resolve(cwd: &std::path::Path, args: ModelResolveArgs) -> Result<Re
     } else {
         service.resolve_model(&composed, &args.use_type, policy)?
     };
+    Ok(reply(&service, data, diagnostic_warnings(&service)))
+}
+
+/// `aikit compose model selection --session <s>`: the selection receipt a launch binds for a session AIKit opened,
+/// read from the resident it stands on (`Service::session_selection`).
+fn cmd_model_selection(cwd: &std::path::Path, args: ModelSelectionArgs) -> Result<Reply> {
+    let service = Service::discover(cwd)?;
+    let data = service.session_selection(&aikit_core::ResourceRef::parse(&args.session)?)?;
     Ok(reply(&service, data, diagnostic_warnings(&service)))
 }
 
