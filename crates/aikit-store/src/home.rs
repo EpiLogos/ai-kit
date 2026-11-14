@@ -42,10 +42,19 @@ impl AikitHome {
     }
 
     /// The home for this process: `AIKIT_HOME`, else `~/.aikit`.
+    ///
+    /// A home whose folder is gone is refused here ([`Self::ground_present`]).
+    /// Every command finds its home through this door, so none starts in a
+    /// World that has been removed, where the first folder it made would make
+    /// the World again (O-I #1001). A World removed while a command is already
+    /// running is not caught here: the window that removed it stops asking
+    /// AIKit anything there.
     pub fn discover() -> Result<Self> {
         let aikit_home = std::env::var_os("AIKIT_HOME");
         let user_home = std::env::var_os("HOME");
-        Self::from_env_values(aikit_home.as_deref(), user_home.as_deref())
+        let home = Self::from_env_values(aikit_home.as_deref(), user_home.as_deref())?;
+        home.ground_present()?;
+        Ok(home)
     }
 
     /// The pure half of [`Self::discover`], so the precedence rule is testable
@@ -253,10 +262,10 @@ impl AikitHome {
     }
 
     /// Create the whole documented layout. Idempotent: existing directories and
-    /// their contents are left exactly as they were. Every command that opens
-    /// AIKit runs this first, so it makes the home and nothing around it: where
-    /// the folder that holds the home is gone it refuses ([`Self::ground_present`]),
-    /// and it never makes that folder, so no command brings a removed World back.
+    /// their contents are left exactly as they were. It makes the home and what
+    /// lies in it, never the folder that holds it: where that folder is gone it
+    /// refuses ([`Self::ground_present`]), and a folder whose parent went while
+    /// the layout was being made is not made either.
     pub fn ensure_layout(&self) -> Result<()> {
         self.ground_present()?;
         for dir in [
