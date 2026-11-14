@@ -30,7 +30,11 @@
 //!    submit one twice. Central admits no direct agent write on a Day
 //!    (`documents.rs`: "direct Agent mutation is not adoption"), so Write is
 //!    held as Propose and the run says so;
-//! 5. Close then calls `central.day.close-carry` and carries its answer;
+//! 5. Close then calls `central.day.close-carry` and carries its answer. An
+//!    agent's close writes nothing into the person's Day: Central files face
+//!    5's proposal for tomorrow's face 0 in receiving itself and answers the
+//!    Return it filed (Central #364), the one filing of a close's carry, so
+//!    nothing of the carry is submitted here;
 //! 6. records the end (`done`, `refused` or `stalled`) with what it gave. A
 //!    run that was begun is always ended. What it records is plain text
 //!    (`plain_record`: nothing of the set Central refuses there), and an end
@@ -66,6 +70,11 @@ pub const WRITE_HELD_AS_PROPOSE: &str =
     "Write is held as Propose: Central admits no direct agent write on a Day.";
 /// The reason a run gives when Agent writes is Off.
 pub const AGENT_WRITES_OFF: &str = "Agent writes is Off: the move would write nothing";
+/// The reason a Close run stalls when Central closed the Day with its carry
+/// waiting and named no Return for it: a Central that does not file a close's
+/// carry itself (before Central #364), where the carry stays unfiled. AIKit files
+/// no carry of its own.
+pub const NO_CARRY_FILED: &str = "The Day closed, but Central named no Return for its carry to tomorrow's face 0: this Central does not file a close's carry itself (Central #364), and AIKit files none of its own";
 /// AIKit's words when no encounter provider is configured.
 pub const NO_PROVIDER: &str = "no encounter provider is configured: the Day's agent has no harness to take a turn on. Configure one (`aikit session-space encounter-configure`, or `encounter-derive` for a harness profile) and press the move again";
 
@@ -1479,7 +1488,7 @@ fn execute(
     }
     gave.summary = summary;
     if mv == Move::Close {
-        close_step(central, &submitter, &day, &mut gave, answer.learned)?;
+        close_step(central, &day, &mut gave, answer.learned)?;
     }
     Ok(gave)
 }
@@ -1504,9 +1513,10 @@ fn counts_of(
 }
 
 /// Close, after the agent's summary: close the Day and carry face 5 to tomorrow.
+/// Central files the carry itself where it waits for the person, and the run
+/// takes the Return it names; nothing of the carry is submitted here.
 fn close_step(
     central: &dyn CentralPort,
-    submitter: &Submitter<'_>,
     day: &DayReading,
     gave: &mut Gave,
     learned: usize,
@@ -1544,32 +1554,23 @@ fn close_step(
     }
     let mut carried = format!("the carry to tomorrow's face 0: {state}");
     if state == "waits" {
-        // An agent's entry into a Day waits for the person: Central hands back the
-        // proposal ready to submit, and it is submitted here, or it would be lost
-        // with the Day closed.
-        let key = format!("{}#close-carry", submitter.run_ref);
-        let target = json!({
-            "source_ref": carry["proposal"]["source_ref"],
-            "document_id": carry["proposal"]["document_id"],
-            "expected_source_revision": carry["proposal"]["expected_source_revision"],
-            "day_ref": closed["tomorrow"]["day_ref"],
-            "proposal": carry["proposal"]["proposal"],
-        });
-        match submitter.submit(&key, &target, "face 5's proposal for tomorrow's face 0") {
-            Ok(named) => {
-                gave.take(named);
-                carried.push_str(" (submitted as a proposal for tomorrow's face 0)");
+        // An agent's close writes nothing into the person's Day: Central files face
+        // 5's proposal for tomorrow's face 0 in receiving itself, where the person
+        // keeps it or drops it, and names the Return it filed (Central #364). That
+        // is the one filing of a close's carry: nothing is submitted here.
+        match named_ref(carry) {
+            Some(named) => {
+                gave.take(Some(named));
+                carried.push_str(" (Central filed it as a proposal for tomorrow's face 0)");
             }
-            Err(error) => {
+            None => {
                 let summary = format!(
-                    "{} The Day is closed; its carry to tomorrow's face 0 was not submitted.",
+                    "{} The Day is closed; Central named no proposal for its carry to tomorrow's face 0.",
                     gave.summary.trim_end()
                 );
                 return Err(Stop {
                     state: "stalled",
-                    reason: format!(
-                        "The Day closed, but Central refused the carry proposal for tomorrow's face 0: {error}"
-                    ),
+                    reason: NO_CARRY_FILED.to_owned(),
                     gave: Some(partial(gave, summary)),
                 });
             }
@@ -2666,7 +2667,8 @@ mod tests {
         taken: std::sync::Mutex<Option<Value>>,
         /// The submit of this number is refused.
         refused_submit: Option<usize>,
-        /// What `central.day.close-carry` answers: "refused", or the carry's state.
+        /// What `central.day.close-carry` answers: "refused", "waits-unfiled" (a
+        /// carry that waits with no Return filed), or the carry's state.
         carry: Option<&'static str>,
         /// The run is ended elsewhere once this many ends were sent, this one
         /// counted: that end is refused as an end for an ended run.
@@ -2838,7 +2840,14 @@ mod tests {
                 }
                 ("central.day.close-carry", _) => match self.carry {
                     Some("refused") => refuse(INVALID, "the Day is not ready to close", false),
+                    // Central files the carry itself and names the Return (Central #364).
                     Some("waits") => Ok(json!({"tomorrow": {"day_ref": "day:2026-11-11"},
+                        "carry": {"state": "waits", "return_ref": "central:return:carry",
+                            "proposal": {"source_ref": "source:tomorrow",
+                            "document_id": "day:tomorrow", "expected_source_revision": "t1",
+                            "proposal": {"target": "/fields/p0_ground"}}}})),
+                    // A Central from before #364: the carry waits and nothing filed it.
+                    Some("waits-unfiled") => Ok(json!({"tomorrow": {"day_ref": "day:2026-11-11"},
                         "carry": {"state": "waits", "proposal": {"source_ref": "source:tomorrow",
                             "document_id": "day:tomorrow", "expected_source_revision": "t1",
                             "proposal": {"target": "/fields/p0_ground"}}}})),
@@ -4489,22 +4498,24 @@ mod tests {
             format!("{CLOSE_SUBMITTED} The Day was not closed. {ONE_UNNAMED}").as_str()
         );
         assert_eq!(report["gave"]["counts"]["proposed"], 1, "{report}");
-        // Central closes the Day and refuses the carry's proposal.
+        // Central closes the Day with its carry waiting and names no Return for it
+        // (a Central that files no close's carry itself): AIKit submits none.
         let central = Recording {
             names: Some(|_| json!({})),
-            carry: Some("waits"),
-            refused_submit: Some(1),
+            carry: Some("waits-unfiled"),
             ..Recording::default()
         };
         let report = run_move(&central, &closes(), &press_close()).unwrap();
         assert_eq!(report["state"], "stalled", "{report}");
+        assert_eq!(report["reason"], NO_CARRY_FILED);
         assert_eq!(
-            report["reason"],
-            "The Day closed, but Central refused the carry proposal for tomorrow's face 0: Central keeps no such proposal"
+            central.submitted(),
+            1,
+            "the summary only: no carry submitted"
         );
         assert_eq!(
             report["gave"]["summary"],
-            format!("{CLOSE_SUBMITTED} The Day is closed; its carry to tomorrow's face 0 was not submitted. {ONE_UNNAMED}").as_str()
+            format!("{CLOSE_SUBMITTED} The Day is closed; Central named no proposal for its carry to tomorrow's face 0. {ONE_UNNAMED}").as_str()
         );
         assert_eq!(report["gave"]["proposals"], json!([]));
     }
@@ -4518,12 +4529,17 @@ mod tests {
         };
         let report = run_move(&central, &closes(), &press_close()).unwrap();
         assert_eq!(report["state"], "done", "{report}");
-        assert_eq!(central.submitted(), 2, "the summary and the carry");
-        assert_eq!(report["gave"]["proposals"], json!([]));
+        // The summary is submitted; the carry is Central's own filing, named by it.
+        assert_eq!(
+            central.submitted(),
+            1,
+            "the summary only: Central filed the carry"
+        );
+        assert_eq!(report["gave"]["proposals"], json!(["central:return:carry"]));
         assert_eq!(report["gave"]["counts"]["proposed"], 2, "{report}");
         assert_eq!(
             report["gave"]["summary"],
-            format!("{CLOSE_SUBMITTED} The Day is closed; the carry to tomorrow's face 0: waits (submitted as a proposal for tomorrow's face 0). The agent named nothing the person learned. Central named no ref for 2 proposals, so this record does not list them.").as_str()
+            format!("{CLOSE_SUBMITTED} The Day is closed; the carry to tomorrow's face 0: waits (Central filed it as a proposal for tomorrow's face 0). The agent named nothing the person learned. {ONE_UNNAMED}").as_str()
         );
     }
 
