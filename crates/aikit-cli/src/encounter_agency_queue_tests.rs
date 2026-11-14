@@ -679,3 +679,130 @@ fn status_carries_how_the_last_turn_stopped() {
         .unwrap();
     assert_eq!(shutdown["shutdown"], json!(true));
 }
+
+/// O-I #1007 (with #1016): a session AIKit opens for a conversation records its start in the
+/// lifecycle its harness's hooks keep, under `aikit:session:<client>:<agent session>`; opening
+/// the live session again records nothing. The conversation offers its End as the registry's
+/// `aikit.session.end`; End releases the idle body and records the end once. A session whose
+/// body was already released still ends from its record, and one that never opened is refused.
+#[test]
+fn an_encounter_session_starts_on_its_open_and_ends_once_on_its_end() {
+    use crate::session_lifecycle_ops::{harness_session, SessionLifecycleServiceOps};
+    use aikit_core::session_lifecycle::SessionLifecycleEventKind::{SessionEnded, SessionStarted};
+    let world = QueueWorld::new();
+    let (space, session) = world.attach("ending");
+    let service = EncounterService::new(world.home.clone()).unwrap();
+    let never = service
+        .apply(EncounterRequest::End {
+            agent_session: session.clone(),
+        })
+        .unwrap_err();
+    assert_eq!(never.code(), "encounter.end_unopened", "{never}");
+
+    let session_ref = "aikit:session:ending:agent-session/ending";
+    let kinds = || {
+        world
+            .home
+            .session_lifecycle_history(&harness_session(session_ref).unwrap())
+            .map(|history| history.iter().map(|event| event.kind).collect::<Vec<_>>())
+            .unwrap_or_default()
+    };
+    let opened = world.open(&service, &space, &session, "ending");
+    assert_eq!(
+        opened["lifecycle"],
+        json!({"session_ref": session_ref, "start": "first"}),
+        "{opened}"
+    );
+    let again = world.open(&service, &space, &session, "ending");
+    assert_eq!(again["lifecycle"]["start"], "replayed", "{again}");
+    assert_eq!(kinds(), [SessionStarted]);
+
+    let view = || {
+        service
+            .apply(EncounterRequest::View {
+                agent_session: session.clone(),
+                before: None,
+                after: None,
+            })
+            .unwrap()
+    };
+    let end_control = |view: &Value| {
+        view["actions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|action| action["ref"] == "aikit.session.end")
+            .cloned()
+            .unwrap_or_else(|| panic!("no End control: {view}"))
+    };
+    let live = view();
+    assert_eq!(end_control(&live)["enabled"], true, "{live}");
+    assert_eq!(
+        live["lifecycle"],
+        json!({"session_ref": session_ref, "running": true})
+    );
+
+    let ended = service
+        .apply(EncounterRequest::End {
+            agent_session: session.clone(),
+        })
+        .unwrap();
+    assert_eq!(ended["schema"], "aikit.encounter-end/v1", "{ended}");
+    assert_eq!(ended["session_ref"], session_ref, "{ended}");
+    assert_eq!(ended["ended"], true, "{ended}");
+    assert_eq!(
+        ended["released"]["receipt"]["cleanup_confirmed"], true,
+        "the idle body is released: {ended}"
+    );
+    assert_eq!(kinds(), [SessionStarted, SessionEnded]);
+    let closed = view();
+    assert_eq!(closed["connection"]["resident"], false, "{closed}");
+    assert_eq!(end_control(&closed)["enabled"], false, "{closed}");
+    assert_eq!(closed["lifecycle"]["running"], false, "{closed}");
+
+    let twice = service
+        .apply(EncounterRequest::End {
+            agent_session: session.clone(),
+        })
+        .unwrap();
+    assert_eq!(twice["ended"], false, "{twice}");
+    assert!(twice["released"].is_null(), "{twice}");
+    assert_eq!(kinds(), [SessionStarted, SessionEnded]);
+
+    // A session whose body was released on its own is still running in its record, and its End
+    // closes the record with no body to release.
+    let (space, session) = world.attach("released");
+    let session_ref = "aikit:session:released:agent-session/released";
+    let opened = world.open(&service, &space, &session, "released");
+    assert_eq!(opened["lifecycle"]["start"], "first", "{opened}");
+    service
+        .apply(EncounterRequest::ReleaseNative {
+            agent_session: session.clone(),
+            expected_native_session_id: opened["native_session_id"].as_str().unwrap().to_owned(),
+            expected_generation: opened["connection_generation"].as_str().unwrap().to_owned(),
+        })
+        .unwrap();
+    let ended = service
+        .apply(EncounterRequest::End {
+            agent_session: session.clone(),
+        })
+        .unwrap();
+    assert_eq!(ended["ended"], true, "{ended}");
+    assert!(ended["released"].is_null(), "{ended}");
+    assert_eq!(
+        world
+            .home
+            .session_lifecycle_history(&harness_session(session_ref).unwrap())
+            .unwrap()
+            .iter()
+            .map(|event| event.kind)
+            .collect::<Vec<_>>(),
+        [SessionStarted, SessionEnded]
+    );
+    let shutdown = service
+        .apply(EncounterRequest::Shutdown {
+            expected_pid: std::process::id(),
+        })
+        .unwrap();
+    assert_eq!(shutdown["shutdown"], json!(true));
+}

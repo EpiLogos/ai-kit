@@ -6998,6 +6998,14 @@ fn cmd_session(cwd: &std::path::Path, c: SessionCmd) -> Result<Reply> {
         let (home, descriptor) = Service::context_descriptor(cwd)?;
         return cmd_session_lifecycle(&home, &descriptor, c);
     }
+    // An End is the encounter owner's to perform: it releases the body the owner holds and
+    // records the end in the lifecycle, so it needs the home and no Service either.
+    if let SessionSub::End(a) = c.command {
+        let (home, descriptor) = Service::context_descriptor(cwd)?;
+        let session = aikit_core::ResourceRef::parse(&a.agent_session)?;
+        let ended = aikit_cli::encounter_service::end(&home, cwd, &session)?;
+        return Ok(reply_in(&descriptor, ended, vec![]));
+    }
     let mut service = Service::discover(cwd)?;
     match c.command {
         SessionSub::Up(a) => {
@@ -7088,8 +7096,8 @@ fn cmd_session(cwd: &std::path::Path, c: SessionCmd) -> Result<Reply> {
             });
             Ok(reply(&service, data, vec![]))
         }
-        SessionSub::Lifecycle(_) => {
-            unreachable!("the lifecycle is run before the Service is built")
+        SessionSub::Lifecycle(_) | SessionSub::End(_) => {
+            unreachable!("the lifecycle and an End are run before the Service is built")
         }
     }
 }
@@ -7104,17 +7112,38 @@ fn cmd_session_lifecycle(
         serde_json::to_value(event).expect("lifecycle events are always serializable")
     };
     match c.command {
-        SessionLifecycleSub::List(_) => {
-            let sessions: Vec<String> = home
-                .session_lifecycle_list()?
-                .into_iter()
-                .map(|session| session.to_string())
-                .collect();
-            Ok(reply_in(
-                descriptor,
-                jval!({ "sessions": sessions, "count": sessions.len() }),
-                vec![],
-            ))
+        SessionLifecycleSub::List(a) => {
+            let listed = home.session_lifecycle_list()?;
+            let sessions: Vec<String> = listed.iter().map(ToString::to_string).collect();
+            let mut data = jval!({ "sessions": sessions, "count": sessions.len() });
+            // The sessions one day reads (O-I #1007, face 2): each with an event since the
+            // instant, and each still open however long ago it started — a session running at a
+            // close carries into the next day, and one that crashed shows as running with no
+            // recorded end, which is all its record says.
+            if let Some(since) = a.since {
+                use aikit_core::session_lifecycle::SessionLifecycleState;
+                let mut read = Vec::new();
+                for session in &listed {
+                    let model = home.session_lifecycle_read_model(session)?;
+                    let open = !matches!(
+                        model.state,
+                        SessionLifecycleState::Ended | SessionLifecycleState::Cancelled
+                    );
+                    if open || model.last_event_at_unix_ms >= u128::from(since) {
+                        read.push(serde_json::to_value(&model).map_err(|error| {
+                            AikitError::new(
+                                "session_lifecycle.cli_projection_unserializable",
+                                format!(
+                                    "could not project the session lifecycle read model: {error}"
+                                ),
+                            )
+                        })?);
+                    }
+                }
+                data["since_unix_ms"] = jval!(since);
+                data["read"] = Value::Array(read);
+            }
+            Ok(reply_in(descriptor, data, vec![]))
         }
         SessionLifecycleSub::History(a) => {
             let events = home.session_lifecycle_history(&a.session)?;

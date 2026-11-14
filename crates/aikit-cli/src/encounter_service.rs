@@ -307,6 +307,13 @@ pub enum EncounterRequest {
         expected_native_session_id: String,
         expected_generation: String,
     },
+    /// End the session (O-I manual §19.1: End session ends it, and its end closes its record).
+    /// Its idle native body, when one is resident, is released as `ReleaseNative` releases it,
+    /// and its end is recorded in AIKit's session lifecycle, the record its open started
+    /// (O-I #1016). A turn or a consent request in flight is refused in release's own words.
+    End {
+        agent_session: ResourceRef,
+    },
     /// Explicitly create a fresh body after an owner-observed exact release.
     /// Ordinary OpenModel and Reconnect retain their existing semantics.
     ReplaceModel {
@@ -2071,8 +2078,12 @@ impl EncounterService {
                     .map_err(error)?;
             }
         }
+        let session = request.agent_session.clone();
+        let provider = request.provider.clone();
         let outcome = self.open_native_owned(request, deadline, &mut opening);
-        opening.finish(outcome)
+        let mut receipt = opening.finish(outcome)?;
+        receipt["lifecycle"] = self.record_session_start(&provider, &session);
+        Ok(receipt)
     }
 
     fn open_native_owned(
@@ -3255,6 +3266,9 @@ impl EncounterService {
                 expected_generation,
                 native_control_deadline,
             ),
+            EncounterRequest::End { agent_session } => {
+                self.end_session(agent_session, native_control_deadline)
+            }
             request @ (EncounterRequest::Send { .. }
             | EncounterRequest::SendGroup { .. }
             | EncounterRequest::Delivery { .. }
@@ -3391,6 +3405,14 @@ impl EncounterService {
                 view["permission_authority"] = json!("native-provider-consent");
                 view["history_reclassifications"] =
                     json!(self.store.legacy_load_reclassifications(&agent_session)?);
+                let lifecycle = self.session_lifecycle(&agent_session)?;
+                let pending = !view["permissions"]
+                    .as_array()
+                    .is_none_or(|requests| requests.is_empty());
+                let can_end = !active
+                    && !pending
+                    && (view["connection"]["resident"] == true || lifecycle["running"] == true);
+                view["lifecycle"] = lifecycle;
                 let can_open = view["connection"]["state"] == "Disconnected"
                     && !self
                         .shutdown_requested
@@ -3410,7 +3432,8 @@ impl EncounterService {
                     {"ref":"aikit.encounter.cancel","enabled":active,"reason":if active{None}else{Some("There is no active provider turn")}},
                     {"ref":"aikit.encounter.permission","enabled":!view["permissions"].as_array().is_none_or(|r|r.is_empty()),"reason":"Only an actual pending provider consent request can be answered; this does not confer Actuation authority"},
                     {"ref":"aikit.encounter.model-read","enabled":ready,"reason":if ready{None}else{Some("A ready resident provider is required")}},
-                    {"ref":"aikit.encounter.mode-read","enabled":ready,"reason":if ready{None}else{Some("A ready resident provider is required")}}
+                    {"ref":"aikit.encounter.mode-read","enabled":ready,"reason":if ready{None}else{Some("A ready resident provider is required")}},
+                    {"ref":"aikit.session.end","enabled":can_end,"reason":if can_end{None}else if active||pending{Some("A turn or a consent request in flight must settle before the session ends")}else{Some("This session has no running start to end")}}
                 ]);
                 Ok(view)
             }
@@ -4046,6 +4069,44 @@ pub fn reach(
         }
     };
     exchange(stream, request)
+}
+
+/// End one session through its home's owner (`aikit session end`, the registry's
+/// `aikit.session.end`). An owner is started when none runs, as [`reach`] starts one, so a
+/// session whose body is already gone is still ended from its record. The owner's refusal is
+/// answered in its own words, its code kept beside them.
+#[cfg(unix)]
+pub fn end(home: &AikitHome, cwd: &Path, session: &ResourceRef) -> Result<Value> {
+    let answer = reach(
+        home,
+        cwd,
+        &socket_path(home),
+        &EncounterRequest::End {
+            agent_session: session.clone(),
+        },
+    )?;
+    if answer["ok"] == true {
+        return Ok(answer["data"].clone());
+    }
+    Err(AikitError::new(
+        "encounter.end_refused",
+        answer["error"]["message"]
+            .as_str()
+            .unwrap_or("the encounter owner refused to end the session")
+            .to_owned(),
+    )
+    .with(
+        "owner_code",
+        answer["error"]["code"].as_str().unwrap_or_default(),
+    ))
+}
+
+#[cfg(not(unix))]
+pub fn end(_: &AikitHome, _: &Path, _: &ResourceRef) -> Result<Value> {
+    Err(AikitError::new(
+        "encounter.end_unavailable",
+        "An encounter owner is reached over a Unix socket, which this host does not have",
+    ))
 }
 
 #[cfg(unix)]
