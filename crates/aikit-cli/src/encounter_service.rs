@@ -1712,7 +1712,24 @@ impl EncounterService {
         self.owner_occupancy_fenced(&lifecycle)
     }
 
+    /// The owner closes itself when it serves nothing: no native body resident, none opening, no
+    /// permission pending, no unresolved startup, and no durable conversation or delivery work that
+    /// waits on a worker. It is ShutdownIdle's own critical section and receipt, asked by the owner
+    /// of itself; a busy owner, or one with any of these, stays. Canonical sessions stay in the store,
+    /// and the next caller starts an owner again (`start`). Answers whether it closed. (O-I #1006: the
+    /// owner a session's start brought up stayed after that session ended, with nothing left to serve.)
+    fn close_when_idle(&self) -> bool {
+        self.close_idle(std::process::id(), true).is_ok()
+    }
+
     fn shutdown_idle(&self, expected_pid: u32) -> Result<Value> {
+        self.close_idle(expected_pid, false)
+    }
+
+    /// Idle-only closure. A caller replacing the owner (ShutdownIdle) leaves durable work for the
+    /// owner that replaces it; the owner closing itself, `unattended`, has no successor coming, so
+    /// it also keeps running while any conversation or delivery waits on a worker.
+    fn close_idle(&self, expected_pid: u32, unattended: bool) -> Result<Value> {
         let mut lifecycle = self.owner_exclusive(expected_pid)?;
         if let Lifecycle::Closed(receipt) = &*lifecycle {
             if receipt["idle_only"] == true {
@@ -1724,6 +1741,20 @@ impl EncounterService {
             return Err(AikitError::new("encounter.owner_not_idle",
                 "Current native occupancy or unresolved startup prevents idle-only owner replacement")
                 .with("occupancy", serde_json::to_string(&occupancy).map_err(error)?));
+        }
+        let waiting = [
+            "worker_selectable_recipients",
+            "queued_conversation_sessions",
+            "nonterminal_delivery_rows",
+            "uncertain_delivery_rows",
+        ]
+        .iter()
+        .any(|key| occupancy["durable_work"][*key].as_u64() != Some(0));
+        if unattended && waiting {
+            return Err(AikitError::new(
+                "encounter.owner_has_work",
+                "Durable conversation or delivery work waits on this owner's worker",
+            ));
         }
         // Admission and closure are one native critical section. No resident
         // is stopped, journal reconciled, permission resolved or request replayed.
@@ -3757,6 +3788,20 @@ pub fn socket_path(home: &AikitHome) -> PathBuf {
 }
 
 #[cfg(unix)]
+/// How long an owner nobody asks anything waits before it asks itself whether it serves anything
+/// (`AIKIT_ENCOUNTER_IDLE_CLOSE_SECONDS`; five minutes when unset, and `0` keeps the owner up until it
+/// is shut down). None: the owner never closes itself.
+fn idle_close_grace() -> Option<Duration> {
+    match std::env::var("AIKIT_ENCOUNTER_IDLE_CLOSE_SECONDS") {
+        Ok(seconds) => match seconds.trim().parse::<u64>() {
+            Ok(0) => None,
+            Ok(seconds) => Some(Duration::from_secs(seconds)),
+            Err(_) => Some(Duration::from_secs(300)),
+        },
+        Err(_) => Some(Duration::from_secs(300)),
+    }
+}
+
 pub fn serve(home: AikitHome, socket: &Path) -> Result<()> {
     use std::io::{BufRead, BufReader, Write};
     use std::os::unix::{fs::PermissionsExt, net::UnixListener};
@@ -3808,6 +3853,11 @@ pub fn serve(home: AikitHome, socket: &Path) -> Result<()> {
     let stop = Arc::new(AtomicBool::new(false));
     listener.set_nonblocking(true).map_err(error)?;
     let mut workers: Vec<std::thread::JoinHandle<()>> = Vec::new();
+    // An owner nobody has asked anything for the idle grace asks itself whether it serves anything
+    // (close_when_idle), once a second while that lasts, and closes when it serves nothing.
+    let idle_grace = idle_close_grace();
+    let mut asked_at = Instant::now();
+    let mut idle_checked_at = Instant::now();
     while !stop.load(Ordering::Acquire) {
         // Retire completed threads rather than accumulating one handle per IPC.
         let mut index = 0;
@@ -3821,11 +3871,25 @@ pub fn serve(home: AikitHome, socket: &Path) -> Result<()> {
         let mut stream = match listener.accept() {
             Ok((stream, _)) => stream,
             Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                if clients.load(Ordering::Acquire) > 0 {
+                    asked_at = Instant::now();
+                } else if let Some(grace) = idle_grace {
+                    if asked_at.elapsed() >= grace
+                        && idle_checked_at.elapsed() >= std::time::Duration::from_secs(1)
+                    {
+                        idle_checked_at = Instant::now();
+                        if service.close_when_idle() {
+                            stop.store(true, Ordering::Release);
+                            continue;
+                        }
+                    }
+                }
                 std::thread::sleep(std::time::Duration::from_millis(20));
                 continue;
             }
             Err(failure) => return Err(error(failure)),
         };
+        asked_at = Instant::now();
         // Accepted sockets inherit O_NONBLOCK on macOS. Workers use bounded
         // blocking reads/writes, so restore that mode before receiving a frame
         // or writing a response larger than the socket's immediate capacity.

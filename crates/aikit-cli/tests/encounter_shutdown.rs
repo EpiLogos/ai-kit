@@ -926,3 +926,71 @@ fn actual_legacy_owner_refuses_new_idle_tag_and_keeps_its_existing_lifecycle() {
     assert!(!socket.exists());
     directory.finish();
 }
+
+/// An owner run as the CLI runs it, with its idle grace (`AIKIT_ENCOUNTER_IDLE_CLOSE_SECONDS`).
+fn graced_owner(
+    home: &AikitHome,
+    directory: &Path,
+    socket: &Path,
+    grace: &str,
+) -> std::process::Child {
+    std::process::Command::new(env!("CARGO_BIN_EXE_aikit-session-space"))
+        .arg("-C")
+        .arg(directory)
+        .args(["encounter-serve", "--socket"])
+        .arg(socket)
+        .env("AIKIT_HOME", home.root())
+        .env("AIKIT_ENCOUNTER_IDLE_CLOSE_SECONDS", grace)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap()
+}
+
+#[test]
+fn an_owner_that_serves_nothing_closes_itself_once_nobody_has_asked_it_anything_for_its_grace() {
+    let directory = idle_fixture();
+    let home = AikitHome::at(directory.path().join("owner"));
+    let socket = directory.path().join("ipc/owner.sock");
+    // With its idle close off, an owner that serves nothing stays up until it is shut down.
+    let mut kept = graced_owner(&home, directory.path(), &socket, "0");
+    let pid = ready(&socket);
+    assert_eq!(pid, kept.id());
+    thread::sleep(Duration::from_secs(3));
+    assert!(
+        kept.try_wait().unwrap().is_none(),
+        "an owner whose idle close is off closed itself"
+    );
+    assert_eq!(
+        request(&socket, &EncounterRequest::Shutdown { expected_pid: pid }).unwrap()["ok"],
+        true
+    );
+    assert!(kept.wait().unwrap().success());
+    // With a grace of a second, an owner that holds no body and has no work closes itself once nobody has asked it
+    // anything for that long, and lets go of its socket; the next caller starts one again.
+    let mut idle = graced_owner(&home, directory.path(), &socket, "1");
+    assert_eq!(ready(&socket), idle.id());
+    let deadline = Instant::now() + Duration::from_secs(15);
+    let status = loop {
+        if let Some(status) = idle.try_wait().unwrap() {
+            break status;
+        }
+        if Instant::now() >= deadline {
+            let _ = idle.kill();
+            panic!("an idle owner with a grace of a second did not close itself in 15 s");
+        }
+        thread::sleep(Duration::from_millis(50));
+    };
+    assert!(status.success(), "the idle owner closed with {status}");
+    assert!(!socket.exists(), "the closed owner kept its socket");
+    let mut again = graced_owner(&home, directory.path(), &socket, "0");
+    let pid = ready(&socket);
+    assert_eq!(pid, again.id());
+    assert_eq!(
+        request(&socket, &EncounterRequest::Shutdown { expected_pid: pid }).unwrap()["ok"],
+        true
+    );
+    assert!(again.wait().unwrap().success());
+    directory.finish();
+}
