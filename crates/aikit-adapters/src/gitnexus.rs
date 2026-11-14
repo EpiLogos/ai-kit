@@ -807,11 +807,21 @@ fn binary_identity(binary: &str) -> Option<String> {
     ))
 }
 
+/// Where the surfaces are remembered: the AIKit home's `cache/`, the home found by AIKit's own
+/// rule (`AIKIT_HOME`, else `~/.aikit`). A code-lens read runs before any home is found, so the
+/// cache is kept only in a home that stands. A home not made yet, or one whose World was removed
+/// (O-I #1001), is never made for a cache.
 fn surface_cache_path() -> Option<PathBuf> {
     let home = std::env::var_os("AIKIT_HOME")
+        .filter(|home| !home.is_empty())
         .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".aikit")))?;
-    Some(home.join("cache").join("gitnexus-cli-surface.json"))
+        .or_else(|| {
+            std::env::var_os("HOME")
+                .filter(|home| !home.is_empty())
+                .map(|home| PathBuf::from(home).join(".aikit"))
+        })?;
+    home.is_dir()
+        .then(|| home.join("cache").join("gitnexus-cli-surface.json"))
 }
 
 fn discover_cli_memoised<R: CommandRunner>(runner: &R, binary: &str) -> GitNexusCliSurface {
@@ -843,7 +853,8 @@ fn discover_cli_memoised<R: CommandRunner>(runner: &R, binary: &str) -> GitNexus
                 persisted.insert(identity.clone(), surface.clone());
                 if let Some(path) = &cache_path {
                     if let Some(parent) = path.parent() {
-                        let _ = std::fs::create_dir_all(parent);
+                        // `cache/` alone, in the home that stood: never the home or what holds it.
+                        let _ = std::fs::create_dir(parent);
                     }
                     if let Ok(bytes) = serde_json::to_vec_pretty(&persisted) {
                         let temp = path.with_extension(format!("json.{}", std::process::id()));
