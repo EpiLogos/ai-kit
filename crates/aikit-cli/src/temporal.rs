@@ -253,6 +253,82 @@ impl FloorLedger {
             }
         }
     }
+
+    fn claim_path(&self, handed: &str) -> PathBuf {
+        self.dir.join(format!(
+            "{}.claim.json",
+            blake3::hash(handed.as_bytes()).to_hex()
+        ))
+    }
+
+    /// The session that claimed the record `handed` in its life `life` ([`holds_handed`]), if
+    /// one did. A claim from another life is no claim.
+    fn handed_claimant(&self, handed: &str, life: usize) -> Option<String> {
+        let text = std::fs::read_to_string(self.claim_path(handed)).ok()?;
+        let claim: HandedClaim = serde_json::from_str(&text).ok()?;
+        (claim.life == life).then_some(claim.session)
+    }
+
+    /// Claim the record `handed` for `session` in its life `life`, unless another session holds it
+    /// in that life. Answers whether `session` holds it. A claim that cannot be kept leaves the
+    /// record to the session that records on it, as before claims were kept.
+    fn claim_handed(&self, handed: &str, session: &str, life: usize) -> bool {
+        if let Some(claimant) = self.handed_claimant(handed, life) {
+            return claimant == session;
+        }
+        let claim = HandedClaim {
+            session: session.to_owned(),
+            life,
+        };
+        if let Ok(text) = serde_json::to_string(&claim) {
+            if std::fs::create_dir_all(&self.dir).is_ok() {
+                let _ = std::fs::write(self.claim_path(handed), text);
+            }
+        }
+        true
+    }
+}
+
+/// Which harness session holds a handed record in one of its lives ([`holds_handed`]).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct HandedClaim {
+    session: String,
+    life: usize,
+}
+
+/// Whether the harness session `session` holds the record it was `handed` (ai-kit#640). The
+/// record is the body's: in each life of the record — from a start to its end — the first session
+/// of its client to start on it claims it, whether the owner's open recorded that start first (it
+/// records once the open answers) or the body's own start did. Any other session handed the same
+/// record in that life is a harness the body launched in turn, which inherited its environment: it
+/// keeps its own record, so its end never ends the body's. The record's next life (the owner's next
+/// open, a resume) is claimed again by the session that starts it, whatever its id. Where the
+/// record or the claim cannot be read, the record is the session's, as before claims were kept.
+fn holds_handed(
+    home: Option<&AikitHome>,
+    ledger: Option<&FloorLedger>,
+    handed: &str,
+    session: &str,
+    kind: &HookEventKind,
+) -> bool {
+    let (Some(home), Some(ledger)) = (home, ledger) else {
+        return true;
+    };
+    let Ok(lives) = crate::session_lifecycle_ops::harness_session_lives(home, handed) else {
+        return true;
+    };
+    if *kind == HookEventKind::SessionStart {
+        // A start on a record that is not live begins its next life.
+        let life = if lives.live {
+            lives.starts
+        } else {
+            lives.starts + 1
+        };
+        return ledger.claim_handed(handed, session, life);
+    }
+    ledger
+        .handed_claimant(handed, lives.starts)
+        .is_none_or(|claimant| claimant == session)
 }
 
 /// Where a session stands in a Central world: the root, and the Project it is
@@ -312,7 +388,9 @@ pub struct HeldNow {
 /// that session's record ([`process_session_lifecycle_ref`]): its start and
 /// end are recorded there, so its start replays the owner's and its end after
 /// the owner's End is already recorded, never a second record under the
-/// harness's own id (ai-kit#640). See [`handed_session_ref`].
+/// harness's own id (ai-kit#640). A harness the body launches in turn inherits
+/// the handed ref and keeps its own record ([`holds_handed`]). See
+/// [`handed_session_ref`].
 #[allow(clippy::too_many_arguments)]
 pub fn session_boundary<R: CommandRunner>(
     decision: &mut HookDecision,
@@ -334,6 +412,7 @@ pub fn session_boundary<R: CommandRunner>(
         return;
     };
     let reference = handed_session_ref(handed, &event.client)
+        .filter(|handed| holds_handed(home, ledger, handed, &session, &event.kind))
         .unwrap_or_else(|| session_ref(&event.client, &session));
     let held = ledger.and_then(|ledger| ledger.session_now(&session));
     if event.kind == HookEventKind::SessionStart {
@@ -1498,6 +1577,74 @@ mod tests {
             None
         );
         assert_eq!(handed_session_ref(None, "claude"), None);
+    }
+
+    /// ai-kit#640 (re-read): a claude the body launches in turn inherits the record the body was
+    /// handed. The record is the body's — the first session of its client to start on it in this
+    /// life of the record — so the nested session's start and end land on its own record and the
+    /// body's session stands running until its own end. The body's start may come before the
+    /// owner's (the owner records after the open answers) or after it. A later life (the owner's
+    /// next open, a resume) is claimed again by the session that starts it, whatever its id.
+    #[test]
+    fn a_session_the_body_launches_in_turn_keeps_its_own_record() {
+        use SessionLifecycleEventKind::{SessionEnded as Ended, SessionStarted as Started};
+        const OWNED: &str = "aikit:session:claude:agent-session/talk";
+        let temp = tempfile::tempdir().unwrap();
+        let home = AikitHome::at(temp.path());
+        let ledger = FloorLedger::in_state(&home.state());
+        let runner = ScriptedRunner::new();
+        let kinds = |session_ref: &str| -> Vec<SessionLifecycleEventKind> {
+            home.session_lifecycle_history(&harness_session(session_ref).unwrap())
+                .map(|history| history.iter().map(|event| event.kind).collect())
+                .unwrap_or_default()
+        };
+        let own = |session: &str| format!("aikit:session:claude:{session}");
+        let boundary = |kind: HookEventKind, session: &str| {
+            let event = hook_at(PROJECT, kind, json!({"session_id": session}));
+            let mut result = decision(event.kind.clone());
+            session_boundary(
+                &mut result,
+                &event,
+                None,
+                Some(&home),
+                Some(&ledger),
+                &runner,
+                false,
+                Some(OWNED),
+            );
+            assert!(result.warnings.is_empty(), "{:?}", result.warnings);
+        };
+
+        // The body starts before the owner records its open; then a claude it launched in turn
+        // starts and ends while the body runs.
+        boundary(HookEventKind::SessionStart, "sess-body");
+        assert_eq!(
+            record_harness_start(&home, OWNED).unwrap(),
+            HarnessStart::Replayed
+        );
+        boundary(HookEventKind::SessionStart, "sess-nested");
+        boundary(HookEventKind::SessionEnd, "sess-nested");
+        assert_eq!(kinds(OWNED), [Started], "the body's session still runs");
+        assert_eq!(kinds(&own("sess-nested")), [Started, Ended]);
+        // The body's own end ends its record; nothing lands under the body's own id.
+        boundary(HookEventKind::SessionEnd, "sess-body");
+        assert_eq!(kinds(OWNED), [Started, Ended]);
+        assert!(kinds(&own("sess-body")).is_empty());
+
+        // The owner's next open records first this time; the next body, under another id, claims
+        // the record's new life, and a claude it launches keeps its own record again.
+        assert_eq!(
+            record_harness_start(&home, OWNED).unwrap(),
+            HarnessStart::Resumed
+        );
+        boundary(HookEventKind::SessionStart, "sess-next");
+        boundary(HookEventKind::SessionStart, "sess-nested-2");
+        boundary(HookEventKind::SessionEnd, "sess-nested-2");
+        assert_eq!(kinds(OWNED), [Started, Ended, Started]);
+        assert_eq!(kinds(&own("sess-nested-2")), [Started, Ended]);
+        boundary(HookEventKind::SessionEnd, "sess-next");
+        assert_eq!(kinds(OWNED), [Started, Ended, Started, Ended]);
+        assert!(kinds(&own("sess-next")).is_empty());
     }
 
     #[test]

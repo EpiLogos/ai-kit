@@ -3,8 +3,6 @@
 //! A session's End releases its body here too, and its start and end are kept in
 //! AIKit's session lifecycle, the record a harness's own hooks keep (O-I #1016).
 use super::*;
-use crate::session_lifecycle_ops::SessionLifecycleServiceOps;
-use aikit_core::session_lifecycle::SessionLifecycleEventKind;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
@@ -350,15 +348,7 @@ pub(super) fn first_lifecycle_ref(provider: &EncounterProvider, session: &Resour
 /// Whether the record `session_ref` names has a start with no end yet. A record never started is
 /// not running.
 fn lifecycle_running(home: &AikitHome, session_ref: &str) -> Result<bool> {
-    let id = crate::session_lifecycle_ops::harness_session(session_ref)?;
-    match home.session_lifecycle_history(&id) {
-        Ok(history) => Ok(!matches!(
-            history.last().map(|event| event.kind),
-            Some(SessionLifecycleEventKind::SessionEnded | SessionLifecycleEventKind::Cancelled)
-        )),
-        Err(unknown) if unknown.code() == "session_lifecycle.unknown_session" => Ok(false),
-        Err(failure) => Err(failure),
-    }
+    Ok(crate::session_lifecycle_ops::harness_session_lives(home, session_ref)?.live)
 }
 
 impl Resident {
