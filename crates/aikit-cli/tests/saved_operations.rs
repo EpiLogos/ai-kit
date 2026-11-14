@@ -845,22 +845,31 @@ fn a_human_typed_run_is_attributed_to_the_human() {
 fn a_terminal_or_factory_feed_reports_a_batch_as_json_lines() {
     let world = World::new();
     let secret = "ghp_A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8";
-    let line = |command: &str, at: &str| {
+    // Dated back from now: the observer keeps 30 days of runs, so a batch
+    // dated on fixed days stops counting once those days are a month old.
+    let start = jiff::Timestamp::now().as_second() - 4 * 86_400;
+    let at = |seconds: i64| {
+        jiff::Timestamp::from_second(start + seconds)
+            .unwrap()
+            .to_string()
+    };
+    let line = |command: &str, when: String| {
         serde_json::json!({
             "command": command, "cwd": "/work/app", "by": "human",
-            "at": at, "session": "ses_1"
+            "at": when, "session": "ses_1"
         })
         .to_string()
     };
+    let day = 86_400;
     let batch = [
-        line("terraform plan -out=tf.plan", "2026-10-16T09:00:00Z"),
-        line("ls -la", "2026-10-16T09:01:00Z"),
-        line("terraform plan -out=tf.plan", "2026-10-15T09:00:00Z"),
+        line("terraform plan -out=tf.plan", at(2 * day)),
+        line("ls -la", at(2 * day + 60)),
+        line("terraform plan -out=tf.plan", at(day)),
         line(
             &format!("curl -H 'Authorization: token {secret}' https://x"),
-            "2026-10-16T09:02:00Z",
+            at(2 * day + 120),
         ),
-        line("terraform plan -out=tf.plan", "2026-10-14T09:00:00Z"),
+        line("terraform plan -out=tf.plan", at(0)),
     ]
     .join("\n");
 
