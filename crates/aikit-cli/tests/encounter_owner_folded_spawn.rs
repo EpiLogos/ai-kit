@@ -161,10 +161,43 @@ fn an_owner_is_never_started_in_a_world_that_is_gone() {
             "{verb} in a removed World must be refused, naming why: {} {stdout} {stderr}",
             output.status
         );
+        let named = format!("({})", world.join("home").display());
         assert!(
-            stderr.contains(&world.join("home").display().to_string()),
-            "the refusal names the folder that is gone: {stderr}"
+            stderr.contains(&named),
+            "the refusal names the folder that is gone, {named}: {stderr}"
         );
         assert!(!world.exists(), "{verb} created the removed World again");
     }
+}
+
+/// The read a window makes when its change watch announces a move (the World Model's Models slice
+/// runs `aikit model-catalogue show`) opens AIKit like every other command. In a World that has been
+/// removed it is refused before anything is made: laying out the home would make the removed World
+/// again, after which the owner's own guard would pass (O-I #1001).
+#[test]
+fn no_command_lays_out_a_home_in_a_world_that_is_gone() {
+    let temp = tempfile::tempdir().unwrap();
+    let world = temp.path().join("world");
+    let home = world.join("home").join(".aikit");
+    let cwd = world.join("home").join("Central");
+    std::fs::create_dir_all(&cwd).unwrap();
+    std::fs::remove_dir_all(&world).unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_aikit"))
+        .args(["model-catalogue", "show", "--json"])
+        .current_dir(temp.path())
+        .env("AIKIT_HOME", &home)
+        .env("HOME", world.join("home"))
+        .env_remove("AIKIT_CONTEXT_ID")
+        .env_remove("AIKIT_ISOLATION")
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !output.status.success() && format!("{stdout}{stderr}").contains("home.ground_gone"),
+        "a read in a removed World must be refused, naming why: {} {stdout} {stderr}",
+        output.status
+    );
+    assert!(!world.exists(), "the read created the removed World again");
 }

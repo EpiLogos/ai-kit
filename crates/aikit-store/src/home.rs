@@ -253,8 +253,12 @@ impl AikitHome {
     }
 
     /// Create the whole documented layout. Idempotent: existing directories and
-    /// their contents are left exactly as they were.
+    /// their contents are left exactly as they were. Every command that opens
+    /// AIKit runs this first, so it makes the home and nothing around it: where
+    /// the folder that holds the home is gone it refuses ([`Self::ground_present`]),
+    /// and it never makes that folder, so no command brings a removed World back.
     pub fn ensure_layout(&self) -> Result<()> {
+        self.ground_present()?;
         for dir in [
             self.root.clone(),
             self.registries(),
@@ -272,7 +276,7 @@ impl AikitHome {
             self.cache(),
             self.logs(),
         ] {
-            create_dir_all(&dir)?;
+            self.create_within(&dir)?;
         }
         Ok(())
     }
@@ -280,14 +284,58 @@ impl AikitHome {
     /// Create (or confirm) one context's directory, including `generations/`.
     pub fn ensure_context_dir(&self, context: &ContextId) -> Result<PathBuf> {
         let dir = self.context_dir(context);
-        create_dir_all(&dir.join("generations"))?;
+        self.create_within(&dir.join("generations"))?;
         Ok(dir)
     }
 
     pub fn ensure_session_dir(&self, session: &SessionId) -> Result<PathBuf> {
         let dir = self.session_dir(session);
-        create_dir_all(&dir)?;
+        self.create_within(&dir)?;
         Ok(dir)
+    }
+
+    /// Make `dir`, a folder of this home, and the folders between it and the
+    /// home, one at a time from the home down. Nothing above the home is made:
+    /// a home whose folder went while it was being made (its World removed
+    /// meanwhile) fails here, where `create_dir_all` would make the removed
+    /// folders again around it.
+    fn create_within(&self, dir: &Path) -> Result<()> {
+        let below = dir.strip_prefix(&self.root).map_err(|_| {
+            AikitError::new(
+                "home.create_failed",
+                format!(
+                    "{} is not inside the AIKit home {}",
+                    dir.display(),
+                    self.root.display()
+                ),
+            )
+            .with("path", dir.display().to_string())
+        })?;
+        let mut path = self.root.clone();
+        make_dir(&path)?;
+        for part in below.components() {
+            path.push(part);
+            make_dir(&path)?;
+        }
+        Ok(())
+    }
+}
+
+/// Make one folder whose parent stands. A folder already there is left as it
+/// is; a parent that is gone is the home's ground gone, and nothing is made.
+fn make_dir(path: &Path) -> Result<()> {
+    match std::fs::create_dir(path) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists && path.is_dir() => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Err(AikitError::new(
+            "home.ground_gone",
+            format!(
+                "{}: the folder that holds it is gone, and nothing is created there",
+                path.display()
+            ),
+        )
+        .with("path", path.display().to_string())),
+        Err(e) => Err(io_error("home.create_failed", path, &e)),
     }
 }
 
