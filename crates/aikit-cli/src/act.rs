@@ -81,6 +81,13 @@ const ROUTE_ACTIONS: &[RouteAction] = &[
         route: &["gateway", "heard"],
         mutation_class: "read-only",
     },
+    // The receipt a launch binds a session's work to (Factory's task run on a seated session, O-I #1006).
+    RouteAction {
+        id: "aikit.model.selection",
+        title: "Read the selection a launch binds for a session AIKit opened",
+        route: &["compose", "model", "selection"],
+        mutation_class: "read-only",
+    },
 ];
 
 /// The arguments a route takes that are its input. `--json` is not one: the doorway always asks

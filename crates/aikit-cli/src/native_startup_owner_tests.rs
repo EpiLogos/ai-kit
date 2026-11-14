@@ -132,6 +132,7 @@ time.sleep(60)
         .apply(EncounterRequest::View {
             agent_session: session.clone(),
             before: None,
+            after: None,
         })
         .unwrap();
     assert_eq!(view["connection"]["state"], "Opening");
@@ -243,6 +244,7 @@ fn reconciliation_discovery_and_generic_request_refuse_missing_native_recovery()
         .apply(EncounterRequest::View {
             agent_session: session,
             before: None,
+            after: None,
         })
         .unwrap();
     let action = view["actions"]
@@ -769,7 +771,8 @@ fn actual_pi_resident_controls_share_a_finite_owner_budget_without_losing_identi
         service
             .apply(EncounterRequest::View {
                 agent_session: session.clone(),
-                before: None
+                before: None,
+                after: None
             })
             .unwrap()["connection"]["native_session_id"],
         native

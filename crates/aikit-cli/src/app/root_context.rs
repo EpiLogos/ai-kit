@@ -141,6 +141,41 @@ where
         }
     }
 
+    // A workcell seat (`worktrees/<track>/<member>`: the World's persistent
+    // checkout of one of its projects) that carries its project's ProjectCentral
+    // is that project at the seat when no profile marker stands over it: none
+    // of its own and none of Central's root to inherit (a fresh World keeps no
+    // root marker). A seat that inherits the root marker keeps the root's
+    // standing below; one with its own marker was discovered above.
+    if discovered.is_none() {
+        if let Ok(relative) = current.strip_prefix(root.join("worktrees")) {
+            let mut members = relative.components();
+            if let (Some(track), Some(member)) = (members.next(), members.next()) {
+                let seat = root
+                    .join("worktrees")
+                    .join(track.as_os_str())
+                    .join(member.as_os_str());
+                match std::fs::symlink_metadata(seat.join("ProjectCentral/project.json")) {
+                    Ok(_) => {
+                        let chain = scope_chain(&seat, None);
+                        return Ok((
+                            Some(DiscoveredProject {
+                                root: seat,
+                                chain,
+                                specification: None,
+                                skill_sets: Vec::new(),
+                            }),
+                            None,
+                            configured,
+                        ));
+                    }
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(e) => return Err(invalid(e.to_string())),
+                }
+            }
+        }
+    }
+
     // A material checkout may live elsewhere beneath Central (for example a
     // managed worktree) while inheriting Central's root `.aikit` marker. Keep
     // its narrower profile layers, but recognise the semantic meta-project
@@ -301,5 +336,48 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![0, 1]
         );
+    }
+
+    #[test]
+    fn a_seat_with_no_marker_over_it_is_its_project_and_one_under_the_root_marker_keeps_the_root() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("Central");
+        let seat = root.join("worktrees/env-1/atelier");
+        for path in [
+            root.join("Control"),
+            root.join("Work/atelier/ProjectCentral"),
+            seat.join("ProjectCentral"),
+            seat.join("src"),
+        ] {
+            std::fs::create_dir_all(path).unwrap();
+        }
+        std::fs::write(seat.join("ProjectCentral/project.json"), "{}").unwrap();
+        let central_root = |key: &str| (key == "CENTRAL_ROOT").then(|| root.display().to_string());
+        let canonical_seat = seat.canonicalize().unwrap();
+
+        // A fresh World: no marker anywhere, so the seat is its project, from
+        // anywhere inside it; never the root.
+        for cwd in [seat.clone(), seat.join("src")] {
+            let (project, meta_root, _) = discover(&cwd, &central_root, None).unwrap();
+            let project = project.expect("the seat's project");
+            assert_eq!(project.root, canonical_seat);
+            assert_eq!(meta_root, None);
+        }
+        // A track folder or a seat without ProjectCentral stays unbound.
+        let (project, _, _) = discover(&root.join("worktrees/env-1"), &central_root, None).unwrap();
+        assert!(project.is_none());
+        std::fs::create_dir_all(root.join("worktrees/env-1/loose")).unwrap();
+        let (project, _, _) =
+            discover(&root.join("worktrees/env-1/loose"), &central_root, None).unwrap();
+        assert!(project.is_none());
+
+        // Central's root marker over the seat: the seat inherits the root's
+        // standing, as before.
+        std::fs::create_dir_all(root.join(".aikit")).unwrap();
+        let discovered = crate::discover::discover_project(&seat).unwrap();
+        let (project, meta_root, _) = discover(&seat, &central_root, Some(discovered)).unwrap();
+        let canonical_root = root.canonicalize().unwrap();
+        assert_eq!(meta_root.as_ref(), Some(&canonical_root));
+        assert_eq!(project.unwrap().root, canonical_root);
     }
 }

@@ -376,7 +376,11 @@ impl ResidentDayAgent {
     }
 
     fn resident(&self) -> ResidentOwner {
-        ResidentOwner::at(crate::encounter_service::socket_path(&self.home))
+        ResidentOwner::at(
+            self.home.clone(),
+            self.cwd.clone(),
+            crate::encounter_service::socket_path(&self.home),
+        )
     }
 
     fn failed(what: &str, error: OwnerError) -> TurnFailure {
@@ -477,14 +481,14 @@ impl ResidentDayAgent {
                 error.message()
             ))
         })?;
-        if self.owner(&EncounterRequest::Health).is_err() {
-            crate::encounter_service::start(&self.home, &self.cwd).map_err(|error| {
-                TurnFailure::Failed(format!(
-                    "the encounter owner is not running and could not be started: {}",
-                    error.message()
-                ))
-            })?;
-        }
+        // The owner is asked through the one start path (ResidentOwner), which starts it when none
+        // answers.
+        self.owner(&EncounterRequest::Health).map_err(|error| {
+            TurnFailure::Failed(format!(
+                "the encounter owner is not running and could not be started: {}",
+                error.message
+            ))
+        })?;
         let provider = self.chosen_provider()?;
         let (space, session) = self.prepared_session(world_ref).map_err(|error| {
             TurnFailure::Failed(format!(

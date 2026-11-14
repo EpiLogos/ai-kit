@@ -115,18 +115,38 @@ impl EncounterStore {
             *held = Some(Box::new(notify));
         }
     }
-    /// Bounded encounter presentation from the canonical owner journal.
+    /// Bounded encounter presentation from the canonical owner journal: the newest blocks before `before`.
     pub fn view(&self, session: &ResourceRef, before: Option<u64>) -> Result<Value> {
+        self.view_page(session, before, None)
+    }
+    /// The same presentation read forward: the blocks after the block `after`, oldest first, so a reader that holds a
+    /// block's id reads what came after it whatever the session held before (`more` names a further page).
+    pub fn view_after(&self, session: &ResourceRef, after: u64) -> Result<Value> {
+        self.view_page(session, None, Some(after))
+    }
+    fn view_page(
+        &self,
+        session: &ResourceRef,
+        before: Option<u64>,
+        after: Option<u64>,
+    ) -> Result<Value> {
         validate(session)?;
         let connection = self.connection.lock().map_err(failure)?;
-        let mut query=connection.prepare("SELECT id,CASE WHEN kind='assistant' AND NOT EXISTS(SELECT 1 FROM encounter_blocks AS earlier WHERE earlier.session=encounter_blocks.session AND earlier.kind='user' AND earlier.id<encounter_blocks.id) THEN 'provider-notice' ELSE kind END,text FROM encounter_blocks WHERE session=?1 AND id<?2 AND NOT EXISTS(SELECT 1 FROM encounter_block_exclusions AS excluded WHERE excluded.session=encounter_blocks.session AND excluded.block_id=encounter_blocks.id) ORDER BY id DESC LIMIT 17").map_err(failure)?;
-        let rows=query.query_map(params![session.as_str(),before.unwrap_or(i64::MAX as u64)],|row|Ok(serde_json::json!({"id":row.get::<_,u64>(0)?,"kind":row.get::<_,String>(1)?,"text":row.get::<_,String>(2)?}))).map_err(failure)?;
+        let (bound, order) = match after {
+            Some(_) => ("id>?2", "ASC"),
+            None => ("id<?2", "DESC"),
+        };
+        let mut query=connection.prepare(&format!("SELECT id,CASE WHEN kind='assistant' AND NOT EXISTS(SELECT 1 FROM encounter_blocks AS earlier WHERE earlier.session=encounter_blocks.session AND earlier.kind='user' AND earlier.id<encounter_blocks.id) THEN 'provider-notice' ELSE kind END,text FROM encounter_blocks WHERE session=?1 AND {bound} AND NOT EXISTS(SELECT 1 FROM encounter_block_exclusions AS excluded WHERE excluded.session=encounter_blocks.session AND excluded.block_id=encounter_blocks.id) ORDER BY id {order} LIMIT 17")).map_err(failure)?;
+        let mark = after.unwrap_or_else(|| before.unwrap_or(i64::MAX as u64));
+        let rows=query.query_map(params![session.as_str(),mark],|row|Ok(serde_json::json!({"id":row.get::<_,u64>(0)?,"kind":row.get::<_,String>(1)?,"text":row.get::<_,String>(2)?}))).map_err(failure)?;
         let mut blocks = rows
             .collect::<std::result::Result<Vec<_>, _>>()
             .map_err(failure)?;
         let more = blocks.len() > 16;
         blocks.truncate(16);
-        blocks.reverse();
+        if after.is_none() {
+            blocks.reverse();
+        }
         Ok(
             serde_json::json!({"agent_session":session,"blocks":blocks,"more":more,"draft":draft_in(&connection,session)?,"prepared_context_receipts":context::receipts_in(&connection,session)?,"now_context_receipts":now_context_receipts_in(&connection,session)?}),
         )
@@ -946,6 +966,59 @@ mod tests {
                 .count(),
             1
         );
+    }
+    /// O-I #1006 (review F5): a reader that holds a block's id reads the blocks after it, oldest first, page by page, however
+    /// many the session held before; the newest-first view's window of 16 does not hide them.
+    #[test]
+    fn the_blocks_after_a_block_are_read_forward_whatever_the_session_held_before() {
+        let root = tempfile::tempdir().unwrap();
+        let home = AikitHome::at(root.path());
+        let session = ResourceRef::parse("agent-session/held-twenty").unwrap();
+        let store = EncounterStore::open(&home).unwrap();
+        let user = |text: &str| serde_json::json!({"kind":"user-message","text":text});
+        let said = |text: &str| serde_json::json!({"kind":"provider","event":{"Signal":{"kind":{"kind":"agent-message-segment","text":text}}}});
+        for turn in 0..10 {
+            store
+                .append(&session, &user(&format!("earlier {turn}")))
+                .unwrap();
+            store
+                .append(&session, &said(&format!("answer {turn}")))
+                .unwrap();
+        }
+        let held = store.view(&session, None).unwrap();
+        assert_eq!(held["blocks"].as_array().unwrap().len(), 16);
+        let mark = held["blocks"][15]["id"].as_u64().unwrap();
+        store.append(&session, &user("the task")).unwrap();
+        store.append(&session, &said("the task's answer")).unwrap();
+        let after = store.view_after(&session, mark).unwrap();
+        let texts = |page: &Value| {
+            page["blocks"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|block| block["text"].as_str().unwrap().to_owned())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(texts(&after), ["the task", "the task's answer"]);
+        assert_eq!(after["more"], false);
+        // Forward from the first, a page at a time: every block once, in order.
+        let mut read = Vec::new();
+        let mut from = 0;
+        loop {
+            let page = store.view_after(&session, from).unwrap();
+            read.extend(texts(&page));
+            from = page["blocks"]
+                .as_array()
+                .unwrap()
+                .last()
+                .map_or(from, |block| block["id"].as_u64().unwrap());
+            if page["more"] != true {
+                break;
+            }
+        }
+        assert_eq!(read.len(), 22);
+        assert_eq!(read[0], "earlier 0");
+        assert_eq!(read[21], "the task's answer");
     }
     #[test]
     fn actual_history_pages_survive_reopen_and_composer_conflicts() {

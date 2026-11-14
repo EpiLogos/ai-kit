@@ -340,6 +340,12 @@ pub enum EncounterRequest {
     ModelRead {
         agent_session: ResourceRef,
     },
+    /// Read the resident a session stands on, as its open receipt named it: its space, body basis, selected-model
+    /// basis (none for a session opened without a model policy) and the native session and model it reports now. The
+    /// selection receipt a launch binds is issued from it (`aikit compose model selection`).
+    Selection {
+        agent_session: ResourceRef,
+    },
     /// Reclassify only a causally proven legacy native-load replay projection.
     ClassifyLegacyLoadReplay {
         agent_session: ResourceRef,
@@ -445,6 +451,9 @@ pub enum EncounterRequest {
     View {
         agent_session: ResourceRef,
         before: Option<u64>,
+        /// Read forward instead: the blocks after this block, oldest first (`EncounterStore::view_after`).
+        #[serde(default)]
+        after: Option<u64>,
     },
     Open {
         space: SessionSpaceRef,
@@ -1712,7 +1721,24 @@ impl EncounterService {
         self.owner_occupancy_fenced(&lifecycle)
     }
 
+    /// The owner closes itself when it serves nothing: no native body resident, none opening, no
+    /// permission pending, no unresolved startup, and no durable conversation or delivery work that
+    /// waits on a worker. It is ShutdownIdle's own critical section and receipt, asked by the owner
+    /// of itself; a busy owner, or one with any of these, stays. Canonical sessions stay in the store,
+    /// and the next caller starts an owner again (`start`). Answers whether it closed. (O-I #1006: the
+    /// owner a session's start brought up stayed after that session ended, with nothing left to serve.)
+    fn close_when_idle(&self) -> bool {
+        self.close_idle(std::process::id(), true).is_ok()
+    }
+
     fn shutdown_idle(&self, expected_pid: u32) -> Result<Value> {
+        self.close_idle(expected_pid, false)
+    }
+
+    /// Idle-only closure. A caller replacing the owner (ShutdownIdle) leaves durable work for the
+    /// owner that replaces it; the owner closing itself, `unattended`, has no successor coming, so
+    /// it also keeps running while any conversation or delivery waits on a worker.
+    fn close_idle(&self, expected_pid: u32, unattended: bool) -> Result<Value> {
         let mut lifecycle = self.owner_exclusive(expected_pid)?;
         if let Lifecycle::Closed(receipt) = &*lifecycle {
             if receipt["idle_only"] == true {
@@ -1724,6 +1750,20 @@ impl EncounterService {
             return Err(AikitError::new("encounter.owner_not_idle",
                 "Current native occupancy or unresolved startup prevents idle-only owner replacement")
                 .with("occupancy", serde_json::to_string(&occupancy).map_err(error)?));
+        }
+        let waiting = [
+            "worker_selectable_recipients",
+            "queued_conversation_sessions",
+            "nonterminal_delivery_rows",
+            "uncertain_delivery_rows",
+        ]
+        .iter()
+        .any(|key| occupancy["durable_work"][*key].as_u64() != Some(0));
+        if unattended && waiting {
+            return Err(AikitError::new(
+                "encounter.owner_has_work",
+                "Durable conversation or delivery work waits on this owner's worker",
+            ));
         }
         // Admission and closure are one native critical section. No resident
         // is stopped, journal reconciled, permission resolved or request replayed.
@@ -3295,9 +3335,19 @@ impl EncounterService {
             EncounterRequest::View {
                 agent_session,
                 before,
+                after,
             } => {
                 self.require_attached(&agent_session)?;
-                let mut view = self.store.view(&agent_session, before)?;
+                let mut view = match (before, after) {
+                    (_, None) => self.store.view(&agent_session, before)?,
+                    (None, Some(after)) => self.store.view_after(&agent_session, after)?,
+                    (Some(_), Some(_)) => {
+                        return Err(AikitError::new(
+                            "encounter.view_direction",
+                            "A view reads back from `before` or forward from `after`, not both",
+                        ))
+                    }
+                };
                 let resident = self
                     .residents
                     .lock()
@@ -3412,6 +3462,35 @@ impl EncounterService {
                     },
                     "pinned_model_id":resident.model.as_ref().map(|model| &model.policy.provider_native_id),
                     "standing":"provider-reported-configuration-not-independent-selection-or-inference-proof"
+                }))
+            }
+            EncounterRequest::Selection { agent_session } => {
+                self.require_attached(&agent_session)?;
+                let resident = self.resident(&agent_session)?;
+                let _operation = native_control_lease(&resident, native_control_deadline)?;
+                let _agency_lock = self.lock_agency(&agent_session)?;
+                ensure_native_control_deadline(native_control_deadline)?;
+                // The resident is read only as it still stands on its admitted context and model basis.
+                self.check_resident_context_inner(
+                    &agent_session,
+                    &resident,
+                    "native-selection-read",
+                    Some(native_control_deadline),
+                )?;
+                ensure_native_control_deadline(native_control_deadline)?;
+                let identity = resident.host.identity(&agent_session)?;
+                Ok(json!({
+                    "agent_session":agent_session,
+                    "space":resident.space,
+                    "native_session_id":identity.binding.native_session_id,
+                    "model_observation":identity.binding.model_observation,
+                    "provider":resident.provider,
+                    "protocol":resident.protocol,
+                    "body_basis":resident.body_basis,
+                    "model_selection":resident.model,
+                    "connection_generation":resident.generation,
+                    "resident":true,
+                    "inference_observed":false,
                 }))
             }
             EncounterRequest::ModelSelect {
@@ -3757,6 +3836,21 @@ pub fn socket_path(home: &AikitHome) -> PathBuf {
 }
 
 #[cfg(unix)]
+/// How long an owner nobody asks anything waits before it asks itself whether it serves anything
+/// (`AIKIT_ENCOUNTER_IDLE_CLOSE_SECONDS`; five minutes when unset, and `0` keeps the owner up until it
+/// is shut down). None: the owner never closes itself.
+fn idle_close_grace() -> Option<Duration> {
+    match std::env::var("AIKIT_ENCOUNTER_IDLE_CLOSE_SECONDS") {
+        Ok(seconds) => match seconds.trim().parse::<u64>() {
+            Ok(0) => None,
+            Ok(seconds) => Some(Duration::from_secs(seconds)),
+            Err(_) => Some(Duration::from_secs(300)),
+        },
+        Err(_) => Some(Duration::from_secs(300)),
+    }
+}
+
+#[cfg(unix)]
 pub fn serve(home: AikitHome, socket: &Path) -> Result<()> {
     use std::io::{BufRead, BufReader, Write};
     use std::os::unix::{fs::PermissionsExt, net::UnixListener};
@@ -3808,6 +3902,11 @@ pub fn serve(home: AikitHome, socket: &Path) -> Result<()> {
     let stop = Arc::new(AtomicBool::new(false));
     listener.set_nonblocking(true).map_err(error)?;
     let mut workers: Vec<std::thread::JoinHandle<()>> = Vec::new();
+    // An owner nobody has asked anything for the idle grace asks itself whether it serves anything
+    // (close_when_idle), once a second while that lasts, and closes when it serves nothing.
+    let idle_grace = idle_close_grace();
+    let mut asked_at = Instant::now();
+    let mut idle_checked_at = Instant::now();
     while !stop.load(Ordering::Acquire) {
         // Retire completed threads rather than accumulating one handle per IPC.
         let mut index = 0;
@@ -3821,11 +3920,25 @@ pub fn serve(home: AikitHome, socket: &Path) -> Result<()> {
         let mut stream = match listener.accept() {
             Ok((stream, _)) => stream,
             Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                if clients.load(Ordering::Acquire) > 0 {
+                    asked_at = Instant::now();
+                } else if let Some(grace) = idle_grace {
+                    if asked_at.elapsed() >= grace
+                        && idle_checked_at.elapsed() >= std::time::Duration::from_secs(1)
+                    {
+                        idle_checked_at = Instant::now();
+                        if service.close_when_idle() {
+                            stop.store(true, Ordering::Release);
+                            continue;
+                        }
+                    }
+                }
                 std::thread::sleep(std::time::Duration::from_millis(20));
                 continue;
             }
             Err(failure) => return Err(error(failure)),
         };
+        asked_at = Instant::now();
         // Accepted sockets inherit O_NONBLOCK on macOS. Workers use bounded
         // blocking reads/writes, so restore that mode before receiving a frame
         // or writing a response larger than the socket's immediate capacity.
@@ -3905,9 +4018,42 @@ pub fn serve(home: AikitHome, socket: &Path) -> Result<()> {
 }
 #[cfg(unix)]
 pub fn request(socket: &Path, request: &EncounterRequest) -> Result<Value> {
-    use std::io::{BufRead, BufReader, Read, Write};
+    exchange(
+        std::os::unix::net::UnixStream::connect(socket).map_err(error)?,
+        request,
+    )
+}
+
+/// One request to `home`'s owner at `socket`, through the one start path: an owner nobody asks
+/// closes itself (`idle_close_grace`), so a caller never counts on one another left running. When
+/// no owner takes the connection, nothing has been sent: the home's owner is started (`start`)
+/// and the request is sent once to it. An owner at a socket that is not the home's own is not
+/// this caller's to start, so its absence is answered as it is.
+#[cfg(unix)]
+pub fn reach(
+    home: &AikitHome,
+    cwd: &Path,
+    socket: &Path,
+    request: &EncounterRequest,
+) -> Result<Value> {
     use std::os::unix::net::UnixStream;
-    let mut stream = UnixStream::connect(socket).map_err(error)?;
+    let stream = match UnixStream::connect(socket) {
+        Ok(stream) => stream,
+        Err(absent) if socket != socket_path(home) => return Err(error(absent)),
+        Err(_) => {
+            start(home, cwd)?;
+            UnixStream::connect(socket).map_err(error)?
+        }
+    };
+    exchange(stream, request)
+}
+
+#[cfg(unix)]
+fn exchange(
+    mut stream: std::os::unix::net::UnixStream,
+    request: &EncounterRequest,
+) -> Result<Value> {
+    use std::io::{BufRead, BufReader, Read, Write};
     stream
         .set_read_timeout(Some(std::time::Duration::from_secs(120)))
         .map_err(error)?;
@@ -3926,6 +4072,25 @@ pub fn request(socket: &Path, request: &EncounterRequest) -> Result<Value> {
         return Err(error("Encounter response exceeds transport byte capacity"));
     }
     serde_json::from_slice(&response).map_err(error)
+}
+
+/// The AIKit binary an owner is started as, with the verb before `encounter-serve`: this
+/// process's own executable, unless `AIKIT_ENCOUNTER_OWNER_BIN` names the AIKit binary to start it
+/// with (a library caller whose own executable is not AIKit's, such as a test).
+#[cfg(unix)]
+fn owner_program() -> Result<(PathBuf, Option<&'static str>)> {
+    match std::env::var_os("AIKIT_ENCOUNTER_OWNER_BIN").filter(|named| !named.is_empty()) {
+        Some(named) => {
+            let program = PathBuf::from(named);
+            let prefix = (program.file_name().and_then(|name| name.to_str()) == Some("aikit"))
+                .then_some("session-space");
+            Ok((program, prefix))
+        }
+        None => Ok((
+            std::env::current_exe().map_err(error)?,
+            crate::session_space_verb_prefix(),
+        )),
+    }
 }
 
 /// Start the generic native owner once. No provider is opened by startup.
@@ -3947,11 +4112,14 @@ pub fn start(home: &AikitHome, cwd: &Path) -> Result<Value> {
         .open(home.state().join("encounter-owner.log"))
         .map_err(error)?;
     use std::os::unix::process::CommandExt;
-    let mut child = std::process::Command::new(std::env::current_exe().map_err(error)?)
+    let (program, prefix) = owner_program()?;
+    // The owner serves the home it was started for, whatever home its caller's environment names.
+    let mut child = std::process::Command::new(program)
         .arg("-C")
         .arg(cwd)
-        .args(crate::session_space_verb_prefix())
+        .args(prefix)
         .arg("encounter-serve")
+        .env("AIKIT_HOME", home.root())
         .stdin(std::process::Stdio::null())
         .stdout(log.try_clone().map_err(error)?)
         .stderr(log)
@@ -3981,6 +4149,31 @@ pub fn start(home: &AikitHome, cwd: &Path) -> Result<Value> {
 mod tests {
     use super::*;
     use tempfile::TempDir;
+
+    #[test]
+    fn serve_and_its_idle_grace_are_compiled_only_on_unix() {
+        // `serve` binds a Unix socket (std::os::unix) and reads the idle grace; its one caller, EncounterServe, is cfg(unix), and
+        // the crate keeps cfg(not(unix)) arms elsewhere, so a non-unix build must see neither.
+        let source = include_str!("encounter_service.rs");
+        for item in [
+            "pub fn serve(home: AikitHome",
+            "fn idle_close_grace() -> Option<Duration>",
+        ] {
+            let at = source
+                .find(item)
+                .unwrap_or_else(|| panic!("`{item}` is defined here"));
+            let attributes: Vec<&str> = source[..at]
+                .lines()
+                .rev()
+                .map(str::trim)
+                .take_while(|line| line.starts_with("#[") || line.starts_with("///"))
+                .collect();
+            assert!(
+                attributes.contains(&"#[cfg(unix)]"),
+                "`{item}` stands under #[cfg(unix)]: {attributes:?}"
+            );
+        }
+    }
 
     fn test_home() -> AikitHome {
         let temp = TempDir::new().unwrap();
