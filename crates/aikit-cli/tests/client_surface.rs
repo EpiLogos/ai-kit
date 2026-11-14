@@ -892,14 +892,24 @@ fn every_row_carries_its_model_default_skill_sets_and_instruction_files() {
         claude["guidance"],
         serde_json::json!(["~/.claude/CLAUDE.md"])
     );
+    // In a project Claude Code reads CLAUDE.md where it works and in every folder above.
+    assert_eq!(
+        claude["project_guidance"],
+        serde_json::json!({"files": ["CLAUDE.md"], "reach": "ancestors"})
+    );
     assert!(claude.get("carries_reason").is_none(), "{claude}");
     // No default for pi: it opens with its own model, and the row says none rather than borrowing another harness's.
     let pi = by_name(&rows, "pi");
     assert!(pi["model_default"].is_null(), "{pi}");
     assert_eq!(pi["skill_sets"], serde_json::json!(["foundation"]));
     assert_eq!(pi["guidance"], serde_json::json!(["~/.pi/agent/AGENTS.md"]));
+    assert_eq!(
+        pi["project_guidance"],
+        serde_json::json!({"files": ["AGENTS.md", "CLAUDE.md"], "reach": "ancestors"})
+    );
     // A slug AIKit carries no profile for reads no instruction file and is projected no skills.
     let generic = by_name(&rows, "future-harness");
     assert_eq!(generic["guidance"], serde_json::json!([]));
+    assert!(generic["project_guidance"].is_null(), "{generic}");
     assert_eq!(generic["skills"], serde_json::json!([]));
 }
