@@ -55,6 +55,13 @@ pub struct SessionNow {
     pub scratch: Option<String>,
 }
 
+/// What a session's ground says in place of its own NOW when its start opened
+/// none because its caller cannot close one (O-I #1016): `central.now.lifecycle`
+/// is an authenticated Action, and the hook holds no authority for it yet, so a
+/// NOW it opened would stay active for good.
+pub const SESSION_NOW_NOT_OPENED: &str =
+    "This session's NOW: not opened, because the hook holds no authority to close it yet (O-I #1016)";
+
 impl SessionNow {
     fn lines(&self) -> Vec<String> {
         let mut lines = vec![format!("NOW: {} (this session's own)", self.now_ref)];
@@ -135,16 +142,18 @@ impl ControlUnpushed {
 
 /// The ground of a session in the Central world that is no Project (the root
 /// itself, `Control`). With a NOW of its own the session hears that NOW, its
-/// scratch place and the Day; without one, only an unpushed Control, and
-/// otherwise nothing at all.
+/// scratch place and the Day; when its start opened none because it could not
+/// close one (`not_opened`), it hears that in the NOW's place, with the Day;
+/// otherwise only an unpushed Control, and otherwise nothing at all.
 pub fn render_root_ground(
     control_unpushed: Option<&ControlUnpushed>,
     session_now: Option<&SessionNow>,
+    not_opened: bool,
     day: Option<&CentralDayPointer>,
 ) -> Option<String> {
-    let Some(session_now) = session_now else {
+    if session_now.is_none() && !not_opened {
         return control_unpushed.map(ControlUnpushed::render_standalone);
-    };
+    }
     let mut lines = vec![
         "[Central temporal ground]".to_owned(),
         owner_line(),
@@ -154,7 +163,10 @@ pub fn render_root_ground(
     if let Some(unpushed) = control_unpushed {
         lines.push(unpushed.warning());
     }
-    lines.extend(session_now.lines());
+    match session_now {
+        Some(session_now) => lines.extend(session_now.lines()),
+        None => lines.push(SESSION_NOW_NOT_OPENED.to_owned()),
+    }
     lines.push(day_line(day));
     Some(bounded(&lines.join("\n"), MAX_RENDERED_CHARS))
 }
@@ -242,6 +254,9 @@ pub struct CentralTemporalGround {
     pub control_unpushed: Option<ControlUnpushed>,
     /// This session's own NOW, when its start allocated one.
     pub session_now: Option<SessionNow>,
+    /// The session's start opened no NOW because its caller cannot close one;
+    /// the ground says so in the NOW's place.
+    pub session_now_not_opened: bool,
 }
 
 impl CentralTemporalGround {
@@ -272,6 +287,8 @@ impl CentralTemporalGround {
         ));
         if let Some(session_now) = &self.session_now {
             lines.extend(session_now.lines());
+        } else if self.session_now_not_opened {
+            lines.push(SESSION_NOW_NOT_OPENED.to_owned());
         }
 
         if let Some(refs) = self.now.get("human_scratch").and_then(Value::as_array) {
@@ -325,6 +342,7 @@ pub fn read_central_temporal_ground<R: CommandRunner>(
         day,
         control_unpushed,
         session_now: None,
+        session_now_not_opened: false,
     }))
 }
 
@@ -840,6 +858,7 @@ mod tests {
             day: None,
             control_unpushed: None,
             session_now: None,
+            session_now_not_opened: false,
         };
         let rendered = ground.render();
         assert!(rendered.chars().count() <= MAX_RENDERED_CHARS);
@@ -960,6 +979,7 @@ mod tests {
                 now_ref: "central:now:project:example:abc".into(),
                 scratch: None,
             }),
+            session_now_not_opened: false,
         };
         let rendered = ground.render();
         assert!(rendered.chars().count() <= MAX_RENDERED_CHARS);
@@ -1502,12 +1522,44 @@ mod tests {
                 now_ref: "central:now:project:example:k1".into(),
                 scratch: Some(SCRATCH.into()),
             }),
+            session_now_not_opened: false,
         };
         let rendered = ground.render();
         assert!(rendered.contains("project: example"));
         assert!(rendered.contains("NOW: central:now:project:example:k1 (this session's own)"));
         assert!(rendered.contains(&format!("scratch: {SCRATCH}")));
         assert!(rendered.contains("Day: central:day:control:root:2026-11-13"));
+        assert!(!rendered.contains(SESSION_NOW_NOT_OPENED));
+    }
+
+    /// O-I #1016: a session whose start opened no NOW, because it could not
+    /// close one, hears that once in the NOW's place, in the
+    /// Project and in the root, and its ground is otherwise the same.
+    #[test]
+    fn a_session_whose_now_was_not_opened_hears_that_in_its_place() {
+        let day = CentralDayPointer {
+            day_ref: "central:day:control:root:2026-11-13".into(),
+            revision: None,
+        };
+        let ground = CentralTemporalGround {
+            project: "example".into(),
+            now: json!({"exists": true}),
+            day: Some(day.clone()),
+            control_unpushed: None,
+            session_now: None,
+            session_now_not_opened: true,
+        };
+        let rendered = ground.render();
+        assert!(rendered.contains("project: example"));
+        assert_eq!(rendered.matches(SESSION_NOW_NOT_OPENED).count(), 1);
+        assert!(!rendered.contains("(this session's own)"));
+        assert!(!rendered.contains("scratch:"));
+        assert!(rendered.contains("Day: central:day:control:root:2026-11-13"));
+
+        let root = render_root_ground(None, None, true, Some(&day)).unwrap();
+        assert!(root.contains("register: the Central root (no Project)"));
+        assert_eq!(root.matches(SESSION_NOW_NOT_OPENED).count(), 1);
+        assert!(root.contains("Day: central:day:control:root:2026-11-13"));
     }
 
     #[test]
@@ -1520,20 +1572,20 @@ mod tests {
             day_ref: "central:day:control:root:2026-11-13".into(),
             revision: Some("rev-day".into()),
         };
-        let rendered = render_root_ground(None, Some(&now), Some(&day)).unwrap();
+        let rendered = render_root_ground(None, Some(&now), false, Some(&day)).unwrap();
         assert!(rendered.starts_with("[Central temporal ground]"));
         assert!(rendered.contains("NOW: central:now:control:root:k2"));
         assert!(rendered.contains("Day: central:day:control:root:2026-11-13 @ rev-day"));
         assert!(!rendered.contains("project:"), "the root is no Project");
         assert!(!rendered.contains("scratch:"));
         // Without a NOW the root ground is what it was: the warning alone, or nothing.
-        assert_eq!(render_root_ground(None, None, Some(&day)), None);
+        assert_eq!(render_root_ground(None, None, false, Some(&day)), None);
         let unpushed = ControlUnpushed {
             ahead: 1,
             oldest: None,
         };
         assert_eq!(
-            render_root_ground(Some(&unpushed), None, None),
+            render_root_ground(Some(&unpushed), None, false, None),
             Some(unpushed.render_standalone())
         );
     }

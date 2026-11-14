@@ -16,7 +16,7 @@
 //! the start also opens one for it in Central, its end closes that NOW, and a
 //! resume re-enters it; the ground then names the session's own NOW and scratch
 //! place, and no other session's NOW items. The hook cannot close one yet, so
-//! it opens none.
+//! it opens none, and its ground says so in the NOW's place.
 
 use std::path::{Path, PathBuf};
 
@@ -77,20 +77,28 @@ pub fn reground<R: CommandRunner>(
         .and_then(|(ledger, session)| ledger.session_now(session))
         .filter(|held| !held.closed)
         .map(|held| held.now);
+    // Its start opened no NOW because it could not close one.
+    let not_opened = session_now.is_none()
+        && ledger
+            .zip(session.as_deref())
+            .is_some_and(|(ledger, session)| ledger.now_not_opened(session));
     let rendered = match read_central_temporal_ground(runner, &central_root, project_root) {
         Ok(Some(mut ground)) => {
             ground.session_now = session_now;
+            ground.session_now_not_opened = not_opened;
             ground.render()
         }
         Ok(None) => {
-            // The Day is read only for a root session that holds a NOW: the
+            // The Day is read only for a root session that holds a NOW, or
+            // whose start opened none because it could not close one: the
             // Control warning alone costs no Central Action.
-            let day = session_now
-                .as_ref()
-                .and_then(|_| read_day_pointer(runner, &central_root));
+            let day = (session_now.is_some() || not_opened)
+                .then(|| read_day_pointer(runner, &central_root))
+                .flatten();
             match render_root_ground(
                 read_control_unpushed(runner, &central_root).as_ref(),
                 session_now.as_ref(),
+                not_opened,
                 day.as_ref(),
             ) {
                 Some(rendered) => rendered,
@@ -215,6 +223,29 @@ impl FloorLedger {
         serde_json::from_str(&text).ok()
     }
 
+    fn not_opened_path(&self, session: &str) -> PathBuf {
+        self.dir.join(format!(
+            "{}.now-not-opened",
+            blake3::hash(session.as_bytes()).to_hex()
+        ))
+    }
+
+    /// The session's last start opened no NOW because its caller could not
+    /// close one ([`session_boundary`]'s `can_close`): its ground says so in
+    /// the NOW's place. It changes only at a start.
+    pub fn now_not_opened(&self, session: &str) -> bool {
+        self.not_opened_path(session).is_file()
+    }
+
+    fn mark_now_not_opened(&self, session: &str, not_opened: bool) {
+        let path = self.not_opened_path(session);
+        if !not_opened {
+            let _ = std::fs::remove_file(path);
+        } else if std::fs::create_dir_all(&self.dir).is_ok() {
+            let _ = std::fs::write(path, "");
+        }
+    }
+
     fn hold_session_now(&self, session: &str, held: &HeldNow) {
         if let Ok(text) = serde_json::to_string(held) {
             if std::fs::create_dir_all(&self.dir).is_ok() {
@@ -272,9 +303,10 @@ pub struct HeldNow {
 /// A session opens or re-enters a NOW only when its caller `can_close` one:
 /// Central closes a NOW only for a caller it authenticates, while allocating
 /// is open to anyone, so a session that cannot close would leave its NOW open
-/// for good. Such a session still records its start and end, and asks Central
-/// for nothing. The hook passes `false`: what authority a hook may hold is
-/// O-I #1016's to decide.
+/// for good. Such a session still records its start and end, asks Central
+/// for nothing, and raises no warning; its ground says in one line that its
+/// NOW was not opened. The hook passes `false`: what authority a hook may hold
+/// is O-I #1016's to decide.
 pub fn session_boundary<R: CommandRunner>(
     decision: &mut HookDecision,
     event: &HookEvent,
@@ -310,6 +342,9 @@ pub fn session_boundary<R: CommandRunner>(
         let Some(world) = world else {
             return;
         };
+        if let Some(ledger) = ledger {
+            ledger.mark_now_not_opened(&session, !can_close);
+        }
         if !can_close {
             return;
         }
@@ -1255,6 +1290,19 @@ mod tests {
             text.contains("Day: central:day:control:root:2026-09-23"),
             "{text}"
         );
+        // One plain line says so, in the NOW's place, and no other
+        // session's NOW items ride it.
+        assert_eq!(text.matches(SESSION_NOW_NOT_OPENED).count(), 1, "{text}");
+        assert!(!text.contains("another session's handoff"), "{text}");
+
+        // The prompt turn after it is quiet: nothing changed.
+        let prompt = hook_at(
+            PROJECT,
+            HookEventKind::UserPromptSubmit,
+            json!({"session_id": "sess-1"}),
+        );
+        let turn = dispatch_holding(&prompt, Some(&world), &home, &ledger, &runner, false);
+        assert!(turn.injected.is_empty(), "{}", turn.injected_text());
 
         // Its end is recorded, and nothing of its own is looked for or closed.
         let end = hook_at(
@@ -1641,6 +1689,116 @@ mod tests {
         let text = result.injected_text();
         assert!(text.contains("register: the Central root (no Project)"));
         assert!(text.contains("NOW: central:now:control:root:k2"));
+        assert!(text.contains("Day: central:day:control:root:2026-09-23"));
+    }
+
+    // ---- The ground of a session that opened no NOW (O-I #1016) -----------
+
+    use aikit_adapters::central_temporal::SESSION_NOW_NOT_OPENED;
+
+    /// A session that could not close a NOW and is resumed by a caller that
+    /// can opens its NOW then, and its ground stops saying it was not opened.
+    /// One that can from its first start allocates as before, and its ground
+    /// never says it.
+    #[test]
+    fn a_session_that_can_close_a_now_opens_one_and_its_ground_names_it() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = AikitHome::at(temp.path());
+        let ledger = FloorLedger::in_state(&home.state());
+        let runner = owner_runner_listing(&[&success(json!({"records": []}))]);
+        let world = example_world();
+        let at = |session: &str, kind: HookEventKind, source: &str| {
+            hook_at(
+                PROJECT,
+                kind,
+                json!({"session_id": session, "source": source}),
+            )
+        };
+
+        let opened = dispatch_holding(
+            &at("sess-1", HookEventKind::SessionStart, "startup"),
+            Some(&world),
+            &home,
+            &ledger,
+            &runner,
+            true,
+        );
+        assert!(opened.warnings.is_empty(), "{:?}", opened.warnings);
+        let allocations = calls_of(&runner, "central.now.allocate");
+        assert_eq!(allocations.len(), 1);
+        assert!(allocations[0].contains("\"task_ref\":\"aikit:session:claude:sess-1\""));
+        let text = opened.injected_text();
+        assert!(text.contains(&format!("NOW: {NOW_REF} (this session's own)")));
+        assert!(!text.contains(SESSION_NOW_NOT_OPENED), "{text}");
+
+        let unopened = dispatch_holding(
+            &at("sess-2", HookEventKind::SessionStart, "startup"),
+            Some(&world),
+            &home,
+            &ledger,
+            &runner,
+            false,
+        );
+        assert!(unopened.injected_text().contains(SESSION_NOW_NOT_OPENED));
+        assert!(ledger.now_not_opened("sess-2"));
+        assert_eq!(calls_of(&runner, "central.now.allocate").len(), 1);
+        dispatch_holding(
+            &at("sess-2", HookEventKind::SessionEnd, "exit"),
+            Some(&world),
+            &home,
+            &ledger,
+            &runner,
+            false,
+        );
+        let resumed = dispatch_holding(
+            &at("sess-2", HookEventKind::SessionStart, "resume"),
+            Some(&world),
+            &home,
+            &ledger,
+            &runner,
+            true,
+        );
+        assert!(resumed.warnings.is_empty(), "{:?}", resumed.warnings);
+        let allocations = calls_of(&runner, "central.now.allocate");
+        assert_eq!(allocations.len(), 2);
+        assert!(allocations[1].contains("\"task_ref\":\"aikit:session:claude:sess-2\""));
+        assert!(ledger.session_now("sess-2").is_some());
+        assert!(!ledger.now_not_opened("sess-2"));
+        let text = resumed.injected_text();
+        assert!(text.contains(&format!("NOW: {NOW_REF} (this session's own)")));
+        assert!(!text.contains(SESSION_NOW_NOT_OPENED), "{text}");
+    }
+
+    /// A root session that cannot close a NOW hears the root ground with the
+    /// Day and the line that says its NOW was not opened; no NOW Action is
+    /// asked of Central.
+    #[test]
+    fn a_root_session_that_cannot_close_a_now_hears_it_was_not_opened() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = AikitHome::at(temp.path());
+        let ledger = FloorLedger::in_state(&home.state());
+        let runner = ScriptedRunner::new().on("central.day.read", &day());
+        let world = SessionWorld {
+            central_root: CENTRAL.into(),
+            project: None,
+        };
+        let start = hook_at(
+            CENTRAL,
+            HookEventKind::SessionStart,
+            json!({"session_id": "sess-1"}),
+        );
+        let result = dispatch_holding(&start, Some(&world), &home, &ledger, &runner, false);
+        assert!(result.warnings.is_empty(), "{:?}", result.warnings);
+        for action in [
+            "central.now.allocate",
+            "central.now.list",
+            "central.now.lifecycle",
+        ] {
+            assert!(calls_of(&runner, action).is_empty(), "{action} was asked");
+        }
+        let text = result.injected_text();
+        assert!(text.contains("register: the Central root (no Project)"));
+        assert_eq!(text.matches(SESSION_NOW_NOT_OPENED).count(), 1, "{text}");
         assert!(text.contains("Day: central:day:control:root:2026-09-23"));
     }
 }

@@ -27,6 +27,25 @@ pub fn merge_hook_map_entries(
     client: &str,
     matchers: MatcherPolicy,
 ) -> Result<String> {
+    merge_hook_map_entries_with_timeouts(
+        existing,
+        events,
+        client,
+        matchers,
+        &crate::layers::no_timeouts,
+    )
+}
+
+/// [`merge_hook_map_entries`], with a `timeout` (seconds) on the entry of each
+/// event `timeouts` names one for; every other entry keeps the harness's
+/// default.
+pub fn merge_hook_map_entries_with_timeouts(
+    existing: Option<&str>,
+    events: &[(HookEventKind, String)],
+    client: &str,
+    matchers: MatcherPolicy,
+    timeouts: &dyn Fn(&HookEventKind) -> Option<u64>,
+) -> Result<String> {
     let document = parse_existing_document(existing, |e| {
         AikitError::new(
             "client.settings_unreadable",
@@ -36,8 +55,9 @@ pub fn merge_hook_map_entries(
             ),
         )
     })?;
-    let (merged, _report) = crate::layers::claude_hook_map(&document, events, matchers, client)
-        .map_err(AikitError::from)?;
+    let (merged, _report) =
+        crate::layers::claude_hook_map_with_timeouts(&document, events, matchers, client, timeouts)
+            .map_err(AikitError::from)?;
     render_document(&merged, |e| {
         AikitError::new(
             "client.settings_unreadable",

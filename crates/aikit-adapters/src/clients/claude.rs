@@ -383,18 +383,32 @@ impl ClaudeAdapter {
 // Settings merging
 // ---------------------------------------------------------------------------
 
+/// The budget, in seconds, AIKit's `SessionEnd` entry carries. Claude Code
+/// gives a SessionEnd hook 1.5 seconds unless the entry names a `timeout` (up
+/// to 60); the dispatch records the session's end and runs `ctrl` to close its
+/// NOW in Central (O-I #1016), which can outlast 1.5 seconds.
+pub const SESSION_END_TIMEOUT_SECS: u64 = 15;
+
+/// The `timeout` each event's dispatcher entry carries: `SessionEnd` alone
+/// names one; every other event keeps Claude Code's default.
+fn dispatcher_timeout(event: &HookEventKind) -> Option<u64> {
+    (*event == HookEventKind::SessionEnd).then_some(SESSION_END_TIMEOUT_SECS)
+}
+
 /// Merge AIKit's dispatcher entries into a settings document.
 ///
 /// Delegates to the shared Claude-grammar merge with claude-code's matcher
-/// policy: tool names match against a glob, and `*` is its match-all.
+/// policy (tool names match against a glob, and `*` is its match-all) and
+/// SessionEnd's budget ([`SESSION_END_TIMEOUT_SECS`]).
 pub fn merge_dispatcher_entries(
     existing: Option<&str>,
     events: &DescriptorEvents,
 ) -> Result<String> {
-    super::hook_map::merge_hook_map_entries(
+    super::hook_map::merge_hook_map_entries_with_timeouts(
         existing,
         events,
         CLIENT,
         super::hook_map::MatcherPolicy::StarForTools,
+        &dispatcher_timeout,
     )
 }
