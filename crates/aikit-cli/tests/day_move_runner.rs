@@ -880,7 +880,11 @@ fn close_calls_close_carry_and_gives_its_state_and_the_carry_proposal() {
     assert_eq!(gave["proposals"].as_array().unwrap().len(), 2, "{gave}");
     assert_eq!(world.day(&closing)["temporal"]["lifecycle"], "closed");
     let returns = world.returns();
-    assert_eq!(returns.len(), 2);
+    assert_eq!(
+        returns.len(),
+        2,
+        "the summary and the carry, each filed once"
+    );
     let carry = returns
         .iter()
         .find(|record| record["proposal"]["field_id"] == "p0_quick_thoughts")
@@ -890,7 +894,21 @@ fn close_calls_close_carry_and_gives_its_state_and_the_carry_proposal() {
         .unwrap()
         .contains("harbour map"));
     assert_eq!(carry["document_id"], "day:tomorrow");
-    assert_eq!(carry["declared_producer"]["ref"], "agent:the-day:test");
+    // Central filed the carry itself, as the close's own (Central #364), on the
+    // credential that closed the Day; the run names the Return Central filed.
+    assert_eq!(carry["author"]["principal_ref"], SERVICE, "{carry}");
+    assert!(
+        gave["proposals"]
+            .as_array()
+            .unwrap()
+            .contains(&carry["return_ref"]),
+        "{gave} names {}",
+        carry["return_ref"]
+    );
+    assert!(
+        summary.contains("Central filed it as a proposal for tomorrow's face 0"),
+        "{summary}"
+    );
     let summary_proposal = returns
         .iter()
         .find(|record| record["proposal"]["field_id"] == "p5_synthesis")
