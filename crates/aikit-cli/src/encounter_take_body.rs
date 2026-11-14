@@ -641,10 +641,11 @@ pub struct TakeBody {
 #[cfg(unix)]
 impl TakeBody {
     pub fn new(home: AikitHome, own: ResourceRef, socket: PathBuf, turn_timeout: Duration) -> Self {
+        let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
         Self {
+            owner: ResidentOwner::at(home.clone(), cwd, socket),
             home,
             own,
-            owner: ResidentOwner::at(socket),
             turn_timeout,
             preflighted: false,
             opened: None,

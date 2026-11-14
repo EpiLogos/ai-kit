@@ -18,6 +18,7 @@
 //! (release the body, prompt it again) finds the body idle.
 use crate::encounter_service::EncounterRequest;
 use aikit_core::ResourceRef;
+use aikit_store::AikitHome;
 use serde_json::Value;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
@@ -60,27 +61,31 @@ pub struct TurnAnswer {
     pub usage: Option<Value>,
 }
 
-/// The resident encounter owner at its socket.
+/// The resident encounter owner of a home, at its socket: reached through the
+/// one start path, so a turn never counts on an owner another left running.
 #[derive(Debug, Clone)]
 pub struct ResidentOwner {
+    pub home: AikitHome,
+    /// Where an owner started for this caller works from (`-C`).
+    pub cwd: PathBuf,
     pub socket: PathBuf,
 }
 
 #[cfg(unix)]
 impl ResidentOwner {
-    pub fn at(socket: PathBuf) -> Self {
-        Self { socket }
+    pub fn at(home: AikitHome, cwd: PathBuf, socket: PathBuf) -> Self {
+        Self { home, cwd, socket }
     }
 
     /// One request; the owner's refusal comes back as an `OwnerError`.
     pub fn call(&self, request: &EncounterRequest) -> Result<Value, OwnerError> {
         let response =
-            crate::encounter_service::request(&self.socket, request).map_err(|error| {
-                OwnerError {
+            crate::encounter_service::reach(&self.home, &self.cwd, &self.socket, request).map_err(
+                |error| OwnerError {
                     code: error.code().to_owned(),
                     message: error.message().to_owned(),
-                }
-            })?;
+                },
+            )?;
         if response["ok"] != true {
             return Err(OwnerError {
                 code: response["error"]["code"]

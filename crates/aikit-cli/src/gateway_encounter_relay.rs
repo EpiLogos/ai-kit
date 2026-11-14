@@ -49,7 +49,8 @@ const RELAY_TIMEOUT: Duration = Duration::from_secs(25);
 /// How long a peer's advertised features are trusted before it is asked again.
 const FEATURE_TTL: Duration = Duration::from_secs(30);
 
-/// This Workcell's encounter owner, reached for a peer gateway.
+/// This Workcell's encounter owner, reached for a peer gateway (and started for it when none
+/// answers).
 pub struct OwnerEncounterRelay {
     pub home: AikitHome,
 }
@@ -73,9 +74,13 @@ impl GatewayEncounterRelay for OwnerEncounterRelay {
                     ),
                 )
             })?;
+        // The owner is reached through the one start path: one nobody asked has closed itself.
         #[cfg(unix)]
         {
-            crate::encounter_service::request(
+            let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+            crate::encounter_service::reach(
+                &self.home,
+                &cwd,
                 &crate::encounter_service::socket_path(&self.home),
                 &request,
             )

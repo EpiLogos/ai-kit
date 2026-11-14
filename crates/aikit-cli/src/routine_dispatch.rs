@@ -395,9 +395,10 @@ fn decode_action_output(output: &Output, argv: &[String]) -> Result<Value> {
 }
 
 /// Production run execution: dispatch into the resident encounter owner at the
-/// well-known socket. A run whose owner is unreachable or whose open/send
-/// fails is an honest `Failed`/`Unreturned` outcome — recorded, never retried
-/// into new work.
+/// well-known socket, reached through the one start path (an owner nobody asks
+/// closes itself, so none is counted on). A run whose owner cannot be started,
+/// or whose open/send fails, is an honest `Unreturned`/`Failed` outcome —
+/// recorded, never retried into new work.
 pub struct ResidentEncounterRunner {
     pub home: aikit_store::AikitHome,
 }
@@ -421,13 +422,15 @@ fn resident_request(
 impl RoutineRunner for ResidentEncounterRunner {
     fn run(&self, request: RoutineRunRequest) -> RoutineRunOutcome {
         let socket = crate::encounter_service::socket_path(&self.home);
-        if !socket.exists() {
+        let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+        if let Err(error) = crate::encounter_service::start(&self.home, &cwd) {
             return RoutineRunOutcome {
                 status: RunStatus::Unreturned,
                 detail: format!(
-                    "no resident encounter owner is running at {}; the admitted run is recorded \
-                     but was not executed",
-                    socket.display()
+                    "no resident encounter owner could be started at {}: {}; the admitted run \
+                     is recorded but was not executed",
+                    socket.display(),
+                    error.message()
                 ),
             };
         }
@@ -463,7 +466,7 @@ impl RoutineRunner for ResidentEncounterRunner {
             space: space.clone(),
             agent_session: agent_session.clone(),
             provider,
-            cwd: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+            cwd,
         };
         if let Err(error) = resident_request(&socket, &open) {
             return RoutineRunOutcome {

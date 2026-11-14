@@ -3970,9 +3970,42 @@ pub fn serve(home: AikitHome, socket: &Path) -> Result<()> {
 }
 #[cfg(unix)]
 pub fn request(socket: &Path, request: &EncounterRequest) -> Result<Value> {
-    use std::io::{BufRead, BufReader, Read, Write};
+    exchange(
+        std::os::unix::net::UnixStream::connect(socket).map_err(error)?,
+        request,
+    )
+}
+
+/// One request to `home`'s owner at `socket`, through the one start path: an owner nobody asks
+/// closes itself (`idle_close_grace`), so a caller never counts on one another left running. When
+/// no owner takes the connection, nothing has been sent: the home's owner is started (`start`)
+/// and the request is sent once to it. An owner at a socket that is not the home's own is not
+/// this caller's to start, so its absence is answered as it is.
+#[cfg(unix)]
+pub fn reach(
+    home: &AikitHome,
+    cwd: &Path,
+    socket: &Path,
+    request: &EncounterRequest,
+) -> Result<Value> {
     use std::os::unix::net::UnixStream;
-    let mut stream = UnixStream::connect(socket).map_err(error)?;
+    let stream = match UnixStream::connect(socket) {
+        Ok(stream) => stream,
+        Err(absent) if socket != socket_path(home) => return Err(error(absent)),
+        Err(_) => {
+            start(home, cwd)?;
+            UnixStream::connect(socket).map_err(error)?
+        }
+    };
+    exchange(stream, request)
+}
+
+#[cfg(unix)]
+fn exchange(
+    mut stream: std::os::unix::net::UnixStream,
+    request: &EncounterRequest,
+) -> Result<Value> {
+    use std::io::{BufRead, BufReader, Read, Write};
     stream
         .set_read_timeout(Some(std::time::Duration::from_secs(120)))
         .map_err(error)?;
@@ -3991,6 +4024,25 @@ pub fn request(socket: &Path, request: &EncounterRequest) -> Result<Value> {
         return Err(error("Encounter response exceeds transport byte capacity"));
     }
     serde_json::from_slice(&response).map_err(error)
+}
+
+/// The AIKit binary an owner is started as, with the verb before `encounter-serve`: this
+/// process's own executable, unless `AIKIT_ENCOUNTER_OWNER_BIN` names the AIKit binary to start it
+/// with (a library caller whose own executable is not AIKit's, such as a test).
+#[cfg(unix)]
+fn owner_program() -> Result<(PathBuf, Option<&'static str>)> {
+    match std::env::var_os("AIKIT_ENCOUNTER_OWNER_BIN").filter(|named| !named.is_empty()) {
+        Some(named) => {
+            let program = PathBuf::from(named);
+            let prefix = (program.file_name().and_then(|name| name.to_str()) == Some("aikit"))
+                .then_some("session-space");
+            Ok((program, prefix))
+        }
+        None => Ok((
+            std::env::current_exe().map_err(error)?,
+            crate::session_space_verb_prefix(),
+        )),
+    }
 }
 
 /// Start the generic native owner once. No provider is opened by startup.
@@ -4012,11 +4064,14 @@ pub fn start(home: &AikitHome, cwd: &Path) -> Result<Value> {
         .open(home.state().join("encounter-owner.log"))
         .map_err(error)?;
     use std::os::unix::process::CommandExt;
-    let mut child = std::process::Command::new(std::env::current_exe().map_err(error)?)
+    let (program, prefix) = owner_program()?;
+    // The owner serves the home it was started for, whatever home its caller's environment names.
+    let mut child = std::process::Command::new(program)
         .arg("-C")
         .arg(cwd)
-        .args(crate::session_space_verb_prefix())
+        .args(prefix)
         .arg("encounter-serve")
+        .env("AIKIT_HOME", home.root())
         .stdin(std::process::Stdio::null())
         .stdout(log.try_clone().map_err(error)?)
         .stderr(log)
